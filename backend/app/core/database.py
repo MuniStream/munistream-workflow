@@ -1,0 +1,56 @@
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+from typing import Optional
+
+from ..core.config import settings
+from ..models.workflow import (
+    WorkflowDefinition,
+    WorkflowStep,
+    WorkflowInstance,
+    StepExecution,
+    ApprovalRequest,
+    WorkflowAuditLog,
+    IntegrationLog
+)
+
+
+class Database:
+    client: Optional[AsyncIOMotorClient] = None
+    database = None
+
+
+database = Database()
+
+
+async def connect_to_mongo():
+    """Create database connection"""
+    database.client = AsyncIOMotorClient(settings.MONGODB_URL)
+    database.database = database.client[settings.MONGODB_DB_NAME]
+    
+    # Initialize Beanie with the models
+    await init_beanie(
+        database=database.database,
+        document_models=[
+            WorkflowDefinition,
+            WorkflowStep,
+            WorkflowInstance,
+            StepExecution,
+            ApprovalRequest,
+            WorkflowAuditLog,
+            IntegrationLog
+        ]
+    )
+    
+    print(f"Connected to MongoDB: {settings.MONGODB_URL}")
+
+
+async def close_mongo_connection():
+    """Close database connection"""
+    if database.client:
+        database.client.close()
+        print("Disconnected from MongoDB")
+
+
+async def get_database():
+    """Get database instance"""
+    return database.database

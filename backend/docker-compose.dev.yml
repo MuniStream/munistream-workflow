@@ -1,0 +1,23 @@
+# Development overrides for docker-compose.yml
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      - DEBUG=true
+      - RELOAD=true
+    volumes:
+      - ./app:/app/app  # Live code reloading
+      - ./tests:/app/tests
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    
+  mongodb:
+    ports:
+      - "27017:27017"  # Expose MongoDB for direct connection from IDE
+    
+  redis:
+    ports:
+      - "6379:6379"  # Expose Redis for direct connection
