@@ -12,6 +12,7 @@ from ..models.workflow import (
     WorkflowAuditLog,
     IntegrationLog
 )
+from ..models.document import DocumentModel, DocumentFolderModel, DocumentShareModel
 
 
 class Database:
@@ -37,7 +38,10 @@ async def connect_to_mongo():
             StepExecution,
             ApprovalRequest,
             WorkflowAuditLog,
-            IntegrationLog
+            IntegrationLog,
+            DocumentModel,
+            DocumentFolderModel,
+            DocumentShareModel
         ]
     )
     

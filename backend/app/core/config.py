@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     BLOCKCHAIN_API_URL: Optional[str] = None
     BLOCKCHAIN_API_KEY: Optional[str] = None
     
+    # Document Storage
+    DOCUMENT_STORAGE_PATH: str = "./storage/documents"
+    MAX_DOCUMENT_SIZE_MB: int = 50
+    DOCUMENT_BASE_URL: Optional[str] = None  # For serving files
+    
     class Config:
         env_file = ".env"
         case_sensitive = True

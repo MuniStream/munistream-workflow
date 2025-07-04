@@ -81,10 +81,20 @@ step_registry = StepRegistry()
 def register_example_workflows():
     """Register example workflows with the registry"""
     from .examples.citizen_registration import create_citizen_registration_workflow
+    from .examples.citizen_registration_with_docs import create_citizen_registration_with_documents_workflow
+    from .examples.building_permit import create_building_permit_workflow
     
     # Register citizen registration workflow
     citizen_workflow = create_citizen_registration_workflow()
     step_registry.register_workflow(citizen_workflow)
+    
+    # Register document-enhanced citizen registration workflow
+    citizen_docs_workflow = create_citizen_registration_with_documents_workflow()
+    step_registry.register_workflow(citizen_docs_workflow)
+    
+    # Register building permit workflow
+    permit_workflow = create_building_permit_workflow()
+    step_registry.register_workflow(permit_workflow)
     
     # You can add more example workflows here
     # from .examples.business_license import create_business_license_workflow
