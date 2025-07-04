@@ -363,6 +363,36 @@ async def list_steps(
     }
 
 
+@router.get("/stats")
+async def get_workflow_stats():
+    """Get overall workflow statistics"""
+    try:
+        # Mock data for now - in production this would come from database
+        stats = {
+            "total_instances": 42,
+            "active_instances": 8,
+            "completed_today": 15,
+            "avg_completion_time_hours": 2.5,
+            "success_rate": 0.92,
+            "by_workflow": {
+                "citizen_registration_v1": 15,
+                "citizen_registration_with_docs_v1": 12,
+                "building_permit_v1": 15
+            },
+            "by_status": {
+                "running": 8,
+                "completed": 28,
+                "failed": 4,
+                "paused": 2
+            }
+        }
+        
+        return stats
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
+
+
 @router.get("/health")
 async def performance_service_health():
     """Health check for performance monitoring service"""

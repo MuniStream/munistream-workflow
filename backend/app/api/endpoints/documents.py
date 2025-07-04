@@ -25,10 +25,19 @@ from ...core.config import settings
 router = APIRouter()
 security = HTTPBearer()
 
+# Test endpoint without auth
+@router.get("/test")
+async def test_endpoint():
+    return {"message": "Documents API is working"}
+
 # Dependency to get current user (simplified)
 async def get_current_user(token: str = Depends(security)):
     # In real implementation, decode JWT token and get user
     return {"user_id": "user123", "role": "citizen"}
+
+# Simplified dependency for demo
+async def get_current_user_optional():
+    return {"user_id": "demo_user", "role": "citizen"}
 
 async def get_current_admin(token: str = Depends(security)):
     # In real implementation, verify admin role
@@ -252,6 +261,52 @@ async def verify_document(
     )
 
 
+@router.post("/{document_id}/analyze", response_model=dict)
+async def analyze_document(
+    document_id: str,
+    current_admin: dict = Depends(get_current_admin)
+):
+    """Perform enhanced AI analysis on a document (admin only)"""
+    
+    document = await document_service.get_document(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Perform enhanced verification analysis
+    verification_result = await document_service.verification_service.auto_verify_document(document)
+    
+    # Update document metadata with verification results
+    document.metadata.confidence_score = verification_result.get("confidence_score", 0.0)
+    document.metadata.fraud_detection_score = verification_result.get("fraud_detection_score", 0.0)
+    document.metadata.quality_score = verification_result.get("quality_score", 0.0)
+    
+    # Add extracted data to metadata
+    if verification_result.get("extracted_data"):
+        document.metadata.extracted_data.update(verification_result["extracted_data"])
+    
+    # Store analysis results in metadata
+    verification_analysis = {
+        "analyzed_at": datetime.utcnow().isoformat(),
+        "analyzed_by": current_admin["user_id"],
+        "overall_score": verification_result.get("overall_verification_score", 0.0),
+        "verification_decision": verification_result.get("verification_decision", "manual_review"),
+        "security_features": verification_result.get("security_features", {}),
+        "quality_metrics": verification_result.get("quality_metrics", {}),
+        "fraud_indicators": verification_result.get("fraud_indicators", []),
+        "recommendations": verification_result.get("recommendations", [])
+    }
+    document.metadata.extracted_data["verification_analysis"] = verification_analysis
+    
+    await document.save()
+    
+    return {
+        "document_id": document_id,
+        "analysis_complete": True,
+        "analysis_timestamp": datetime.utcnow().isoformat(),
+        **verification_result
+    }
+
+
 @router.post("/{document_id}/sign", response_model=DocumentResponse)
 async def sign_document(
     document_id: str,
@@ -306,7 +361,34 @@ async def get_document_folder(
     )
 
 
-@router.get("/stats/", response_model=DocumentStatsResponse)
+@router.get("/stats")
+async def get_document_stats_public():
+    """Get public document statistics"""
+    # Mock data for dashboard
+    return {
+        "total_documents": 156,
+        "pending_verification": 12,
+        "verified_today": 28,
+        "by_type": {
+            "national_id": 45,
+            "passport": 23,
+            "proof_of_address": 34,
+            "bank_statement": 18,
+            "permit": 15,
+            "other": 21
+        },
+        "by_status": {
+            "uploaded": 12,
+            "pending_verification": 8,
+            "verified": 128,
+            "rejected": 6,
+            "expired": 2
+        },
+        "storage_usage_mb": 2456.7
+    }
+
+
+@router.get("/stats/user", response_model=DocumentStatsResponse)
 async def get_document_stats(
     current_user: dict = Depends(get_current_user)
 ):

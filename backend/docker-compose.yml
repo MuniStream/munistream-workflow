@@ -55,9 +55,6 @@ services:
       # Security
       SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
       
-      # CORS
-      BACKEND_CORS_ORIGINS: '["http://localhost:3000","http://localhost:8080","http://localhost:5173"]'
-      
       # Optional services
       REDIS_URL: redis://redis:6379
     ports:
