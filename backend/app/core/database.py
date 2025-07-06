@@ -13,6 +13,7 @@ from ..models.workflow import (
     IntegrationLog
 )
 from ..models.document import DocumentModel, DocumentFolderModel, DocumentShareModel
+from ..models.user import UserModel, RefreshTokenModel
 
 
 class Database:
@@ -41,7 +42,9 @@ async def connect_to_mongo():
             IntegrationLog,
             DocumentModel,
             DocumentFolderModel,
-            DocumentShareModel
+            DocumentShareModel,
+            UserModel,
+            RefreshTokenModel
         ]
     )
     

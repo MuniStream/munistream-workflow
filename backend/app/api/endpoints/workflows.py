@@ -14,11 +14,12 @@ from ...schemas.workflow import (
 )
 from ...workflows.workflow import Workflow
 from ...workflows.examples.citizen_registration import create_citizen_registration_workflow
+from ...workflows.registry import step_registry
 
 router = APIRouter()
 
-# In-memory storage for demo (will be replaced with MongoDB)
-workflows_db = {}
+# Use the global step registry instead of local storage
+workflows_db = step_registry._workflows
 
 
 def convert_workflow_to_response(workflow: Workflow) -> WorkflowResponse:
