@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core.config import settings
 from .core.database import connect_to_mongo, close_mongo_connection
 from .api.api import api_router
+from .services.workflow_service import WorkflowService
+from .workflows.registry import step_registry
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -47,10 +49,57 @@ async def debug_cors():
     }
 
 
+async def sync_programmatic_workflows():
+    """Sync programmatic workflows from registry to database"""
+    try:
+        # Get all workflows from the registry
+        registry_workflows = step_registry.list_workflows()
+        
+        for workflow_info in registry_workflows:
+            workflow_id = workflow_info["workflow_id"]
+            workflow = step_registry.get_workflow(workflow_id)
+            
+            if workflow:
+                print(f"Syncing workflow: {workflow_id}")
+                
+                # Check if workflow definition exists in database
+                existing_def = await WorkflowService.get_workflow_definition(workflow_id)
+                
+                if not existing_def:
+                    # Create workflow definition
+                    await WorkflowService.create_workflow_definition(
+                        workflow_id=workflow.workflow_id,
+                        name=workflow.name,
+                        description=workflow.description,
+                        version="1.0.0"
+                    )
+                    print(f"Created workflow definition: {workflow_id}")
+                
+                # Sync workflow steps to database
+                await WorkflowService.save_workflow_steps(workflow_id, workflow)
+                print(f"Synced {len(workflow.steps)} steps for workflow: {workflow_id}")
+                
+                # Update start step if defined
+                if workflow.start_step:
+                    current_def = await WorkflowService.get_workflow_definition(workflow_id)
+                    if current_def:
+                        await WorkflowService.update_workflow_definition(
+                            workflow_id, 
+                            {"start_step_id": workflow.start_step.step_id}
+                        )
+        
+        print("Workflow synchronization completed successfully")
+        
+    except Exception as e:
+        print(f"Error syncing workflows: {e}")
+        # Don't raise to prevent app startup failure
+
+
 # Database events
 @app.on_event("startup")
 async def startup_event():
     await connect_to_mongo()
+    await sync_programmatic_workflows()
 
 
 @app.on_event("shutdown")

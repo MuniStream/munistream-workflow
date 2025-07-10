@@ -124,3 +124,122 @@ class ApprovalRequest(BaseModel):
     decision: str  # "approved" or "rejected"
     comments: Optional[str] = None
     approver_id: str
+
+
+class InstanceProgressResponse(BaseModel):
+    instance_id: str
+    workflow_id: str
+    progress_percentage: float
+    total_steps: int
+    completed_steps: int
+    failed_steps: int
+    pending_steps: int
+    current_step: Optional[str]
+    status: InstanceStatus
+    total_duration_seconds: float
+    started_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime]
+    current_bottleneck: Optional[Dict[str, Any]]
+    pending_approvals_count: int
+    estimated_completion: Optional[datetime]
+
+
+class ActiveInstanceSummary(BaseModel):
+    instance_id: str
+    workflow_id: str
+    workflow_name: str
+    user_id: str
+    status: InstanceStatus
+    current_step: Optional[str]
+    progress_percentage: float
+    started_at: datetime
+    updated_at: datetime
+    pending_approvals: int
+
+
+class ActiveInstancesResponse(BaseModel):
+    active_instances: List[ActiveInstanceSummary]
+    total_active: int
+
+
+class BottleneckAnalysis(BaseModel):
+    step_id: str
+    total_executions: int
+    avg_duration: float
+    failure_rate: float
+    failed_executions: int
+
+
+class StuckInstance(BaseModel):
+    instance_id: str
+    workflow_name: str
+    current_step: str
+    stuck_duration: float
+    user_id: str
+
+
+class BottleneckAnalysisResponse(BaseModel):
+    bottlenecks: List[BottleneckAnalysis]
+    stuck_instances: List[StuckInstance]
+    analysis_period_days: int
+    total_executions_analyzed: int
+
+
+class StepExecutionHistory(BaseModel):
+    step_id: str
+    execution_id: str
+    status: str
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    duration_seconds: Optional[float]
+    inputs: Dict[str, Any]
+    outputs: Dict[str, Any]
+    error_message: Optional[str]
+    retry_count: int
+
+
+class InstanceHistoryResponse(BaseModel):
+    instance_id: str
+    workflow_id: str
+    history: List[StepExecutionHistory]
+    current_step: Optional[str]
+    overall_status: str
+    completed_steps: List[str]
+    failed_steps: List[str]
+    pending_approvals: List[str]
+
+
+class StepCreate(BaseModel):
+    step_id: str
+    name: str
+    step_type: StepType
+    description: Optional[str] = None
+    required_inputs: List[str] = Field(default_factory=list)
+    optional_inputs: List[str] = Field(default_factory=list)
+    next_steps: List[str] = Field(default_factory=list)
+
+
+class StepUpdate(BaseModel):
+    name: Optional[str] = None
+    step_type: Optional[StepType] = None
+    description: Optional[str] = None
+    required_inputs: Optional[List[str]] = None
+    optional_inputs: Optional[List[str]] = None
+    next_steps: Optional[List[str]] = None
+
+
+class StepResponse(BaseModel):
+    step_id: str
+    workflow_id: str
+    name: str
+    step_type: StepType
+    description: Optional[str]
+    required_inputs: List[str]
+    optional_inputs: List[str]
+    next_steps: List[str]
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        use_enum_values = True
