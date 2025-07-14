@@ -120,7 +120,9 @@ class WorkflowService:
                 required_inputs=step.required_inputs,
                 optional_inputs=step.optional_inputs,
                 next_steps=[s.step_id for s in step.next_steps],
-                configuration=configuration
+                configuration=configuration,
+                requires_citizen_input=getattr(step, 'requires_citizen_input', False),
+                input_form=getattr(step, 'input_form', {})
             )
             
             steps.append(workflow_step)

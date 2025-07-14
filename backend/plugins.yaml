@@ -1,0 +1,12 @@
+plugins:
+  - name: aquabilidad-workflows
+    repo_url: https://github.com/aquabilidad/aquabilidad-workflows.git
+    enabled: true
+    version: 1.0.0
+    workflows:
+      - module: aquabilidad.fishing_workflows
+        function: create_fishing_permit_workflow
+      - module: aquabilidad.fishing_workflows  
+        function: create_catch_reporting_workflow
+      - module: aquabilidad.fishing_workflows
+        function: create_traceability_workflow

@@ -17,6 +17,10 @@ class WorkflowStep(Document):
     next_steps: List[str] = Field(default_factory=list, description="Next step IDs")
     configuration: Dict[str, Any] = Field(default_factory=dict, description="Step-specific configuration")
     
+    # Citizen input fields
+    requires_citizen_input: bool = Field(default=False, description="Whether this step requires citizen input")
+    input_form: Dict[str, Any] = Field(default_factory=dict, description="Form configuration for citizen input")
+    
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

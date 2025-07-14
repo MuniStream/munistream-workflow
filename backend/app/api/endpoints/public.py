@@ -4,22 +4,26 @@ These endpoints are used by the citizen portal for browsing workflows.
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request, BackgroundTasks
 from datetime import datetime
 
 from ...workflows.registry import step_registry
+from ...core.locale import get_locale_from_request
+from ...core.i18n import t
 
 router = APIRouter()
 
 
 @router.get("/workflows")
 async def get_public_workflows(
+    request: Request,
     category: Optional[str] = Query(None, description="Filter by category"),
     query: Optional[str] = Query(None, description="Search query"),
     sort_by: Optional[str] = Query("name", description="Sort by: name, duration, popularity"),
     sort_order: Optional[str] = Query("asc", description="Sort order: asc, desc")
 ):
     """Get all public workflows available for citizens to browse"""
+    locale = get_locale_from_request(request)
     
     # Get workflows from registry (these are the coded workflows)
     registry_workflows = step_registry.list_workflows()
@@ -83,10 +87,25 @@ async def get_public_workflows(
                 "requirements": getattr(step, 'required_inputs', [])
             })
         
+        # Translate workflow name and description
+        workflow_name = workflow.name
+        workflow_description = workflow.description
+        
+        # Check if we have translations for this workflow
+        workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+        translated_name = t(f"workflow.{workflow_key}", locale)
+        translated_desc = t(f"workflow.{workflow_key}_description", locale)
+        
+        # Use translation if available, otherwise use original
+        if translated_name != f"workflow.{workflow_key}":
+            workflow_name = translated_name
+        if translated_desc != f"workflow.{workflow_key}_description":
+            workflow_description = translated_desc
+        
         workflow_data = {
             "id": workflow.workflow_id,
-            "name": workflow.name,
-            "description": workflow.description,
+            "name": workflow_name,
+            "description": workflow_description,
             "category": workflow_category,
             "estimatedDuration": estimated_duration,
             "requirements": requirements[:5],  # Limit to 5 requirements
@@ -123,11 +142,11 @@ async def get_public_workflows(
 
 
 @router.get("/workflows/featured")
-async def get_featured_workflows():
+async def get_featured_workflows(request: Request):
     """Get featured/popular workflows for the homepage"""
     
     # Get all workflows and select featured ones
-    all_workflows = await get_public_workflows(None, None, None, None)
+    all_workflows = await get_public_workflows(request, None, None, None, None)
     
     # Prioritize permit and license workflows as featured
     featured = []
@@ -145,13 +164,14 @@ async def get_featured_workflows():
 
 
 @router.get("/workflows/{workflow_id}")
-async def get_public_workflow_detail(workflow_id: str):
+async def get_public_workflow_detail(workflow_id: str, request: Request):
     """Get detailed information about a specific workflow"""
+    locale = get_locale_from_request(request)
     
     # Get workflow from registry
     workflow = step_registry.get_workflow(workflow_id)
     if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+        raise HTTPException(status_code=404, detail=t("workflow.not_found", locale))
     
     # Determine category
     category_map = {
@@ -239,10 +259,19 @@ async def get_public_workflow_detail(workflow_id: str):
             "requirements": step_requirements
         })
     
+    # Translate workflow name and description
+    workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+    translated_name = t(f"workflow.{workflow_key}", locale)
+    translated_desc = t(f"workflow.{workflow_key}_description", locale)
+    
+    # Use translation if available, otherwise use original
+    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else workflow.name
+    workflow_description = translated_desc if translated_desc != f"workflow.{workflow_key}_description" else workflow.description
+    
     return {
         "id": workflow.workflow_id,
-        "name": workflow.name,
-        "description": workflow.description,
+        "name": workflow_name,
+        "description": workflow_description,
         "category": workflow_category,
         "estimatedDuration": estimated_duration,
         "requirements": requirements,
@@ -297,3 +326,342 @@ async def get_workflow_categories():
             })
     
     return categories
+
+
+@router.post("/workflows/{workflow_id}/start")
+async def start_workflow_instance(
+    workflow_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """Start a new workflow instance for a citizen (public endpoint)"""
+    locale = get_locale_from_request(request)
+    
+    # Get request body as JSON
+    try:
+        body = await request.json()
+        initial_data = body if isinstance(body, dict) else {}
+    except:
+        initial_data = {}
+    
+    # Validate workflow exists
+    workflow = step_registry.get_workflow(workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=404, 
+            detail=t("workflow.not_found", locale)
+        )
+    
+    # Import required services
+    from ...services.workflow_service import InstanceService
+    import uuid
+    
+    # Create anonymous user ID for tracking (in real system, use actual user auth)
+    citizen_id = f"citizen_{uuid.uuid4().hex[:8]}"
+    
+    # Create workflow instance
+    try:
+        instance = await InstanceService.create_instance(
+            workflow_id=workflow_id,
+            user_id=citizen_id,
+            initial_context=initial_data,
+            user_data={
+                "type": "citizen",
+                "started_from": "public_portal",
+                "locale": locale
+            }
+        )
+        
+        # Execute workflow in background to handle citizen input steps
+        from .instances import execute_workflow_instance
+        background_tasks.add_task(execute_workflow_instance, instance.instance_id)
+        
+        # Return instance details for citizen tracking
+        return {
+            "instance_id": instance.instance_id,
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.name,
+            "citizen_tracking_id": citizen_id,
+            "status": instance.status,
+            "created_at": instance.created_at,
+            "next_step": instance.current_step,
+            "tracking_url": f"/track/{instance.instance_id}",
+            "message": t("workflow.started_successfully", locale)
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=t("workflow.start_failed", locale, error=str(e))
+        )
+
+
+@router.get("/track/{instance_id}")
+async def track_workflow_instance(instance_id: str, request: Request):
+    """Track workflow instance progress (public endpoint)"""
+    locale = get_locale_from_request(request)
+    
+    # Import required models
+    from ...models.workflow import WorkflowInstance, StepExecution, WorkflowStep
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(
+            status_code=404,
+            detail=t("instance.not_found", locale)
+        )
+    
+    # Get workflow from registry for metadata
+    workflow = step_registry.get_workflow(instance.workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=404,
+            detail=t("workflow.not_found", locale)
+        )
+    
+    # Get total steps for progress calculation
+    total_steps = await WorkflowStep.find(WorkflowStep.workflow_id == instance.workflow_id).count()
+    
+    # Calculate progress
+    completed_count = len(instance.completed_steps)
+    progress_percentage = (completed_count / total_steps * 100) if total_steps > 0 else 0
+    
+    # Get step executions for detailed tracking
+    step_executions = await StepExecution.find(
+        StepExecution.instance_id == instance_id
+    ).sort(StepExecution.started_at).to_list()
+    
+    # Translate workflow name
+    workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+    translated_name = t(f"workflow.{workflow_key}", locale)
+    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else workflow.name
+    
+    # Build step progress
+    step_progress = []
+    current_step_data = None
+    
+    for step_id, step in workflow.steps.items():
+        step_status = "pending"
+        step_started = None
+        step_completed = None
+        requires_citizen_input = False
+        input_form = {}
+        
+        # Check if this step requires citizen input (for all steps, not just current)
+        if hasattr(step, 'requires_citizen_input'):
+            requires_citizen_input = step.requires_citizen_input
+            if requires_citizen_input and hasattr(step, 'input_form'):
+                input_form = step.input_form
+        
+        if step_id in instance.completed_steps:
+            step_status = "completed"
+        elif step_id in instance.failed_steps:
+            step_status = "failed"
+        elif step_id == instance.current_step:
+            step_status = "in_progress"
+        
+        # Find execution details
+        execution = next((ex for ex in step_executions if ex.step_id == step_id), None)
+        if execution:
+            step_started = execution.started_at
+            step_completed = execution.completed_at
+        
+        step_data = {
+            "step_id": step_id,
+            "name": step.name,
+            "description": step.description,
+            "status": step_status,
+            "started_at": step_started,
+            "completed_at": step_completed,
+            "requires_citizen_input": requires_citizen_input,
+            "input_form": input_form
+        }
+        
+        step_progress.append(step_data)
+        
+        # Set current step data for easy access
+        if step_status == "in_progress":
+            current_step_data = step_data
+    
+    # Check if citizen input is required right now
+    # This happens when:
+    # 1. Instance status is "awaiting_input", OR
+    # 2. Current step requires citizen input
+    requires_input = (
+        instance.status == "awaiting_input" or 
+        (current_step_data and current_step_data.get("requires_citizen_input", False))
+    )
+    
+    # If awaiting input, find the step that needs input
+    input_step_data = None
+    if instance.status == "awaiting_input":
+        # Look for the current step or first step that requires input
+        target_step_id = instance.current_step
+        if not target_step_id and workflow.start_step:
+            target_step_id = workflow.start_step.step_id
+            
+        for step_data in step_progress:
+            if step_data["step_id"] == target_step_id and step_data.get("requires_citizen_input", False):
+                input_step_data = step_data
+                break
+    elif current_step_data and current_step_data.get("requires_citizen_input", False):
+        input_step_data = current_step_data
+    
+    return {
+        "instance_id": instance_id,
+        "workflow_id": instance.workflow_id,
+        "workflow_name": workflow_name,
+        "status": instance.status,
+        "progress_percentage": round(progress_percentage, 2),
+        "current_step": instance.current_step,
+        "created_at": instance.created_at,
+        "updated_at": instance.updated_at,
+        "completed_at": instance.completed_at,
+        "total_steps": total_steps,
+        "completed_steps": completed_count,
+        "step_progress": step_progress,
+        "requires_input": requires_input,
+        "input_form": input_step_data.get("input_form", {}) if input_step_data else {},
+        "estimated_completion": None,  # TODO: Add estimation logic
+        "message": t("instance.tracking_info", locale)
+    }
+
+
+@router.post("/instances/{instance_id}/submit-data")
+async def submit_citizen_data(
+    instance_id: str,
+    request: Request
+):
+    """Submit citizen data for a workflow step that requires input"""
+    locale = get_locale_from_request(request)
+    
+    # Import required models
+    from ...models.workflow import WorkflowInstance, StepExecution
+    from uuid import uuid4
+    from datetime import datetime
+    
+    # Find the workflow instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(
+            status_code=404,
+            detail=t("instance.not_found", locale)
+        )
+    
+    # Check if instance is in a state that can accept input
+    if instance.status not in ["running", "paused", "awaiting_input"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Instance is not in a state to accept input"
+        )
+    
+    # Get workflow from registry to check current step
+    workflow = step_registry.get_workflow(instance.workflow_id)
+    if not workflow:
+        raise HTTPException(
+            status_code=404,
+            detail=t("workflow.not_found", locale)
+        )
+    
+    # Find the step that requires input
+    input_step_id = None
+    input_step = None
+    
+    if instance.status == "awaiting_input":
+        # For awaiting_input instances, check current step or start step
+        input_step_id = instance.current_step or (workflow.start_step.step_id if workflow.start_step else None)
+    else:
+        # For running instances, use current step
+        input_step_id = instance.current_step
+    
+    if not input_step_id or input_step_id not in workflow.steps:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid step found that requires input"
+        )
+    
+    input_step = workflow.steps[input_step_id]
+    if not hasattr(input_step, 'requires_citizen_input') or not input_step.requires_citizen_input:
+        raise HTTPException(
+            status_code=400,
+            detail="Step does not require citizen input"
+        )
+    
+    try:
+        # Get form data and files from request
+        form = await request.form()
+        citizen_data = {}
+        uploaded_files = {}
+        
+        for key, value in form.items():
+            if hasattr(value, 'filename'):  # It's a file
+                # In a real implementation, you'd save this to cloud storage
+                file_content = await value.read()
+                uploaded_files[key] = {
+                    "filename": value.filename,
+                    "content_type": value.content_type,
+                    "size": len(file_content)
+                }
+                # Reset file pointer for potential future reads
+                await value.seek(0)
+            else:
+                citizen_data[key] = value
+        
+        # Update the instance with submitted data
+        instance.context = instance.context or {}
+        instance.context[f"{input_step_id}_citizen_data"] = citizen_data
+        instance.context[f"{input_step_id}_uploaded_files"] = uploaded_files
+        instance.context[f"{input_step_id}_data_submitted_at"] = datetime.now().isoformat()
+        
+        # Mark step as completed and resume workflow
+        if input_step_id not in instance.completed_steps:
+            instance.completed_steps.append(input_step_id)
+        
+        # Update instance status and current step
+        if instance.status == "awaiting_input":
+            instance.status = "running"
+            if not instance.current_step:
+                instance.current_step = input_step_id
+        
+        # Move to next step if available
+        if hasattr(input_step, 'next_steps') and input_step.next_steps:
+            # For simplicity, take the first next step
+            next_step = input_step.next_steps[0]
+            instance.current_step = next_step.step_id
+        else:
+            # No next steps, workflow complete
+            instance.status = "completed"
+            instance.current_step = None
+            instance.completed_at = datetime.utcnow()
+            
+        instance.updated_at = datetime.utcnow()
+        await instance.save()
+        
+        # Create step execution record for the completed citizen input step
+        step_execution = StepExecution(
+            execution_id=str(uuid4()),
+            instance_id=instance.instance_id,
+            step_id=input_step_id,
+            workflow_id=instance.workflow_id,
+            status="completed",
+            inputs=citizen_data,
+            outputs={"citizen_data_submitted": True, "files_uploaded": len(uploaded_files)},
+            started_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            duration_seconds=0
+        )
+        await step_execution.create()
+        
+        return {
+            "success": True,
+            "message": "Data submitted successfully",
+            "next_action": "Your data has been submitted and is being processed. Please check back for updates.",
+            "locale": locale
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to submit data: {str(e)}"
+        )

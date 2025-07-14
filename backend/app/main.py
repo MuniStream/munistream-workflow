@@ -99,6 +99,19 @@ async def sync_programmatic_workflows():
 @app.on_event("startup")
 async def startup_event():
     await connect_to_mongo()
+    
+    # Load plugins before syncing workflows
+    try:
+        from app.workflows.plugin_loader import WorkflowPluginManager
+        print("Loading workflow plugins...")
+        plugin_manager = WorkflowPluginManager(config_file="plugins.yaml")
+        plugin_manager.load_config()
+        workflows_loaded = plugin_manager.discover_and_load_workflows()
+        print(f"Loaded {workflows_loaded} workflows from plugins")
+    except Exception as e:
+        print(f"Warning: Error loading plugins: {e}")
+        # Don't fail startup if plugins can't load
+    
     await sync_programmatic_workflows()
 
 

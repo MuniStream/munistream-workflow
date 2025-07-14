@@ -15,6 +15,11 @@ class StepRegistry:
         self._workflows: Dict[str, Workflow] = {}
         self._step_to_workflow: Dict[str, str] = {}
     
+    @property
+    def workflows(self) -> Dict[str, Workflow]:
+        """Public access to workflows dictionary"""
+        return self._workflows
+    
     def register_workflow(self, workflow: Workflow):
         """Register a workflow and all its steps"""
         self._workflows[workflow.workflow_id] = workflow
@@ -78,29 +83,5 @@ class StepRegistry:
 step_registry = StepRegistry()
 
 
-def register_example_workflows():
-    """Register example workflows with the registry"""
-    from .examples.citizen_registration import create_citizen_registration_workflow
-    from .examples.citizen_registration_with_docs import create_citizen_registration_with_documents_workflow
-    from .examples.building_permit import create_building_permit_workflow
-    
-    # Register citizen registration workflow
-    citizen_workflow = create_citizen_registration_workflow()
-    step_registry.register_workflow(citizen_workflow)
-    
-    # Register document-enhanced citizen registration workflow
-    citizen_docs_workflow = create_citizen_registration_with_documents_workflow()
-    step_registry.register_workflow(citizen_docs_workflow)
-    
-    # Register building permit workflow
-    permit_workflow = create_building_permit_workflow()
-    step_registry.register_workflow(permit_workflow)
-    
-    # You can add more example workflows here
-    # from .examples.business_license import create_business_license_workflow
-    # business_workflow = create_business_license_workflow()
-    # step_registry.register_workflow(business_workflow)
-
-
-# Auto-register example workflows on import
-register_example_workflows()
+# Example workflows have been moved to external repository
+# Workflows are now loaded via plugin system from configured repositories

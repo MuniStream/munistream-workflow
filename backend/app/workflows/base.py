@@ -59,7 +59,10 @@ class BaseStep(ABC):
                  name: str,
                  description: str = "",
                  required_inputs: Optional[List[str]] = None,
-                 optional_inputs: Optional[List[str]] = None):
+                 optional_inputs: Optional[List[str]] = None,
+                 requires_citizen_input: bool = False,
+                 input_form: Optional[Dict[str, Any]] = None,
+                 **kwargs):
         self.step_id = step_id
         self.name = name
         self.description = description
@@ -67,6 +70,8 @@ class BaseStep(ABC):
         self.optional_inputs = optional_inputs or []
         self.next_steps: List['BaseStep'] = []
         self.validations: List[Callable] = []
+        self.requires_citizen_input = requires_citizen_input
+        self.input_form = input_form or {}
     
     def add_validation(self, validation_func: Callable) -> 'BaseStep':
         self.validations.append(validation_func)

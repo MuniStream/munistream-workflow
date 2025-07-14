@@ -75,8 +75,18 @@ async def execute_workflow_instance(instance_id: str):
             )
             execution_context.mark_queued()
             
-            # Execute the first step
+            # Check if the first step requires citizen input
             start_step = workflow.start_step
+            
+            # If step requires citizen input, pause execution and wait for input
+            if hasattr(start_step, 'requires_citizen_input') and start_step.requires_citizen_input:
+                # Don't execute the step yet - wait for citizen input
+                instance.status = "awaiting_input"
+                instance.updated_at = datetime.utcnow()
+                await instance.save()
+                return  # Exit early - citizen needs to provide input first
+            
+            # Execute the step normally (non-citizen-input step)
             step_result = await step_executor.execute_step(
                 step=start_step,
                 inputs=instance.context,
