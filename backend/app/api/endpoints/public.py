@@ -531,7 +531,8 @@ async def track_workflow_instance(instance_id: str, request: Request):
 @router.post("/instances/{instance_id}/submit-data")
 async def submit_citizen_data(
     instance_id: str,
-    request: Request
+    request: Request,
+    background_tasks: BackgroundTasks
 ):
     """Submit citizen data for a workflow step that requires input"""
     locale = get_locale_from_request(request)
@@ -618,22 +619,14 @@ async def submit_citizen_data(
         if input_step_id not in instance.completed_steps:
             instance.completed_steps.append(input_step_id)
         
-        # Update instance status and current step
+        # Update instance status to pending validation after citizen data submission
         if instance.status == "awaiting_input":
-            instance.status = "running"
+            instance.status = "pending_validation"
             if not instance.current_step:
                 instance.current_step = input_step_id
         
-        # Move to next step if available
-        if hasattr(input_step, 'next_steps') and input_step.next_steps:
-            # For simplicity, take the first next step
-            next_step = input_step.next_steps[0]
-            instance.current_step = next_step.step_id
-        else:
-            # No next steps, workflow complete
-            instance.status = "completed"
-            instance.current_step = None
-            instance.completed_at = datetime.utcnow()
+        # Don't move to next step automatically - wait for admin validation
+        # The workflow will resume after admin approves/rejects the data
             
         instance.updated_at = datetime.utcnow()
         await instance.save()
@@ -652,6 +645,8 @@ async def submit_citizen_data(
             duration_seconds=0
         )
         await step_execution.create()
+        
+        # No automatic workflow execution - wait for admin validation
         
         return {
             "success": True,

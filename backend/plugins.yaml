@@ -1,12 +1,12 @@
 plugins:
-  - name: aquabilidad-workflows
-    repo_url: https://github.com/aquabilidad/aquabilidad-workflows.git
+  - name: puente-catastral-workflows
+    repo_url: https://github.com/PuenteCatastral/puente-catastral-workflows.git
     enabled: true
     version: 1.0.0
     workflows:
-      - module: aquabilidad.fishing_workflows
-        function: create_fishing_permit_workflow
-      - module: aquabilidad.fishing_workflows  
-        function: create_catch_reporting_workflow
-      - module: aquabilidad.fishing_workflows
-        function: create_traceability_workflow
+      - module: puente_catastral.catastral_workflows
+        function: create_actualizacion_catastral_workflow
+      - module: puente_catastral.catastral_workflows
+        function: create_certificado_libertad_workflow
+      - module: puente_catastral.catastral_workflows
+        function: create_avaluo_catastral_workflow

@@ -16,6 +16,8 @@ from ...services.auth_service import (
     AuthService, get_current_user, require_admin, require_manager_or_admin,
     require_permission, ACCESS_TOKEN_EXPIRE_MINUTES
 )
+from ...core.locale import get_locale_from_request
+from ...core.i18n import t
 
 router = APIRouter()
 
@@ -56,13 +58,15 @@ def convert_user_to_response(user: UserModel) -> UserResponse:
 @router.post("/login", response_model=LoginResponse)
 async def login(login_data: LoginRequest, request: Request):
     """Authenticate user and return JWT tokens"""
+    locale = get_locale_from_request(request)
+    
     try:
         # Authenticate user
         user = await AuthService.authenticate_user(login_data.username, login_data.password)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid username or password"
+                detail=t("auth.invalid_credentials", locale)
             )
         
         # Create tokens
