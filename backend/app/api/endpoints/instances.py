@@ -312,7 +312,7 @@ async def list_instances(
 async def get_active_instances():
     """Get all currently active workflow instances"""
     active_instances = await WorkflowInstance.find(
-        {"status": {"$in": ["running", "paused"]}}
+        {"status": {"$in": ["running", "paused", "awaiting_input"]}}
     ).sort(-WorkflowInstance.updated_at).to_list()
     
     result = []
