@@ -10,6 +10,8 @@ from datetime import datetime
 from ...workflows.registry import step_registry
 from ...core.locale import get_locale_from_request
 from ...core.i18n import t
+from ...models.category import WorkflowCategory
+from ...models.workflow import WorkflowDefinition
 
 router = APIRouter()
 
@@ -25,31 +27,35 @@ async def get_public_workflows(
     """Get all public workflows available for citizens to browse"""
     locale = get_locale_from_request(request)
     
-    # Get workflows from registry (these are the coded workflows)
-    registry_workflows = step_registry.list_workflows()
+    # Get workflows from database (WorkflowDefinition with assigned categories)
+    from ...models.workflow import WorkflowDefinition
+    
+    # Build query filters
+    query_filters = {}
+    if category:
+        query_filters["category"] = category
+    
+    # Get workflows from database
+    db_workflows = await WorkflowDefinition.find(query_filters).to_list()
     
     # Convert to public format with additional metadata
     public_workflows = []
     
-    for workflow_info in registry_workflows:
-        workflow = step_registry.get_workflow(workflow_info["workflow_id"])
+    for db_workflow in db_workflows:
+        # Get workflow from registry for step details
+        workflow = step_registry.get_workflow(db_workflow.workflow_id)
         if not workflow:
             continue
             
-        # Determine category based on workflow type
-        category_map = {
-            "citizen_registration": "Registration",
-            "building_permit": "Permits", 
-            "business_license": "Licenses",
-            "complaint_handling": "Complaints",
-            "permit_renewal": "Renewals"
-        }
+        # Get category name from database
+        workflow_category_id = db_workflow.category or "general"
+        workflow_category_name = "General"
         
-        workflow_category = "General"
-        for key, cat in category_map.items():
-            if key in workflow.workflow_id.lower():
-                workflow_category = cat
-                break
+        if db_workflow.category:
+            # Look up category name from database
+            category_doc = await WorkflowCategory.find_one({"category_id": db_workflow.category})
+            if category_doc:
+                workflow_category_name = category_doc.name
         
         # Calculate estimated duration based on step count
         step_count = len(workflow.steps)
@@ -106,7 +112,7 @@ async def get_public_workflows(
             "id": workflow.workflow_id,
             "name": workflow_name,
             "description": workflow_description,
-            "category": workflow_category,
+            "category": workflow_category_name,
             "estimatedDuration": estimated_duration,
             "requirements": requirements[:5],  # Limit to 5 requirements
             "steps": public_steps,
@@ -115,10 +121,7 @@ async def get_public_workflows(
             "updatedAt": datetime.now().isoformat()
         }
         
-        # Apply filters
-        if category and workflow_category.lower() != category.lower():
-            continue
-            
+        # Apply query filter (category filter is already applied at database level)
         if query and query.lower() not in workflow.name.lower() and query.lower() not in workflow.description.lower():
             continue
             
@@ -282,50 +285,6 @@ async def get_public_workflow_detail(workflow_id: str, request: Request):
     }
 
 
-@router.get("/workflow-categories")
-async def get_workflow_categories():
-    """Get available workflow categories with counts"""
-    
-    # Get all workflows to count by category
-    registry_workflows = step_registry.list_workflows()
-    
-    category_counts = {
-        "Permits": 0,
-        "Licenses": 0, 
-        "Registration": 0,
-        "Complaints": 0,
-        "Renewals": 0,
-        "General": 0
-    }
-    
-    # Count workflows by category
-    for workflow_info in registry_workflows:
-        workflow_id = workflow_info["workflow_id"].lower()
-        
-        if "permit" in workflow_id:
-            category_counts["Permits"] += 1
-        elif "license" in workflow_id:
-            category_counts["Licenses"] += 1
-        elif "registration" in workflow_id:
-            category_counts["Registration"] += 1
-        elif "complaint" in workflow_id:
-            category_counts["Complaints"] += 1
-        elif "renewal" in workflow_id:
-            category_counts["Renewals"] += 1
-        else:
-            category_counts["General"] += 1
-    
-    categories = []
-    for category, count in category_counts.items():
-        if count > 0:  # Only include categories with workflows
-            categories.append({
-                "id": category.lower(),
-                "name": category,
-                "description": f"{category} related government services",
-                "workflowCount": count
-            })
-    
-    return categories
 
 
 @router.post("/workflows/{workflow_id}/start")
@@ -660,3 +619,42 @@ async def submit_citizen_data(
             status_code=500,
             detail=f"Failed to submit data: {str(e)}"
         )
+
+
+@router.get("/workflow-categories")
+async def get_public_workflow_categories(request: Request):
+    """Get workflow categories for public browsing"""
+    locale = get_locale_from_request(request)
+    
+    # Get categories from database
+    categories = await WorkflowCategory.find(
+        {"is_active": True}
+    ).sort([("display_order", 1), ("name", 1)]).to_list()
+    
+    # Convert to public format with workflow counts
+    public_categories = []
+    
+    for category in categories:
+        # Get workflow count for this category - only count workflows that are available in registry
+        db_workflows = await WorkflowDefinition.find({"category": category.category_id}).to_list()
+        
+        # Count only workflows that exist in the step registry
+        workflow_count = 0
+        for db_workflow in db_workflows:
+            workflow = step_registry.get_workflow(db_workflow.workflow_id)
+            if workflow:
+                workflow_count += 1
+                
+        if workflow_count > 0:  # Only include categories with workflows
+            public_categories.append({
+                "id": category.category_id,
+                "name": category.name,
+                "description": category.description,
+                "icon": category.icon,
+                "color": category.color,
+                "category_type": category.category_type,
+                "is_featured": category.is_featured,
+                "workflowCount": workflow_count
+            })
+    
+    return public_categories
