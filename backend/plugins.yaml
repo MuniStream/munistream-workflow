@@ -24,3 +24,7 @@ plugins:
         function: create_inscripcion_escritura_rpp_dag_workflow
       - module: puente.actualizacion_catastral_unificada_dag
         function: create_actualizacion_catastral_unificada_dag_workflow
+      - module: rpp.inscripciones.inscripcion_compraventa
+        function: create_inscripcion_compraventa_workflow
+      - module: catastro.registro.alta_predio
+        function: create_alta_predio_workflow

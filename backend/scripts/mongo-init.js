@@ -1,8 +1,8 @@
-// MongoDB initialization script for CivicStream
+// MongoDB initialization script for MuniStream
 // This script runs when the MongoDB container starts for the first time
 
-// Switch to the civicstream database
-db = db.getSiblingDB('civicstream');
+// Switch to the munistream database
+db = db.getSiblingDB('munistream');
 
 // Create collections with validation
 db.createCollection('workflow_definitions', {
@@ -77,17 +77,17 @@ db.approval_requests.createIndex({ 'status': 1 });
 
 // Create a user for the application
 db.createUser({
-  user: 'civicstream_app',
-  pwd: 'civicstream_app_password',
+  user: 'munistream_app',
+  pwd: 'munistream_app_password',
   roles: [
     {
       role: 'readWrite',
-      db: 'civicstream'
+      db: 'munistream'
     }
   ]
 });
 
-print('CivicStream MongoDB initialization completed successfully!');
-print('Database: civicstream');
-print('Application user: civicstream_app');
+print('MuniStream MongoDB initialization completed successfully!');
+print('Database: munistream');
+print('Application user: munistream_app');
 print('Collections created with indexes and validation rules.');

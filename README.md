@@ -1,8 +1,8 @@
-# 🏛️ CivicStream
+# 🏛️ MuniStream
 
 **A DAG-based workflow automation platform for government processes**
 
-CivicStream empowers government organizations to model, execute, and optimize citizen-facing processes using Directed Acyclic Graphs (DAGs). Built with modern microservices architecture, it provides transparency, efficiency, and accountability in government operations.
+MuniStream empowers government organizations to model, execute, and optimize citizen-facing processes using Directed Acyclic Graphs (DAGs). Built with modern microservices architecture, it provides transparency, efficiency, and accountability in government operations.
 
 ## 🚀 Features
 
@@ -31,7 +31,7 @@ CivicStream empowers government organizations to model, execute, and optimize ci
 ## 🏗️ Architecture
 
 ```
-CivicStream Platform
+MuniStream Platform
 ├── 🖥️  Backend (FastAPI)           # Workflow engine and APIs
 ├── 👤 Citizen Frontend (React)     # Citizen-facing interface
 ├── 📱 Mobile Apps (React Native)   # iOS/Android applications  
@@ -106,8 +106,8 @@ Citizen complaint resolution system:
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-org/civicstream.git
-   cd civicstream
+   git clone https://github.com/MuniStream/munistream-workflow.git
+   cd munistream-workflow
    ```
 
 2. **Start the development environment**
@@ -253,7 +253,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🏛️ Government Focus
 
-CivicStream is specifically designed for government organizations with features like:
+MuniStream is specifically designed for government organizations with features like:
 - **Transparency** - Full audit trails and process visibility
 - **Compliance** - Built-in approval workflows and documentation
 - **Efficiency** - Performance monitoring and bottleneck elimination
@@ -263,8 +263,8 @@ CivicStream is specifically designed for government organizations with features 
 ## 📞 Support
 
 - **Documentation**: [View Docs](./docs/)
-- **Issues**: [GitHub Issues](https://github.com/your-org/civicstream/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/civicstream/discussions)
+- **Issues**: [GitHub Issues](https://github.com/MuniStream/munistream-workflow/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/MuniStream/munistream-workflow/discussions)
 
 ---
 

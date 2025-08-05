@@ -92,8 +92,8 @@
     "invalid_document": "Documento inválido o corrupto"
   },
   "email": {
-    "welcome_subject": "Bienvenido a CivicStream",
-    "welcome_body": "¡Bienvenido a CivicStream! Su cuenta ha sido creada exitosamente.",
+    "welcome_subject": "Bienvenido a MuniStream",
+    "welcome_body": "¡Bienvenido a MuniStream! Su cuenta ha sido creada exitosamente.",
     "approval_subject": "Solicitud Aprobada",
     "approval_body": "Su solicitud ha sido aprobada y está lista para procesamiento.",
     "rejection_subject": "Actualización del Estado de la Solicitud",

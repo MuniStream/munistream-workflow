@@ -4,7 +4,7 @@ from pydantic import AnyHttpUrl, validator
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "CivicStream"
+    PROJECT_NAME: str = "MuniStream"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
     
@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # MongoDB
     MONGODB_URL: str = "mongodb://localhost:27017"
-    MONGODB_DB_NAME: str = "civicstream"
+    MONGODB_DB_NAME: str = "munistream"
     
     # Security
     SECRET_KEY: str = "your-secret-key-here-change-in-production"
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     
     # Azure
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = None
-    AZURE_STORAGE_CONTAINER_NAME: str = "civicstream-files"
+    AZURE_STORAGE_CONTAINER_NAME: str = "munistream-files"
     
     # Blockchain
     BLOCKCHAIN_API_URL: Optional[str] = None

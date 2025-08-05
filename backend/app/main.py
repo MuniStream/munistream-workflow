@@ -26,7 +26,7 @@ app.add_middleware(
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to CivicStream API",
+        "message": "Welcome to MuniStream API",
         "version": settings.VERSION,
         "docs": f"{settings.API_V1_STR}/docs"
     }
