@@ -4,6 +4,7 @@ from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
 import uuid
+import asyncio
 
 
 class StepStatus(str, Enum):
@@ -72,6 +73,21 @@ class BaseStep(ABC):
         self.validations: List[Callable] = []
         self.requires_citizen_input = requires_citizen_input
         self.input_form = input_form or {}
+        
+        # Auto-register with current workflow context if available
+        self._auto_register_with_workflow()
+    
+    def _auto_register_with_workflow(self):
+        """Auto-register this step with the current workflow context"""
+        # Import here to avoid circular imports
+        from .workflow import Workflow
+        
+        current_workflow = Workflow.get_current()
+        if current_workflow is not None:
+            current_workflow.add_step(self)
+            # Set as start step if it's the first step added
+            if current_workflow.start_step is None:
+                current_workflow.set_start(self)
     
     def add_validation(self, validation_func: Callable) -> 'BaseStep':
         self.validations.append(validation_func)

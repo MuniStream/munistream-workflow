@@ -10,3 +10,17 @@ plugins:
         function: create_catch_reporting_workflow
       - module: aquabilidad.fishing_workflows
         function: create_traceability_workflow
+  
+  - name: puente-workflows
+    repo_url: /Users/paw/Projects/Puente/puente-workflows
+    enabled: true
+    version: 1.0.0
+    workflows:
+      - module: puente.traslado_dominio_unificado_dag
+        function: create_traslado_dominio_unificado_dag_workflow
+      - module: puente.certificado_libertad_gravamen_dag
+        function: create_certificado_libertad_gravamen_dag_workflow
+      - module: puente.inscripcion_escritura_rpp_dag
+        function: create_inscripcion_escritura_rpp_dag_workflow
+      - module: puente.actualizacion_catastral_unificada_dag
+        function: create_actualizacion_catastral_unificada_dag_workflow
