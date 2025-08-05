@@ -28,6 +28,9 @@ class WorkflowInstance(BaseModel):
 
 
 class Workflow:
+    # Class variable to track the current workflow context
+    _current_workflow: Optional['Workflow'] = None
+    
     def __init__(self, workflow_id: str, name: str, description: str = ""):
         self.workflow_id = workflow_id
         self.name = name
@@ -38,6 +41,25 @@ class Workflow:
         self.status = WorkflowStatus.DRAFT
         self.version = "1.0.0"
         self.metadata: Dict[str, Any] = {}
+    
+    def __enter__(self) -> 'Workflow':
+        """Enter context manager - allows 'with Workflow(...) as workflow:' syntax"""
+        Workflow._current_workflow = self
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context manager - auto-build and validate workflow"""
+        try:
+            if exc_type is None:  # No exceptions occurred
+                self.build_graph()
+                self.validate()
+        finally:
+            Workflow._current_workflow = None
+    
+    @classmethod
+    def get_current(cls) -> Optional['Workflow']:
+        """Get the current workflow context (for use by operators)"""
+        return cls._current_workflow
     
     def add_step(self, step: BaseStep) -> 'Workflow':
         self.steps[step.step_id] = step
