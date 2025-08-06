@@ -3,6 +3,7 @@ Authentication service for JWT token management and user authentication.
 """
 
 import jwt
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -58,13 +59,13 @@ class AuthService:
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             return payload
-        except jwt.ExpiredSignatureError:
+        except ExpiredSignatureError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token has expired",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        except jwt.JWTError:
+        except InvalidTokenError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",

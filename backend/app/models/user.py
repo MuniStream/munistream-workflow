@@ -127,6 +127,15 @@ class UserModel(Document):
     email_notifications: bool = Field(default=True)
     two_factor_enabled: bool = Field(default=False)
     
+    # Team memberships
+    team_ids: List[str] = Field(default_factory=list, description="Teams this user belongs to")
+    primary_team_id: Optional[str] = Field(None, description="Primary team for task assignment")
+    
+    # Work capacity and availability
+    max_concurrent_tasks: int = Field(default=3, description="Maximum concurrent tasks for this user")
+    specializations: List[str] = Field(default_factory=list, description="User specializations/skills")
+    availability_status: str = Field(default="available", description="Current availability status")  # available, busy, away, offline
+    
     class Settings:
         name = "users"
         use_state_management = True
@@ -188,6 +197,54 @@ class UserModel(Document):
         # Lock account after 5 failed attempts
         if self.failed_login_attempts >= 5:
             self.lock_account()
+    
+    # Team-related methods
+    def add_to_team(self, team_id: str, is_primary: bool = False) -> bool:
+        """Add user to a team"""
+        if team_id not in self.team_ids:
+            self.team_ids.append(team_id)
+            if is_primary or not self.primary_team_id:
+                self.primary_team_id = team_id
+            self.updated_at = datetime.utcnow()
+            return True
+        return False
+    
+    def remove_from_team(self, team_id: str) -> bool:
+        """Remove user from a team"""
+        if team_id in self.team_ids:
+            self.team_ids.remove(team_id)
+            if self.primary_team_id == team_id:
+                # Assign new primary team if available
+                self.primary_team_id = self.team_ids[0] if self.team_ids else None
+            self.updated_at = datetime.utcnow()
+            return True
+        return False
+    
+    def set_primary_team(self, team_id: str) -> bool:
+        """Set primary team for user"""
+        if team_id in self.team_ids:
+            self.primary_team_id = team_id
+            self.updated_at = datetime.utcnow()
+            return True
+        return False
+    
+    def is_available_for_task(self) -> bool:
+        """Check if user is available for new tasks"""
+        return (
+            self.status == UserStatus.ACTIVE and
+            self.availability_status == "available" and
+            not self.is_account_locked()
+        )
+    
+    def has_specialization(self, required_skills: List[str]) -> bool:
+        """Check if user has required specializations"""
+        if not required_skills:
+            return True
+        return any(skill in self.specializations for skill in required_skills)
+    
+    def get_team_count(self) -> int:
+        """Get number of teams user belongs to"""
+        return len(self.team_ids)
 
 class RefreshTokenModel(Document):
     """Refresh token model for JWT token management"""
@@ -232,6 +289,11 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     email_notifications: Optional[bool] = None
     permissions: Optional[List[Permission]] = None
+    team_ids: Optional[List[str]] = None
+    primary_team_id: Optional[str] = None
+    max_concurrent_tasks: Optional[int] = None
+    specializations: Optional[List[str]] = None
+    availability_status: Optional[str] = None
 
 class UserResponse(BaseModel):
     """User response schema"""
@@ -250,6 +312,11 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str]
     email_notifications: bool
     two_factor_enabled: bool
+    team_ids: Optional[List[str]] = None
+    primary_team_id: Optional[str] = None
+    max_concurrent_tasks: Optional[int] = None
+    specializations: Optional[List[str]] = None
+    availability_status: Optional[str] = None
 
 class LoginRequest(BaseModel):
     """Login request schema"""

@@ -14,7 +14,7 @@ from ...models.user import (
 )
 from ...services.auth_service import (
     AuthService, get_current_user, require_admin, require_manager_or_admin,
-    require_permission, ACCESS_TOKEN_EXPIRE_MINUTES
+    require_permission, require_any_role, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from ...core.locale import get_locale_from_request
 from ...core.i18n import t
@@ -23,19 +23,27 @@ router = APIRouter()
 
 def convert_user_to_response(user: UserModel) -> UserResponse:
     """Convert UserModel to UserResponse with proper permission handling"""
-    # Convert permissions to strings
-    permissions = []
+    from ...models.user import ROLE_PERMISSIONS
+    
+    # Get role-based permissions
+    role_permissions = ROLE_PERMISSIONS.get(user.role, [])
+    
+    # Convert explicit user permissions to strings
+    explicit_permissions = []
     for p in user.permissions:
         if hasattr(p, 'value'):
-            permissions.append(p.value)
+            explicit_permissions.append(p.value)
         elif isinstance(p, str):
             # Handle case where it's stored as "Permission.VIEW_DOCUMENTS"
             if p.startswith('Permission.'):
-                permissions.append(p.replace('Permission.', '').lower())
+                explicit_permissions.append(p.replace('Permission.', '').lower())
             else:
-                permissions.append(p)
+                explicit_permissions.append(p)
         else:
-            permissions.append(str(p))
+            explicit_permissions.append(str(p))
+    
+    # Combine role permissions and explicit permissions (remove duplicates)
+    all_permissions = list(set([perm.value for perm in role_permissions] + explicit_permissions))
     
     return UserResponse(
         id=str(user.id),
@@ -44,7 +52,7 @@ def convert_user_to_response(user: UserModel) -> UserResponse:
         full_name=user.full_name,
         role=user.role,
         status=user.status,
-        permissions=permissions,
+        permissions=all_permissions,
         created_at=user.created_at,
         updated_at=user.updated_at,
         last_login=user.last_login,
@@ -52,7 +60,12 @@ def convert_user_to_response(user: UserModel) -> UserResponse:
         phone=user.phone,
         avatar_url=user.avatar_url,
         email_notifications=user.email_notifications,
-        two_factor_enabled=user.two_factor_enabled
+        two_factor_enabled=user.two_factor_enabled,
+        team_ids=user.team_ids,
+        primary_team_id=user.primary_team_id,
+        max_concurrent_tasks=user.max_concurrent_tasks,
+        specializations=user.specializations,
+        availability_status=user.availability_status
     )
 
 @router.post("/login", response_model=LoginResponse)
@@ -405,27 +418,21 @@ async def update_user(
             user.email_notifications = user_update.email_notifications
         if user_update.permissions is not None:
             user.permissions = user_update.permissions
+        if user_update.team_ids is not None:
+            user.team_ids = user_update.team_ids
+        if user_update.primary_team_id is not None:
+            user.primary_team_id = user_update.primary_team_id
+        if user_update.max_concurrent_tasks is not None:
+            user.max_concurrent_tasks = user_update.max_concurrent_tasks
+        if user_update.specializations is not None:
+            user.specializations = user_update.specializations
+        if user_update.availability_status is not None:
+            user.availability_status = user_update.availability_status
         
         user.updated_at = datetime.utcnow()
         await user.save()
         
-        return UserResponse(
-            id=str(user.id),
-            email=user.email,
-            username=user.username,
-            full_name=user.full_name,
-            role=user.role,
-            status=user.status,
-            permissions=user.permissions,
-            created_at=user.created_at,
-            updated_at=user.updated_at,
-            last_login=user.last_login,
-            department=user.department,
-            phone=user.phone,
-            avatar_url=user.avatar_url,
-            email_notifications=user.email_notifications,
-            two_factor_enabled=user.two_factor_enabled
-        )
+        return convert_user_to_response(user)
         
     except HTTPException:
         raise
@@ -481,3 +488,25 @@ async def list_permissions():
 async def list_roles():
     """List all available roles"""
     return [role.value for role in UserRole]
+
+@router.get("/users-for-assignment", response_model=List[UserResponse])
+async def list_users_for_assignment(
+    current_user: UserModel = Depends(require_any_role([UserRole.REVIEWER, UserRole.MANAGER, UserRole.ADMIN]))
+):
+    """List users for instance assignment purposes (reviewer+ access)"""
+    try:
+        # Get active users with reviewer, approver, manager, or admin roles
+        query = {
+            "status": UserStatus.ACTIVE,
+            "role": {"$in": [UserRole.REVIEWER.value, UserRole.APPROVER.value, UserRole.MANAGER.value, UserRole.ADMIN.value]}
+        }
+        
+        users = await UserModel.find(query).to_list()
+        
+        return [convert_user_to_response(user) for user in users]
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list users for assignment: {str(e)}"
+        )
