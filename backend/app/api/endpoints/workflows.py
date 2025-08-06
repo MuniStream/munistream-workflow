@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from datetime import datetime
 
 from ...schemas.workflow import (
@@ -16,8 +16,33 @@ from ...schemas.workflow import (
     StepResponse
 )
 from ...models.workflow import WorkflowDefinition, WorkflowStep
+from ...models.user import UserModel, UserRole
+from ...models.team import TeamModel
+from ...services.auth_service import get_current_user
 
 router = APIRouter()
+
+
+async def get_user_accessible_workflows(user: UserModel) -> List[str]:
+    """Get list of workflow IDs that the user can access based on their teams"""
+    # Admin and managers can see all workflows
+    if user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        workflows = await WorkflowDefinition.find().to_list()
+        return [w.workflow_id for w in workflows]
+    
+    # For other roles, filter by team assignments
+    if not user.team_ids:
+        return []  # No teams = no workflows
+    
+    # Find teams the user belongs to
+    user_teams = await TeamModel.find({"team_id": {"$in": user.team_ids}}).to_list()
+    
+    # Collect all workflow IDs assigned to user's teams
+    accessible_workflow_ids = set()
+    for team in user_teams:
+        accessible_workflow_ids.update(team.assigned_workflows)
+    
+    return list(accessible_workflow_ids)
 
 
 async def convert_workflow_to_response(workflow: WorkflowDefinition) -> WorkflowResponse:
@@ -76,13 +101,29 @@ async def create_workflow(workflow_data: WorkflowCreate):
 async def list_workflows(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[WorkflowStatus] = None
+    status: Optional[WorkflowStatus] = None,
+    current_user: UserModel = Depends(get_current_user)
 ):
-    """List all workflows with pagination"""
+    """List workflows with pagination, filtered by user's team assignments"""
+    # Get workflows accessible to the user
+    accessible_workflow_ids = await get_user_accessible_workflows(current_user)
+    
     # Build query
     query = {}
     if status:
         query["status"] = status
+    
+    # Filter by accessible workflows (unless admin/manager sees all)
+    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        if not accessible_workflow_ids:
+            # User has no team assignments, return empty list
+            return WorkflowListResponse(
+                workflows=[],
+                total=0,
+                page=page,
+                page_size=page_size
+            )
+        query["workflow_id"] = {"$in": accessible_workflow_ids}
     
     # Get total count
     total = await WorkflowDefinition.find(query).count()

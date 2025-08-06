@@ -21,16 +21,231 @@ from ...models.workflow import (
     StepExecution,
     WorkflowDefinition,
     WorkflowStep,
-    ApprovalRequest as ApprovalModel
+    ApprovalRequest as ApprovalModel,
+    AssignmentStatus,
+    AssignmentType
 )
 from ...core.database import get_database
 from ...workflows.registry import step_registry
 from ...workflows.executor import step_executor, StepExecutionContext
 from ...services.workflow_service import WorkflowService
-from ...services.auth_service import require_permission
-from ...models.user import UserModel, Permission
+from ...services.auth_service import require_permission, get_current_user
+from ...services.assignment_service import assignment_service
+from ...models.user import UserModel, Permission, UserRole
+from ...models.team import TeamModel
 
 router = APIRouter()
+
+
+@router.get("/my-assignments", response_model=InstanceListResponse)
+async def get_my_assigned_instances(
+    current_user: UserModel = Depends(get_current_user),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    assignment_status: Optional[str] = Query(None, description="Filter by assignment status"),
+    workflow_id: Optional[str] = Query(None, description="Filter by workflow ID"),
+    team_id: Optional[str] = Query(None, description="Filter by specific team (admin only)")
+):
+    """Get instances assigned to the current user or their teams"""
+    
+    # Build query based on user role and permissions
+    query = {}
+    
+    # Admin and managers can see all assignments or filter by specific team
+    if current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        if team_id:
+            # Filter by specific team if requested
+            query["assigned_team_id"] = team_id
+        else:
+            # Show all assignments if no specific filter
+            query["$or"] = [
+                {"assigned_user_id": {"$exists": True}},
+                {"assigned_team_id": {"$exists": True}}
+            ]
+    else:
+        # Reviewers and other roles see only their assignments and team assignments
+        user_teams = [str(team_id) for team_id in current_user.team_ids] if current_user.team_ids else []
+        
+        or_conditions = [
+            {"assigned_user_id": str(current_user.id)}
+        ]
+        
+        # Add team assignments if user belongs to teams
+        if user_teams:
+            or_conditions.append({"assigned_team_id": {"$in": user_teams}})
+        
+        query["$or"] = or_conditions
+    
+    # Apply additional filters
+    if assignment_status:
+        query["assignment_status"] = assignment_status
+    
+    if workflow_id:
+        query["workflow_id"] = workflow_id
+    
+    # Execute query with pagination
+    skip = (page - 1) * page_size
+    
+    instances = await WorkflowInstance.find(query).skip(skip).limit(page_size).to_list()
+    total = await WorkflowInstance.find(query).count()
+    
+    # Convert to response format
+    instance_responses = [convert_instance_to_response(instance) for instance in instances]
+    
+    return InstanceListResponse(
+        instances=instance_responses,
+        total=total,
+        page=page,
+        page_size=page_size
+    )
+
+
+@router.get("/assignment-statistics")
+async def get_assignment_statistics_early(
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get statistics about automatic vs manual assignments"""
+    
+    # Require admin or manager permission
+    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Only administrators and managers can view assignment statistics"
+        )
+    
+    stats = await assignment_service.get_assignment_statistics()
+    return stats
+
+
+@router.get("/unassigned-instances")
+async def get_unassigned_instances_early(
+    workflow_id: Optional[str] = Query(None, description="Filter by workflow ID"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get list of unassigned instances that can be auto-assigned"""
+    
+    # Require admin or manager permission
+    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Only administrators and managers can view unassigned instances"
+        )
+    
+    # Build query
+    query = {
+        "$or": [
+            {"assignment_status": AssignmentStatus.UNASSIGNED},
+            {"assignment_status": None}
+        ]
+    }
+    
+    if workflow_id:
+        query["workflow_id"] = workflow_id
+    
+    # Get total count
+    total = await WorkflowInstance.find(query).count()
+    
+    # Get paginated results
+    skip = (page - 1) * page_size
+    instances = await WorkflowInstance.find(query).sort(-WorkflowInstance.created_at).skip(skip).limit(page_size).to_list()
+    
+    # Convert to response format
+    instance_responses = [convert_instance_to_response(instance) for instance in instances]
+    
+    return InstanceListResponse(
+        instances=instance_responses,
+        total=total,
+        page=page,
+        page_size=page_size
+    )
+
+
+@router.post("/bulk-auto-assign")
+async def bulk_auto_assign_instances_early(
+    workflow_id: Optional[str] = None,
+    limit: int = Query(10, ge=1, le=100, description="Maximum number of instances to assign"),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Automatically assign multiple unassigned instances"""
+    
+    # Require admin or manager permission
+    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Only administrators and managers can trigger bulk auto-assignment"
+        )
+    
+    # Build query for unassigned instances
+    query = {
+        "$or": [
+            {"assignment_status": AssignmentStatus.UNASSIGNED},
+            {"assignment_status": None}
+        ]
+    }
+    
+    if workflow_id:
+        query["workflow_id"] = workflow_id
+    
+    # Get unassigned instances
+    unassigned_instances = await WorkflowInstance.find(query).limit(limit).to_list()
+    
+    results = {
+        "total_processed": 0,
+        "successful_assignments": 0,
+        "failed_assignments": 0,
+        "assignments": []
+    }
+    
+    for instance in unassigned_instances:
+        results["total_processed"] += 1
+        
+        try:
+            # Get workflow definition
+            workflow_def = await WorkflowDefinition.find_one(
+                WorkflowDefinition.workflow_id == instance.workflow_id
+            )
+            
+            # Attempt auto-assignment
+            success = await assignment_service.auto_assign_instance(instance, workflow_def)
+            
+            if success:
+                results["successful_assignments"] += 1
+                
+                # Get updated assignment info
+                updated_instance = await WorkflowInstance.find_one(
+                    WorkflowInstance.instance_id == instance.instance_id
+                )
+                
+                results["assignments"].append({
+                    "instance_id": instance.instance_id,
+                    "workflow_id": instance.workflow_id,
+                    "success": True,
+                    "assigned_to": {
+                        "team_id": updated_instance.assigned_team_id,
+                        "user_id": updated_instance.assigned_user_id
+                    }
+                })
+            else:
+                results["failed_assignments"] += 1
+                results["assignments"].append({
+                    "instance_id": instance.instance_id,
+                    "workflow_id": instance.workflow_id,
+                    "success": False,
+                    "error": "No suitable assignment found"
+                })
+                
+        except Exception as e:
+            results["failed_assignments"] += 1
+            results["assignments"].append({
+                "instance_id": instance.instance_id,
+                "workflow_id": instance.workflow_id,
+                "success": False,
+                "error": str(e)
+            })
+    
+    return results
 
 
 def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse:
@@ -45,7 +260,15 @@ def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse
         step_results={},  # Will be populated from StepExecution collection
         created_at=instance.created_at,
         updated_at=instance.updated_at,
-        completed_at=instance.completed_at
+        completed_at=instance.completed_at,
+        # Assignment information
+        assigned_user_id=instance.assigned_user_id,
+        assigned_team_id=instance.assigned_team_id,
+        assignment_status=instance.assignment_status.value if instance.assignment_status else None,
+        assignment_type=instance.assignment_type.value if instance.assignment_type else None,
+        assigned_at=instance.assigned_at,
+        assigned_by=instance.assigned_by,
+        assignment_notes=instance.assignment_notes
     )
 
 
@@ -242,6 +465,36 @@ async def execute_workflow_instance(instance_id: str):
         await instance.save()
 
 
+async def auto_assign_new_instance(instance_id: str, workflow_def: WorkflowDefinition):
+    """Background task to automatically assign newly created instances"""
+    try:
+        # Small delay to ensure instance is fully created
+        import asyncio
+        await asyncio.sleep(2)
+        
+        # Get the instance
+        instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+        if not instance:
+            print(f"Instance {instance_id} not found for auto-assignment")
+            return
+        
+        # Check if already assigned (manual assignment might have happened)
+        if instance.assignment_status and instance.assignment_status != AssignmentStatus.UNASSIGNED:
+            print(f"Instance {instance_id} already assigned, skipping auto-assignment")
+            return
+        
+        # Attempt automatic assignment
+        success = await assignment_service.auto_assign_instance(instance, workflow_def)
+        
+        if success:
+            print(f"Successfully auto-assigned instance {instance_id}")
+        else:
+            print(f"Could not auto-assign instance {instance_id} - no suitable assignment found")
+            
+    except Exception as e:
+        print(f"Error in auto_assign_new_instance for {instance_id}: {e}")
+
+
 @router.post("/", response_model=InstanceResponse)
 async def create_instance(
     request: WorkflowExecuteRequest,
@@ -269,16 +522,21 @@ async def create_instance(
     # Execute workflow in background
     background_tasks.add_task(execute_workflow_instance, instance.instance_id)
     
+    # Trigger automatic assignment in background
+    background_tasks.add_task(auto_assign_new_instance, instance.instance_id, workflow)
+    
     return convert_instance_to_response(instance)
 
 
 @router.get("/", response_model=InstanceListResponse)
 async def list_instances(
+    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES)),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     workflow_id: Optional[str] = None,
     user_id: Optional[str] = None,
-    status: Optional[InstanceStatus] = None
+    status: Optional[InstanceStatus] = None,
+    instance_id: Optional[str] = Query(None, description="Search by instance ID (partial match)")
 ):
     """List workflow instances with filtering and pagination"""
     # Build query
@@ -286,9 +544,11 @@ async def list_instances(
     if workflow_id:
         query["workflow_id"] = workflow_id
     if user_id:
-        query["user_id"] = user_id
+        query["user_id"] = {"$regex": user_id, "$options": "i"}
     if status:
         query["status"] = status
+    if instance_id:
+        query["instance_id"] = {"$regex": instance_id, "$options": "i"}
     
     # Get total count
     total = await WorkflowInstance.find(query).count()
@@ -308,12 +568,39 @@ async def list_instances(
     )
 
 
+
+
 @router.get("/active", response_model=ActiveInstancesResponse)
-async def get_active_instances():
-    """Get all currently active workflow instances"""
+async def get_active_instances(
+    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES)),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    user_id: Optional[str] = Query(None, description="Filter by user/citizen ID"),
+    workflow_id: Optional[str] = Query(None, description="Filter by workflow ID"),
+    instance_id: Optional[str] = Query(None, description="Search by instance ID (partial match)"),
+    limit: int = Query(50, description="Number of instances to return"),
+    offset: int = Query(0, description="Number of instances to skip")
+):
+    """Get workflow instances with optional filtering"""
+    
+    # Build query filters
+    query_filters = {}
+    
+    if status:
+        query_filters["status"] = status
+    
+    if user_id:
+        query_filters["user_id"] = {"$regex": user_id, "$options": "i"}
+    
+    if workflow_id:
+        query_filters["workflow_id"] = workflow_id
+    
+    if instance_id:
+        query_filters["instance_id"] = {"$regex": instance_id, "$options": "i"}
+    
+    # Get all instances (not just active ones) with filters
     active_instances = await WorkflowInstance.find(
-        {"status": {"$in": ["running", "paused", "awaiting_input"]}}
-    ).sort(-WorkflowInstance.updated_at).to_list()
+        query_filters
+    ).sort(-WorkflowInstance.updated_at).skip(offset).limit(limit).to_list()
     
     result = []
     for instance in active_instances:
@@ -807,6 +1094,9 @@ async def validate_citizen_data(
     })
     
     if decision == "approve":
+        # INTEGRATE WITH REVIEW SYSTEM: Instead of direct approval, assign to reviewer
+        from ...services.assignment_service import AssignmentService
+        
         # Extract and promote citizen data to top-level context for subsequent steps
         if instance.current_step and instance.current_step in workflow.steps:
             current_step = workflow.steps[instance.current_step]
@@ -823,22 +1113,21 @@ async def validate_citizen_data(
             # Mark current step as completed
             if instance.current_step not in instance.completed_steps:
                 instance.completed_steps.append(instance.current_step)
-            
-            # Find next step
-            next_step = None
-            if hasattr(current_step, 'next_steps') and current_step.next_steps:
-                next_step = current_step.next_steps[0]
-            
-            if next_step:
-                instance.current_step = next_step.step_id
-                instance.status = "running"
+        
+        # Set status to awaiting_input to trigger auto-assignment to review team
+        instance.status = "awaiting_input"
+        
+        # Try to auto-assign to review team
+        try:
+            assignment_result = await AssignmentService.auto_assign_instance(instance)
+            if assignment_result and assignment_result.get("success"):
+                # Successfully assigned to reviewer
+                pass  # Status will be updated by assignment service
             else:
-                # No next steps, workflow complete
-                instance.status = "completed"
-                instance.current_step = None
-                instance.completed_at = datetime.utcnow()
-        else:
-            # No current step, resume normal workflow
+                # Assignment failed, continue with old flow
+                instance.status = "running"
+        except Exception as e:
+            print(f"Auto-assignment failed, continuing with old flow: {e}")
             instance.status = "running"
     
     else:  # reject
@@ -961,3 +1250,570 @@ async def get_citizen_data(
     }
     
     return citizen_info
+
+
+# Assignment management endpoints
+
+@router.post("/{instance_id}/assign-to-user")
+async def assign_instance_to_user(
+    instance_id: str,
+    request: Dict[str, Any],
+    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+):
+    """Assign instance to a specific user"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Get assignment data
+    user_id = request.get("user_id")
+    notes = request.get("notes")
+    
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    
+    # Verify target user exists
+    target_user = await UserModel.get(user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+    
+    # Check if instance can be assigned
+    if not instance.can_be_assigned():
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Instance in status '{instance.status}' with assignment status '{instance.assignment_status}' cannot be assigned"
+        )
+    
+    # Assign instance
+    instance.assign_to_user(
+        user_id=user_id,
+        assigned_by=str(current_user.id),
+        assignment_type=AssignmentType.MANUAL,
+        notes=notes
+    )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": f"Instance assigned to user {target_user.full_name}",
+        "instance_id": instance_id,
+        "assigned_to": {
+            "user_id": user_id,
+            "name": target_user.full_name,
+            "email": target_user.email
+        },
+        "assigned_by": current_user.full_name,
+        "assigned_at": instance.assigned_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/assign-to-team")
+async def assign_instance_to_team(
+    instance_id: str,
+    request: Dict[str, Any],
+    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+):
+    """Assign instance to a team"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Get assignment data
+    team_id = request.get("team_id")
+    notes = request.get("notes")
+    
+    if not team_id:
+        raise HTTPException(status_code=400, detail="team_id is required")
+    
+    # Verify target team exists
+    target_team = await TeamModel.find_one(TeamModel.team_id == team_id)
+    if not target_team:
+        raise HTTPException(status_code=404, detail="Target team not found")
+    
+    # Check if instance can be assigned
+    if not instance.can_be_assigned():
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Instance in status '{instance.status}' with assignment status '{instance.assignment_status}' cannot be assigned"
+        )
+    
+    # Assign instance
+    instance.assign_to_team(
+        team_id=team_id,
+        assigned_by=str(current_user.id),
+        assignment_type=AssignmentType.MANUAL,
+        notes=notes
+    )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": f"Instance assigned to team {target_team.name}",
+        "instance_id": instance_id,
+        "assigned_to": {
+            "team_id": team_id,
+            "name": target_team.name,
+            "members": len(target_team.members)
+        },
+        "assigned_by": current_user.full_name,
+        "assigned_at": instance.assigned_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/start-review")
+async def start_review_on_instance(
+    instance_id: str,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Start reviewing an assigned instance"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    user_id = str(current_user.id)
+    
+    # Check if user can review this instance (directly assigned, team member, or admin/manager)
+    can_review = False
+    
+    if instance.assigned_user_id == user_id:
+        can_review = True
+    elif instance.assigned_team_id and current_user.team_ids and instance.assigned_team_id in [str(t) for t in current_user.team_ids]:
+        can_review = True
+    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        can_review = True
+    
+    if not can_review:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to review this instance"
+        )
+    
+    # Start review
+    if not instance.start_review(user_id):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot start review on instance in status '{instance.assignment_status}'"
+        )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": "Review started on instance",
+        "instance_id": instance_id,
+        "assignment_status": instance.assignment_status.value,
+        "reviewer": current_user.full_name,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/approve-by-reviewer")
+async def approve_instance_by_reviewer(
+    instance_id: str,
+    request: Optional[Dict[str, Any]] = None,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Reviewer approves instance - sends to approver for final signature"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    user_id = str(current_user.id)
+    
+    # Check if user can approve (must be the reviewer or admin/manager)
+    can_approve = False
+    
+    if instance.reviewed_by == user_id:
+        can_approve = True
+    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        can_approve = True
+    
+    if not can_approve:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to approve this instance"
+        )
+    
+    # Get approval comments
+    comments = None
+    if request:
+        comments = request.get("comments")
+    
+    # Approve by reviewer
+    if not instance.approve_by_reviewer(user_id, comments):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot approve instance in current status '{instance.assignment_status}'"
+        )
+    
+    await instance.save()
+    
+    # INTEGRATION: Continue workflow after reviewer approval
+    # The instance is now approved_by_reviewer and needs final signature
+    try:
+        # Resume workflow execution for next steps (like signature/final approval)
+        # Check if there are more steps in the workflow to execute
+        workflow = step_registry.get_workflow(instance.workflow_id)
+        if workflow and instance.current_step:
+            current_step = workflow.steps.get(instance.current_step)
+            
+            # If current step has next steps, continue workflow execution
+            if current_step and hasattr(current_step, 'next_steps') and current_step.next_steps:
+                # Update status to indicate it's ready for next stage (final approval)
+                instance.assignment_status = AssignmentStatus.PENDING_SIGNATURE
+                instance.status = "running"
+                await instance.save()
+                
+                # Execute next workflow step asynchronously
+                import asyncio
+                asyncio.create_task(execute_workflow_instance(instance_id))
+                
+        print(f"Instance {instance_id} approved by reviewer - workflow execution continued")
+    except Exception as e:
+        print(f"Warning: Post-approval processing failed: {e}")
+        # Continue even if workflow execution fails - the approval is still recorded
+    
+    return {
+        "success": True,
+        "message": "Instance approved by reviewer - forwarded for final approval",
+        "instance_id": instance_id,
+        "assignment_status": instance.assignment_status.value,
+        "approved_by": current_user.full_name,
+        "comments": comments,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/reject-by-reviewer")
+async def reject_instance_by_reviewer(
+    instance_id: str,
+    request: Dict[str, Any],
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Reviewer rejects instance with reason"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    user_id = str(current_user.id)
+    
+    # Check if user can reject (must be the reviewer or admin/manager)
+    can_reject = False
+    
+    if instance.reviewed_by == user_id:
+        can_reject = True
+    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        can_reject = True
+    
+    if not can_reject:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to reject this instance"
+        )
+    
+    # Get rejection reason and comments
+    reason = request.get("reason")
+    comments = request.get("comments")
+    
+    if not reason:
+        raise HTTPException(status_code=400, detail="Rejection reason is required")
+    
+    # Reject by reviewer
+    if not instance.reject_by_reviewer(user_id, reason, comments):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot reject instance in current status '{instance.assignment_status}'"
+        )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": "Instance rejected by reviewer",
+        "instance_id": instance_id,
+        "assignment_status": instance.assignment_status.value,
+        "rejected_by": current_user.full_name,
+        "reason": reason,
+        "comments": comments,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/request-modifications")
+async def request_modifications_by_reviewer(
+    instance_id: str,
+    request: Dict[str, Any],
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Reviewer requests modifications from citizen"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    user_id = str(current_user.id)
+    
+    # Check if user can request modifications (must be the reviewer or admin/manager)
+    can_request = False
+    
+    if instance.reviewed_by == user_id:
+        can_request = True
+    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        can_request = True
+    
+    if not can_request:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to request modifications for this instance"
+        )
+    
+    # Get modification requests and comments
+    modifications = request.get("modifications", [])
+    comments = request.get("comments")
+    
+    if not modifications:
+        raise HTTPException(status_code=400, detail="At least one modification request is required")
+    
+    # Request modifications
+    if not instance.request_modifications(user_id, modifications, comments):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot request modifications for instance in current status '{instance.assignment_status}'"
+        )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": "Modifications requested from citizen",
+        "instance_id": instance_id,
+        "assignment_status": instance.assignment_status.value,
+        "requested_by": current_user.full_name,
+        "modifications": modifications,
+        "comments": comments,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/final-approval")
+async def give_final_approval(
+    instance_id: str,
+    request: Optional[Dict[str, Any]] = None,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Final approval and signature by manager/approver"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Check if user can give final approval (managers and approvers)
+    can_approve = current_user.role in [UserRole.ADMIN, UserRole.MANAGER, UserRole.APPROVER]
+    
+    if not can_approve:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to give final approval"
+        )
+    
+    user_id = str(current_user.id)
+    
+    # Get approval comments
+    comments = None
+    if request:
+        comments = request.get("comments")
+    
+    # Give final approval
+    if not instance.final_approval(user_id, comments):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Cannot give final approval for instance in current status '{instance.assignment_status}'"
+        )
+    
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": "Instance approved and signed - process completed",
+        "instance_id": instance_id,
+        "assignment_status": instance.assignment_status.value,
+        "approved_by": current_user.full_name,
+        "comments": comments,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/unassign")
+async def unassign_instance(
+    instance_id: str,
+    request: Optional[Dict[str, Any]] = None,
+    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+):
+    """Remove assignment from instance"""
+    
+    # Get instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Get reason
+    reason = "manual_unassignment"
+    if request:
+        reason = request.get("reason", reason)
+    
+    # Unassign
+    instance.unassign(reason=reason, unassigned_by=str(current_user.id))
+    await instance.save()
+    
+    return {
+        "success": True,
+        "message": "Instance unassigned successfully",
+        "instance_id": instance_id,
+        "unassigned_by": current_user.full_name,
+        "reason": reason,
+        "updated_at": instance.updated_at.isoformat()
+    }
+
+
+@router.post("/{instance_id}/auto-assign")
+async def auto_assign_instance(
+    instance_id: str,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Automatically assign an instance to the best available team/user"""
+    
+    # Require admin or manager permission
+    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Only administrators and managers can trigger auto-assignment"
+        )
+    
+    # Get the instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Check if already assigned
+    if instance.assignment_status not in [AssignmentStatus.UNASSIGNED, None]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Instance is already {instance.assignment_status}. Unassign first if needed."
+        )
+    
+    # Get workflow definition for context
+    workflow_def = await WorkflowDefinition.find_one(
+        WorkflowDefinition.workflow_id == instance.workflow_id
+    )
+    
+    # Perform auto-assignment
+    success = await assignment_service.auto_assign_instance(instance, workflow_def)
+    
+    if success:
+        # Refresh instance to get updated assignment data
+        updated_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == instance_id
+        )
+        
+        return {
+            "success": True,
+            "message": "Instance assigned automatically",
+            "instance_id": instance_id,
+            "assigned_to": {
+                "team_id": updated_instance.assigned_team_id,
+                "user_id": updated_instance.assigned_user_id,
+                "assignment_type": updated_instance.assignment_type,
+                "assigned_at": updated_instance.assigned_at.isoformat() if updated_instance.assigned_at else None
+            },
+            "triggered_by": current_user.full_name
+        }
+    else:
+        raise HTTPException(
+            status_code=400, 
+            detail="Could not find suitable assignment for this instance"
+        )
+
+
+@router.post("/{instance_id}/validate-data")
+async def validate_instance_data(
+    instance_id: str,
+    request: dict,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Validate individual fields of submitted citizen data"""
+    
+    # Get the instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Verify user has permission to validate this instance
+    # Must be assigned to the user or user's team, or user must be admin/manager
+    can_validate = False
+    
+    if current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+        can_validate = True
+    elif instance.assigned_user_id == str(current_user.id):
+        can_validate = True
+    elif instance.assigned_team_id and current_user.team_ids and instance.assigned_team_id in [str(tid) for tid in current_user.team_ids]:
+        can_validate = True
+    
+    if not can_validate:
+        raise HTTPException(
+            status_code=403, 
+            detail="You do not have permission to validate this instance"
+        )
+    
+    try:
+        field_validations = request.get("field_validations", {})
+        overall_status = request.get("overall_status", "pending")
+        validation_summary = request.get("validation_summary", "")
+        
+        # Store validation results in the instance context
+        if not instance.context:
+            instance.context = {}
+        
+        instance.context["field_validations"] = field_validations
+        instance.context["validation_summary"] = validation_summary
+        instance.context["validated_by"] = str(current_user.id)
+        instance.context["validated_at"] = datetime.utcnow().isoformat()
+        
+        # Update assignment status based on validation result
+        if overall_status == "approved":
+            instance.assignment_status = AssignmentStatus.APPROVED_BY_REVIEWER
+        elif overall_status == "rejected":
+            instance.assignment_status = AssignmentStatus.REJECTED
+        else:
+            instance.assignment_status = AssignmentStatus.UNDER_REVIEW
+        
+        instance.updated_at = datetime.utcnow()
+        await instance.save()
+        
+        return {
+            "success": True,
+            "message": f"Data validation completed: {overall_status}",
+            "instance_id": instance_id,
+            "validation_summary": validation_summary,
+            "validated_by": current_user.full_name,
+            "assignment_status": instance.assignment_status
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to save validation results: {str(e)}"
+        )
