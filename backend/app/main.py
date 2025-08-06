@@ -13,12 +13,21 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
-# Set up CORS - temporary hardcoded for development
+# Set up CORS - development configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080", "http://localhost:8000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173", 
+        "http://localhost:8080",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:8000"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -41,12 +50,6 @@ async def health_check():
     }
 
 
-@app.get("/debug/cors")
-async def debug_cors():
-    return {
-        "cors_origins": settings.BACKEND_CORS_ORIGINS,
-        "cors_origins_type": type(settings.BACKEND_CORS_ORIGINS).__name__
-    }
 
 
 async def sync_programmatic_workflows():
