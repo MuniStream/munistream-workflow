@@ -11,7 +11,7 @@ from ...workflows.registry import step_registry
 from ...core.locale import get_locale_from_request
 from ...core.i18n import t
 from ...models.category import WorkflowCategory
-from ...models.workflow import WorkflowDefinition
+from ...models.workflow import WorkflowDefinition, WorkflowInstance, AssignmentType
 
 router = APIRouter()
 
@@ -331,6 +331,69 @@ async def start_workflow_instance(
             }
         )
         
+        # AUTO-ASSIGN instance immediately after creation (random selection)
+        print(f"🔍 DEBUG: Starting auto-assignment for instance {instance.instance_id}")
+        try:
+            from ...models.team import TeamModel
+            from ...models.user import UserModel
+            from ...models.workflow import AssignmentType
+            import random
+            
+            print(f"🔍 DEBUG: Getting teams for auto-assignment")
+            # Get all reviewers from all teams
+            teams = await TeamModel.find().to_list()
+            print(f"🔍 DEBUG: Found {len(teams)} teams")
+            all_reviewers = []
+            
+            for team in teams:
+                print(f"🔍 DEBUG: Processing team {team.name} with {len(team.members) if team.members else 0} members")
+                if team.members:
+                    for member in team.members:
+                        print(f"🔍 DEBUG: Looking for user with member.user_id: {member.user_id}")
+                        # UserModel uses 'id' field, not 'user_id'
+                        from bson import ObjectId
+                        try:
+                            user = await UserModel.get(member.user_id)
+                            print(f"🔍 DEBUG: Found user: {user.email if user else 'None'}")
+                            if user and user.role == "reviewer":
+                                print(f"🔍 DEBUG: Adding reviewer {user.email} from team {team.name}")
+                                all_reviewers.append({
+                                    "user": user,
+                                    "team": team
+                                })
+                        except Exception as e:
+                            print(f"🔍 DEBUG: Could not find user {member.user_id}: {e}")
+            
+            if all_reviewers:
+                # Random assignment
+                selected = random.choice(all_reviewers)
+                user_id = str(selected["user"].id)
+                
+                print(f"🔍 DEBUG: About to assign to user_id: {user_id}, user: {selected['user'].email}")
+                
+                try:
+                    # Assign to selected user and team - using positional args to avoid keyword conflict
+                    instance.assign_to_user(
+                        user_id,  # positional argument
+                        "system",  # assigned_by
+                        AssignmentType.AUTOMATIC,  # assignment_type
+                        "Auto-assigned at instance creation"  # notes
+                    )
+                    print(f"🔍 DEBUG: assign_to_user completed successfully")
+                except Exception as assign_error:
+                    print(f"🔍 DEBUG: assign_to_user failed: {assign_error}")
+                    raise assign_error
+                instance.assigned_team_id = selected["team"].team_id
+                await instance.save()
+                
+                print(f"✅ Auto-assigned instance {instance.instance_id} to {selected['user'].email} (team: {selected['team'].name})")
+            else:
+                print(f"⚠️  No reviewers found for auto-assignment of instance {instance.instance_id}")
+                
+        except Exception as e:
+            print(f"❌ Auto-assignment error for new instance {instance.instance_id}: {e}")
+            # Continue normally even if assignment fails
+        
         # Execute workflow in background to handle citizen input steps
         from .instances import execute_workflow_instance
         background_tasks.add_task(execute_workflow_instance, instance.instance_id)
@@ -578,17 +641,19 @@ async def submit_citizen_data(
         if input_step_id not in instance.completed_steps:
             instance.completed_steps.append(input_step_id)
         
-        # Update instance status to pending validation after citizen data submission
+        # Update instance status after citizen data submission
         if instance.status == "awaiting_input":
-            instance.status = "pending_validation"
+            instance.status = "pending_validation"  # Change to pending_validation after data submission
             if not instance.current_step:
                 instance.current_step = input_step_id
         
-        # Don't move to next step automatically - wait for admin validation
-        # The workflow will resume after admin approves/rejects the data
-            
         instance.updated_at = datetime.utcnow()
         await instance.save()
+        
+        print(f"🔍 DEBUG: Data submitted for instance {instance_id}")
+        print(f"🔍 DEBUG: Instance already auto-assigned at creation - Current assignment: {getattr(instance, 'assignment_status', 'NONE')}")
+        
+        # Note: Auto-assignment now happens at instance creation, not here
         
         # Create step execution record for the completed citizen input step
         step_execution = StepExecution(
