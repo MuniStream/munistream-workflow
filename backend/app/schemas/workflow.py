@@ -104,6 +104,15 @@ class InstanceResponse(BaseModel):
     updated_at: datetime
     completed_at: Optional[datetime]
     
+    # Assignment information
+    assigned_user_id: Optional[str] = None
+    assigned_team_id: Optional[str] = None  
+    assignment_status: Optional[str] = None
+    assignment_type: Optional[str] = None
+    assigned_at: Optional[datetime] = None
+    assigned_by: Optional[str] = None
+    assignment_notes: Optional[str] = None
+    
     class Config:
         use_enum_values = True
 
