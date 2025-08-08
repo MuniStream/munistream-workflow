@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends, Request
+from passlib.context import CryptContext
 
 from ..models.user import UserModel, RefreshTokenModel, UserRole, Permission
 from ..core.config import settings
@@ -20,10 +21,23 @@ ALGORITHM = settings.ALGORITHM
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 security = HTTPBearer()
 
 class AuthService:
     """Authentication service for handling JWT tokens and user authentication"""
+    
+    @staticmethod
+    def get_password_hash(password: str) -> str:
+        """Hash a password using bcrypt"""
+        return pwd_context.hash(password)
+    
+    @staticmethod
+    def verify_password(plain_password: str, hashed_password: str) -> bool:
+        """Verify a password against its hash"""
+        return pwd_context.verify(plain_password, hashed_password)
     
     @staticmethod
     def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:

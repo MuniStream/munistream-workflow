@@ -331,4 +331,246 @@ class IntegrationStep(BaseStep):
         return result
 
 
+# Entity validation functions (always available)
+def entity_validation_successful(inputs: Dict[str, Any], context: Dict[str, Any]) -> bool:
+    """Función condicional: verificar que todas las validaciones fueron exitosas"""
+    return context.get("overall_status") == "valid"
+
+
+def entity_validation_has_warnings_only(inputs: Dict[str, Any], context: Dict[str, Any]) -> bool:
+    """Función condicional: verificar que solo hay advertencias (no errores críticos)"""
+    return context.get("overall_status") == "has_warnings"
+
+
+def entity_validation_has_errors(inputs: Dict[str, Any], context: Dict[str, Any]) -> bool:
+    """Función condicional: verificar que hay errores críticos"""
+    return context.get("overall_status") in ["has_errors", "critical_error"]
+
+
+# EntityStep functionality - integrated directly in base.py
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class EntityValidationService(Protocol):
+    """Protocol que define la interfaz que debe implementar un servicio de validación de entidades"""
+    
+    async def create_entity(self, entity_type: str, data: Dict[str, Any]) -> 'Entity':
+        """Crear una nueva instancia de entidad"""
+        ...
+    
+    async def validate_entities(self, entities: List['Entity']) -> Dict[str, Any]:
+        """Validar múltiples entidades en paralelo"""
+        ...
+
+
+@runtime_checkable  
+class Entity(Protocol):
+    """Protocol que define la interfaz que debe implementar una entidad"""
+    
+    validation_status: str
+    validation_errors: List[str]
+    auto_filled_fields: List[str]
+    external_validations: Dict[str, Any]
+    data: Dict[str, Any]
+    
+    async def validate(self) -> bool:
+        """Validar la entidad"""
+        ...
+    
+    async def auto_complete(self) -> Dict[str, Any]:
+        """Auto-completar datos de la entidad"""
+        ...
+    
+    def get_validation_rules(self) -> Dict[str, Any]:
+        """Obtener reglas de validación"""
+        ...
+    
+    def get_required_fields(self) -> List[str]:
+        """Obtener campos requeridos"""
+        ...
+
+
+class EntityStep(ActionStep):
+    """
+    Step base para integrar entidades semánticas con workflows DAG.
+    
+    Esta clase proporciona la funcionalidad genérica para:
+    - Extraer datos de entrada según configuración
+    - Crear entidades usando el servicio de validación
+    - Auto-completar datos
+    - Validar entidades
+    - Formatear resultados para el workflow
+    """
+    
+    def __init__(
+        self,
+        step_id: str,
+        name: str,
+        entity_service: EntityValidationService,
+        entity_mappings: List[Dict[str, Any]],
+        **kwargs
+    ):
+        """
+        Args:
+            entity_service: Servicio de validación de entidades del plugin
+            entity_mappings: Lista de configuraciones de entidades a validar
+                Formato: [
+                    {
+                        "entity_type": "address",
+                        "input_fields": ["street", "number", "postal_code"],
+                        "output_key": "address_validation",
+                        "config": {}  # Configuración adicional opcional
+                    }
+                ]
+        """
+        self.entity_service = entity_service
+        self.entity_mappings = entity_mappings
+        
+        super().__init__(
+            step_id=step_id,
+            name=name,
+            action=self._execute_entity_validation,
+            description=f"Validación semántica usando {len(entity_mappings)} entidades",
+            **kwargs
+        )
+    
+    async def _execute_entity_validation(self, inputs: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """Ejecutar validación de entidades según configuración"""
+        
+        results = {
+            "entity_validation_completed": True,
+            "entity_results": {},
+            "overall_status": "valid",
+            "validation_errors": [],
+            "validation_warnings": [],
+            "auto_filled_data": {},
+            "validation_timestamp": datetime.utcnow().isoformat()
+        }
+        
+        try:
+            entities_created = []
+            
+            # Procesar cada mapping de entidad
+            for mapping in self.entity_mappings:
+                entity_type = mapping["entity_type"]
+                input_fields = mapping["input_fields"]
+                output_key = mapping["output_key"]
+                config = mapping.get("config", {})
+                optional = mapping.get("optional", False)
+                
+                # Extraer datos de entrada
+                entity_data = self._extract_entity_data(inputs, input_fields, config)
+                
+                # Skip si es opcional y no hay datos
+                if optional and not any(entity_data.values()):
+                    continue
+                
+                # Crear entidad
+                entity = await self.entity_service.create_entity(entity_type, entity_data)
+                entities_created.append((entity, output_key))
+            
+            # Procesar cada entidad creada
+            for entity, output_key in entities_created:
+                # Auto-completar
+                completed_data = await entity.auto_complete()
+                results["auto_filled_data"][output_key] = completed_data
+                
+                # Validar
+                is_valid = await entity.validate()
+                
+                # Almacenar resultado individual
+                results["entity_results"][output_key] = {
+                    "valid": is_valid,
+                    "status": entity.validation_status,
+                    "errors": entity.validation_errors,
+                    "auto_filled_fields": entity.auto_filled_fields,
+                    "external_validations": entity.external_validations,
+                    "data": entity.data
+                }
+                
+                # Actualizar estado general
+                self._update_overall_status(results, entity, output_key)
+        
+        except Exception as e:
+            results.update({
+                "overall_status": "critical_error",
+                "validation_errors": [f"Error crítico en validación: {str(e)}"],
+                "exception": str(e)
+            })
+        
+        return results
+    
+    def _extract_entity_data(self, inputs: Dict[str, Any], input_fields: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+        """Extraer datos de entrada para una entidad específica"""
+        entity_data = {}
+        
+        # Extraer campos de entrada
+        for field in input_fields:
+            if field in inputs:
+                entity_data[field] = inputs[field]
+        
+        # Agregar configuración adicional
+        entity_data.update(config)
+        
+        return entity_data
+    
+    def _update_overall_status(self, results: Dict[str, Any], entity: Entity, output_key: str):
+        """Actualizar el estado general basado en el resultado de una entidad"""
+        if not entity.validation_status == "valid":
+            error_prefix = f"{output_key}: "
+            
+            if entity.validation_status == "needs_review":
+                results["validation_warnings"].extend([
+                    f"{error_prefix}{err}" for err in entity.validation_errors
+                ])
+                if results["overall_status"] != "has_errors":
+                    results["overall_status"] = "has_warnings"
+            else:
+                results["validation_errors"].extend([
+                    f"{error_prefix}{err}" for err in entity.validation_errors
+                ])
+                results["overall_status"] = "has_errors"
+
+
+class EntityValidationResult:
+    """Clase utilitaria para manejar resultados de validación de entidades"""
+    
+    def __init__(self, validation_result: Dict[str, Any]):
+        self.result = validation_result
+    
+    @property
+    def is_valid(self) -> bool:
+        """Verificar si todas las validaciones fueron exitosas"""
+        return self.result.get("overall_status") == "valid"
+    
+    @property
+    def has_warnings(self) -> bool:
+        """Verificar si hay advertencias pero no errores críticos"""
+        return self.result.get("overall_status") == "has_warnings"
+    
+    @property
+    def has_errors(self) -> bool:
+        """Verificar si hay errores críticos"""
+        return self.result.get("overall_status") in ["has_errors", "critical_error"]
+    
+    @property
+    def validation_errors(self) -> List[str]:
+        """Obtener lista de errores de validación"""
+        return self.result.get("validation_errors", [])
+    
+    @property
+    def validation_warnings(self) -> List[str]:
+        """Obtener lista de advertencias"""
+        return self.result.get("validation_warnings", [])
+    
+    @property
+    def auto_filled_data(self) -> Dict[str, Any]:
+        """Obtener datos auto-completados"""
+        return self.result.get("auto_filled_data", {})
+    
+    @property
+    def entity_results(self) -> Dict[str, Any]:
+        """Obtener resultados detallados por entidad"""
+        return self.result.get("entity_results", {})
+
 import asyncio

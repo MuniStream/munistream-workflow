@@ -26,15 +26,77 @@ from ...models.workflow import (
     AssignmentType
 )
 from ...core.database import get_database
-from ...workflows.registry import step_registry
-from ...workflows.executor import step_executor, StepExecutionContext
-from ...services.workflow_service import WorkflowService
+from ...workflows.dag import DAGInstance, InstanceStatus
+from ...services.workflow_service import workflow_service
 from ...services.auth_service import require_permission, get_current_user
 from ...services.assignment_service import assignment_service
 from ...models.user import UserModel, Permission, UserRole
 from ...models.team import TeamModel
 
 router = APIRouter()
+
+
+@router.post("/", response_model=InstanceResponse)
+async def create_workflow_instance(
+    request: WorkflowExecuteRequest,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Create and execute a new workflow instance using DAG architecture"""
+    try:
+        # Create DAG instance
+        dag_instance = await workflow_service.create_instance(
+            workflow_id=request.workflow_id,
+            user_id=str(current_user.id),
+            initial_data=request.context or {}
+        )
+        
+        # Start execution
+        await workflow_service.execute_instance(dag_instance.instance_id)
+        
+        # Return response
+        return InstanceResponse(
+            instance_id=dag_instance.instance_id,
+            workflow_id=dag_instance.dag.dag_id,
+            status=dag_instance.status.value,
+            user_id=dag_instance.user_id,
+            context=dag_instance.context,
+            progress_percentage=dag_instance.get_progress_percentage(),
+            current_step=dag_instance.current_task,
+            created_at=dag_instance.created_at,
+            started_at=dag_instance.started_at
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{instance_id}", response_model=InstanceResponse)
+async def get_instance(
+    instance_id: str,
+    current_user: UserModel = Depends(get_current_user)
+):
+    """Get DAG instance details"""
+    dag_instance = await workflow_service.get_instance(instance_id)
+    
+    if not dag_instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    
+    # Check permissions - user can only see their own instances unless admin
+    if dag_instance.user_id != str(current_user.id) and current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return InstanceResponse(
+        instance_id=dag_instance.instance_id,
+        workflow_id=dag_instance.dag.dag_id,
+        status=dag_instance.status.value,
+        user_id=dag_instance.user_id,
+        context=dag_instance.context,
+        progress_percentage=dag_instance.get_progress_percentage(),
+        current_step=dag_instance.current_task,
+        created_at=dag_instance.created_at,
+        started_at=dag_instance.started_at,
+        completed_at=dag_instance.completed_at
+    )
 
 
 @router.get("/my-assignments", response_model=InstanceListResponse)
@@ -273,20 +335,22 @@ def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse
 
 
 async def execute_workflow_instance(instance_id: str):
-    """Background task to execute workflow instance"""
+    """Background task to execute workflow instance using DAG system"""
     instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
     if not instance:
         return
     
     try:
-        # Get workflow from registry
-        workflow = step_registry.get_workflow(instance.workflow_id)
-        if not workflow:
-            raise Exception(f"Workflow {instance.workflow_id} not found in registry")
+        # Get DAG from DAG system
+        dag = await workflow_service.get_dag(instance.workflow_id)
+        if not dag:
+            raise Exception(f"Workflow {instance.workflow_id} not found in DAG system")
         
         # Handle initial workflow start
-        if not instance.current_step and workflow.start_step:
-            instance.current_step = workflow.start_step.step_id
+        if not instance.current_step:
+            root_tasks = dag.get_root_tasks()
+            if root_tasks:
+                instance.current_step = root_tasks[0].task_id
             instance.status = "running"
             instance.started_at = datetime.utcnow()
             instance.updated_at = datetime.utcnow()
@@ -363,8 +427,8 @@ async def execute_workflow_instance(instance_id: str):
             instance.updated_at = datetime.utcnow()
             await instance.save()
         
-        # Handle continued execution from current step
-        elif instance.current_step and instance.status == "running":
+        # Handle continued execution from current step - use loop to avoid recursion
+        while instance.current_step and instance.status == "running":
             current_step = workflow.steps.get(instance.current_step)
             if not current_step:
                 raise Exception(f"Current step {instance.current_step} not found in workflow")
@@ -437,13 +501,12 @@ async def execute_workflow_instance(instance_id: str):
                     next_step = current_step.next_steps[0]
                     instance.current_step = next_step.step_id
                     
-                    # Continue execution recursively if next step doesn't require citizen input
+                    # Save and continue with loop instead of recursion
                     instance.updated_at = datetime.utcnow()
                     await instance.save()
                     
-                    # Recursively continue to next step
-                    await execute_workflow_instance(instance_id)
-                    return
+                    # Continue to next step without recursion - let the main loop handle it
+                    continue
                 else:
                     # No next steps, workflow complete
                     instance.status = "completed"
@@ -457,6 +520,9 @@ async def execute_workflow_instance(instance_id: str):
             
             instance.updated_at = datetime.utcnow()
             await instance.save()
+            
+            # Break if no continue was triggered (avoid infinite loop)
+            break
             
     except Exception as e:
         instance.status = "failed"
@@ -730,9 +796,9 @@ async def get_citizen_validations(
     # Format response with citizen data - filter out instances without citizen data
     validation_items = []
     for instance in instances:
-        # Get workflow from registry for metadata
-        workflow = step_registry.get_workflow(instance.workflow_id)
-        if not workflow:
+        # Get workflow from DAG system for metadata
+        dag = await workflow_service.get_dag(instance.workflow_id)
+        if not dag:
             continue
             
         # Extract citizen data from context
@@ -1020,7 +1086,7 @@ async def get_instance_progress(instance_id: str):
     }
 
 
-@router.post("/{instance_id}/validate-citizen-data")
+@router.post("/{instance_id}/validate")
 async def validate_citizen_data(
     instance_id: str,
     validation_request: Dict[str, Any],
@@ -1052,33 +1118,41 @@ async def validate_citizen_data(
         )
     
     # Get validation decision
-    decision = validation_request.get("decision")  # "approve" or "reject"
+    decision = validation_request.get("decision")
+    entity_type = validation_request.get("entity_type")
     comments = validation_request.get("comments", "")
     
-    if decision not in ["approve", "reject"]:
+    if decision not in ["approve", "reject", "request_changes"]:
         raise HTTPException(
             status_code=400,
-            detail="Decision must be 'approve' or 'reject'"
+            detail="Decision must be 'approve', 'reject', or 'request_changes'"
         )
     
-    # Get workflow from registry
-    workflow = step_registry.get_workflow(instance.workflow_id)
-    if not workflow:
+    # Get workflow from DAG system
+    dag = await workflow_service.get_dag(instance.workflow_id)
+    if not dag:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
-    # Find which step needs validation (the current step requiring citizen input)
-    current_step = None
-    if instance.current_step and instance.current_step in workflow.steps:
-        current_step = workflow.steps[instance.current_step]
+    # Find which task needs validation (the current task requiring citizen input)
+    current_task = None
+    if instance.current_step and instance.current_step in dag.tasks:
+        current_task = dag.tasks[instance.current_step]
     
-    # If current step requires citizen input, validate for that step
-    if current_step and hasattr(current_step, 'requires_citizen_input') and current_step.requires_citizen_input:
+    # Determine validation keys based on entity_type or step
+    if entity_type:
+        # Entity-specific validation
+        step_validation_key = f"{entity_type}_validation_status"
+        step_comments_key = f"{entity_type}_validation_comments"
+        step_validator_key = f"{entity_type}_validated_by"
+        step_timestamp_key = f"{entity_type}_validation_timestamp"
+    elif current_step and hasattr(current_step, 'requires_citizen_input') and current_step.requires_citizen_input:
+        # Step-specific validation
         step_validation_key = f"{current_step.step_id}_admin_validation_decision"
         step_comments_key = f"{current_step.step_id}_admin_validation_comments"
         step_validator_key = f"{current_step.step_id}_validated_by"
         step_timestamp_key = f"{current_step.step_id}_validation_timestamp"
     else:
-        # Fall back to global validation for backward compatibility
+        # Fall back to global validation
         step_validation_key = "admin_validation_decision"
         step_comments_key = "admin_validation_comments"
         step_validator_key = "validated_by"
@@ -1114,29 +1188,66 @@ async def validate_citizen_data(
             if instance.current_step not in instance.completed_steps:
                 instance.completed_steps.append(instance.current_step)
         
-        # Set status to awaiting_input to trigger auto-assignment to review team
-        instance.status = "awaiting_input"
+        # Simple step completion logic - let each step handle its own validation
+        print(f"🔍 Validation request: decision={validation_request.get('decision')}, current_step={instance.current_step}")
         
-        # Try to auto-assign to review team
-        try:
-            assignment_result = await AssignmentService.auto_assign_instance(instance)
-            if assignment_result and assignment_result.get("success"):
-                # Successfully assigned to reviewer
-                pass  # Status will be updated by assignment service
+        if validation_request.get('decision') == 'approve':
+            print(f"✅ Approving step: {instance.current_step}")
+            # Step approved - execute the current step and advance to next
+            current_step = workflow.steps.get(instance.current_step)
+            if current_step:
+                print(f"📝 Found step: {current_step.name}")
+                try:
+                    # Execute the step with current context
+                    from ...workflows.executor import StepExecutionContext
+                    execution_context = StepExecutionContext(
+                        instance_id=instance.instance_id,
+                        user_id=instance.user_id
+                    )
+                    
+                    step_result = await step_executor.execute_step(
+                        step=current_step,
+                        inputs=instance.context,
+                        context=instance.context,
+                        execution_context=execution_context
+                    )
+                    print(f"🔧 Step executed, result type: {type(step_result)}")
+                    
+                    # Update context with step results
+                    if isinstance(step_result, dict):
+                        instance.context.update(step_result)
+                        print(f"📊 Context updated with: {list(step_result.keys())}")
+                    
+                    # Mark step as completed
+                    if instance.current_step not in instance.completed_steps:
+                        instance.completed_steps.append(instance.current_step)
+                    
+                    # Advance to next step
+                    if hasattr(current_step, 'next_steps') and current_step.next_steps:
+                        next_step_id = current_step.next_steps[0].step_id if hasattr(current_step.next_steps[0], 'step_id') else current_step.next_steps[0]
+                        instance.current_step = next_step_id
+                        instance.status = "awaiting_input"
+                        print(f"✅ Step completed, advancing to: {next_step_id}")
+                    else:
+                        # No next steps, workflow complete
+                        instance.status = "completed"
+                        instance.current_step = None
+                        instance.completed_at = datetime.utcnow()
+                        print(f"✅ Workflow completed")
+                        
+                except Exception as e:
+                    print(f"❌ Error executing step: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    instance.status = "failed"
             else:
-                # Assignment failed, continue with old flow
-                instance.status = "running"
-        except Exception as e:
-            print(f"Auto-assignment failed, continuing with old flow: {e}")
-            instance.status = "running"
-    
-    else:  # reject
-        # Mark instance as failed with rejection reason
-        instance.status = "failed"
-        instance.current_step = None
-        instance.completed_at = datetime.utcnow()
-        if instance.current_step and instance.current_step not in instance.failed_steps:
-            instance.failed_steps.append(instance.current_step)
+                print(f"❌ Current step not found in workflow: {instance.current_step}")
+                    
+        elif validation_request.get('decision') == 'reject':
+            # Step rejected - workflow failed
+            instance.status = "failed"
+            instance.current_step = None
+            instance.completed_at = datetime.utcnow()
     
     instance.updated_at = datetime.utcnow()
     await instance.save()
@@ -1156,8 +1267,8 @@ async def validate_citizen_data(
     )
     await step_execution.create()
     
-    # Continue workflow execution if approved
-    if decision == "approve" and instance.status == "running":
+    # Continue workflow execution if approved and status allows it
+    if decision == "approve" and instance.status in ["running", "awaiting_input"]:
         background_tasks.add_task(execute_workflow_instance, instance_id)
     
     return {
@@ -1184,9 +1295,9 @@ async def get_citizen_data(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    # Get workflow from registry
-    workflow = step_registry.get_workflow(instance.workflow_id)
-    if not workflow:
+    # Get workflow from DAG system
+    dag = await workflow_service.get_dag(instance.workflow_id)
+    if not dag:
         raise HTTPException(status_code=404, detail="Workflow not found")
     
     # Extract all citizen data from context
@@ -1463,12 +1574,12 @@ async def approve_instance_by_reviewer(
     try:
         # Resume workflow execution for next steps (like signature/final approval)
         # Check if there are more steps in the workflow to execute
-        workflow = step_registry.get_workflow(instance.workflow_id)
-        if workflow and instance.current_step:
-            current_step = workflow.steps.get(instance.current_step)
+        dag = await workflow_service.get_dag(instance.workflow_id)
+        if dag and instance.current_step:
+            current_task = dag.tasks.get(instance.current_step)
             
-            # If current step has next steps, continue workflow execution
-            if current_step and hasattr(current_step, 'next_steps') and current_step.next_steps:
+            # If current task has downstream tasks, continue workflow execution
+            if current_task and hasattr(current_task, 'downstream_tasks') and current_task.downstream_tasks:
                 # Update status to indicate it's ready for next stage (final approval)
                 instance.assignment_status = AssignmentStatus.PENDING_SIGNATURE
                 instance.status = "running"

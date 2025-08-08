@@ -11,37 +11,64 @@ from ..models.workflow import (
     ApprovalRequest,
     WorkflowAuditLog
 )
-from ..workflows.workflow import Workflow
-from ..workflows.base import BaseStep
+from ..workflows.dag import DAG, DAGInstance, DAGBag, InstanceStatus
+from ..workflows.executor import DAGExecutor
+from ..workflows.operators.base import BaseOperator
 
 
 class WorkflowService:
-    """Service layer for workflow operations"""
+    """Service layer for new DAG-based workflow operations"""
     
-    @staticmethod
-    async def create_workflow_definition(
-        workflow_id: str,
-        name: str,
-        description: str = None,
-        version: str = "1.0.0",
-        created_by: str = None,
-        metadata: Dict[str, Any] = None
-    ) -> WorkflowDefinition:
-        """Create a new workflow definition"""
+    def __init__(self):
+        self.dag_bag = DAGBag()
+        self.executor = DAGExecutor()
+    
+    async def register_dag(self, dag: DAG, created_by: str = None) -> WorkflowDefinition:
+        """Register a DAG and create corresponding database records"""
+        # Add DAG to bag
+        self.dag_bag.add_dag(dag)
+        
+        # Create workflow definition record
         workflow_def = WorkflowDefinition(
-            workflow_id=workflow_id,
-            name=name,
-            description=description,
-            version=version,
-            created_by=created_by,
-            metadata=metadata or {}
+            workflow_id=dag.dag_id,
+            name=dag.description or dag.dag_id,
+            description=dag.description,
+            version=dag.version,
+            status="active" if dag.status.value == "active" else "draft",
+            start_step_id=dag.get_root_tasks()[0].task_id if dag.get_root_tasks() else None,
+            category="automated",
+            tags=dag.tags,
+            metadata=dag.metadata,
+            created_by=created_by
         )
         
         await workflow_def.insert()
+        
+        # Create step records for API compatibility
+        for task_id, task in dag.tasks.items():
+            step = WorkflowStep(
+                step_id=task_id,
+                workflow_id=dag.dag_id,
+                name=task_id.replace("_", " ").title(),
+                step_type=task.__class__.__name__.replace("Operator", "").lower(),
+                description=f"{task.__class__.__name__} operation",
+                required_inputs=[],
+                optional_inputs=[],
+                next_steps=[t.task_id for t in task.downstream_tasks],
+                configuration=task.kwargs,
+                requires_citizen_input=hasattr(task, 'form_config'),
+                input_form=getattr(task, 'form_config', {}),
+                created_by=created_by
+            )
+            await step.insert()
+        
         return workflow_def
     
-    @staticmethod
-    async def get_workflow_definition(workflow_id: str) -> Optional[WorkflowDefinition]:
+    async def get_dag(self, dag_id: str) -> Optional[DAG]:
+        """Get DAG by ID"""
+        return self.dag_bag.get_dag(dag_id)
+    
+    async def get_workflow_definition(self, workflow_id: str) -> Optional[WorkflowDefinition]:
         """Get workflow definition by ID"""
         return await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == workflow_id)
     
@@ -83,94 +110,118 @@ class WorkflowService:
         await workflow_def.save()
         return workflow_def
     
-    @staticmethod
-    async def save_workflow_steps(workflow_id: str, workflow: Workflow) -> List[WorkflowStep]:
-        """Save workflow steps to database"""
-        # Delete existing steps
-        await WorkflowStep.find(WorkflowStep.workflow_id == workflow_id).delete()
-        
-        # Create new steps
-        steps = []
-        for step_id, step in workflow.steps.items():
-            step_type = "action"
-            configuration = {}
-            
-            if hasattr(step, 'conditions'):
-                step_type = "conditional"
-                # Store condition info (simplified for now)
-                configuration["conditions"] = list(step.conditions.keys()).__len__()
-            elif hasattr(step, 'approvers'):
-                step_type = "approval"
-                configuration["approvers"] = step.approvers
-                configuration["approval_type"] = step.approval_type
-            elif hasattr(step, 'service_name'):
-                step_type = "integration"
-                configuration["service_name"] = step.service_name
-                configuration["endpoint"] = step.endpoint
-            elif hasattr(step, 'terminal_status'):
-                step_type = "terminal"
-                configuration["terminal_status"] = step.terminal_status
-            
-            workflow_step = WorkflowStep(
-                step_id=step_id,
-                workflow_id=workflow_id,
-                name=step.name,
-                step_type=step_type,
-                description=step.description,
-                required_inputs=step.required_inputs,
-                optional_inputs=step.optional_inputs,
-                next_steps=[s.step_id for s in step.next_steps],
-                configuration=configuration,
-                requires_citizen_input=getattr(step, 'requires_citizen_input', False),
-                input_form=getattr(step, 'input_form', {})
-            )
-            
-            steps.append(workflow_step)
-        
-        # Bulk insert
-        if steps:
-            await WorkflowStep.insert_many(steps)
-        
-        return steps
-    
-    @staticmethod
-    async def get_workflow_steps(workflow_id: str) -> List[WorkflowStep]:
+    async def get_workflow_steps(self, workflow_id: str) -> List[WorkflowStep]:
         """Get all steps for a workflow"""
         return await WorkflowStep.find(WorkflowStep.workflow_id == workflow_id).to_list()
 
 
-class InstanceService:
-    """Service layer for workflow instance operations"""
-    
-    @staticmethod
     async def create_instance(
+        self, 
         workflow_id: str,
-        user_id: str,
-        initial_context: Dict[str, Any] = None,
-        user_data: Dict[str, Any] = None,
-        priority: int = 5
-    ) -> WorkflowInstance:
-        """Create a new workflow instance"""
-        import uuid
+        user_id: str, 
+        initial_data: Dict[str, Any] = None
+    ) -> DAGInstance:
+        """Create a new DAG instance"""
+        # Get DAG from bag
+        dag = self.dag_bag.get_dag(workflow_id)
+        if not dag:
+            raise ValueError(f"Workflow {workflow_id} not found")
         
-        instance = WorkflowInstance(
-            instance_id=str(uuid.uuid4()),
-            workflow_id=workflow_id,
+        # Create DAG instance
+        dag_instance = dag.create_instance(user_id, initial_data)
+        self.dag_bag.instances[dag_instance.instance_id] = dag_instance
+        
+        # Create database record for API compatibility
+        status_mapping = {
+            InstanceStatus.PENDING: "pending",
+            InstanceStatus.RUNNING: "running",
+            InstanceStatus.PAUSED: "awaiting_input",
+            InstanceStatus.COMPLETED: "completed",
+            InstanceStatus.FAILED: "failed",
+            InstanceStatus.CANCELLED: "cancelled"
+        }
+        
+        workflow_instance = WorkflowInstance(
+            instance_id=dag_instance.instance_id,
+            workflow_id=dag_instance.dag.dag_id,
+            workflow_version=dag_instance.dag.version,
             user_id=user_id,
-            context=initial_context or {},
-            user_data=user_data or {},
-            priority=priority
+            user_data=initial_data or {},
+            status=status_mapping.get(dag_instance.status, "pending"),
+            current_step=dag_instance.current_task,
+            context=dag_instance.context,
+            completed_steps=list(dag_instance.completed_tasks),
+            failed_steps=list(dag_instance.failed_tasks),
+            started_at=dag_instance.created_at
         )
         
-        await instance.insert()
+        await workflow_instance.insert()
         
-        # Update workflow statistics
-        workflow_def = await WorkflowService.get_workflow_definition(workflow_id)
-        if workflow_def:
-            workflow_def.total_instances += 1
-            await workflow_def.save()
+        return dag_instance
+    
+    async def execute_instance(self, instance_id: str) -> bool:
+        """Execute a DAG instance"""
+        dag_instance = self.dag_bag.get_instance(instance_id)
+        if not dag_instance:
+            raise ValueError(f"Instance {instance_id} not found")
         
-        return instance
+        # Submit to executor
+        self.executor.submit_instance(dag_instance)
+        return True
+    
+    async def get_instance(self, instance_id: str) -> Optional[DAGInstance]:
+        """Get DAG instance by ID"""
+        return self.dag_bag.get_instance(instance_id)
+    
+    async def get_user_instances(self, user_id: str) -> List[DAGInstance]:
+        """Get all instances for a user"""
+        return self.dag_bag.get_user_instances(user_id)
+    
+    async def update_instance_from_dag(self, dag_instance: DAGInstance):
+        """Update database record from DAG instance state"""
+        workflow_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == dag_instance.instance_id
+        )
+        
+        if workflow_instance:
+            # Update status
+            status_mapping = {
+                InstanceStatus.PENDING: "pending",
+                InstanceStatus.RUNNING: "running",
+                InstanceStatus.PAUSED: "awaiting_input",
+                InstanceStatus.COMPLETED: "completed", 
+                InstanceStatus.FAILED: "failed",
+                InstanceStatus.CANCELLED: "cancelled"
+            }
+            
+            workflow_instance.status = status_mapping.get(dag_instance.status, "running")
+            workflow_instance.current_step = dag_instance.current_task
+            workflow_instance.context = dag_instance.context
+            workflow_instance.completed_steps = list(dag_instance.completed_tasks)
+            workflow_instance.failed_steps = list(dag_instance.failed_tasks)
+            workflow_instance.completed_at = dag_instance.completed_at
+            
+            if dag_instance.completed_at and dag_instance.started_at:
+                duration = (dag_instance.completed_at - dag_instance.started_at).total_seconds()
+                workflow_instance.duration_seconds = duration
+            
+            await workflow_instance.save()
+    
+    async def start_executor(self):
+        """Start the DAG executor"""
+        await self.executor.start()
+    
+    async def stop_executor(self):
+        """Stop the DAG executor"""
+        await self.executor.stop()
+
+
+# Global workflow service instance
+workflow_service = WorkflowService()
+
+
+class InstanceService:
+    """Legacy service class for API compatibility"""
     
     @staticmethod
     async def get_instance(instance_id: str) -> Optional[WorkflowInstance]:

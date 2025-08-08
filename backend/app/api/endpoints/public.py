@@ -4,14 +4,18 @@ These endpoints are used by the citizen portal for browsing workflows.
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, Request, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, Request, BackgroundTasks, Depends
 from datetime import datetime
+from pydantic import BaseModel
 
-from ...workflows.registry import step_registry
+from ...services.workflow_service import workflow_service
 from ...core.locale import get_locale_from_request
 from ...core.i18n import t
 from ...models.category import WorkflowCategory
 from ...models.workflow import WorkflowDefinition, WorkflowInstance, AssignmentType
+from ...models.customer import Customer, CustomerStatus
+from ...services.auth_service import AuthService
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 router = APIRouter()
 
@@ -42,9 +46,9 @@ async def get_public_workflows(
     public_workflows = []
     
     for db_workflow in db_workflows:
-        # Get workflow from registry for step details
-        workflow = step_registry.get_workflow(db_workflow.workflow_id)
-        if not workflow:
+        # Get workflow from DAG system for step details
+        dag = await workflow_service.get_dag(db_workflow.workflow_id)
+        if not dag:
             continue
             
         # Get category name from database
@@ -58,7 +62,7 @@ async def get_public_workflows(
                 workflow_category_name = category_doc.name
         
         # Calculate estimated duration based on step count
-        step_count = len(workflow.steps)
+        step_count = len(dag.tasks)
         if step_count <= 5:
             estimated_duration = "1-3 days"
         elif step_count <= 10:
@@ -70,35 +74,37 @@ async def get_public_workflows(
         
         # Extract requirements from first few steps
         requirements = []
-        for step in list(workflow.steps.values())[:3]:
-            if hasattr(step, 'required_inputs') and step.required_inputs:
-                for req_input in step.required_inputs:
-                    if req_input not in requirements:
-                        # Make requirements human-readable
-                        req_readable = req_input.replace("_", " ").title()
-                        requirements.append(req_readable)
+        for task in list(dag.tasks.values())[:3]:
+            if hasattr(task, 'kwargs') and task.kwargs:
+                for key, value in task.kwargs.items():
+                    if 'required' in key.lower() and isinstance(value, list):
+                        for req_input in value:
+                            if req_input not in requirements:
+                                # Make requirements human-readable
+                                req_readable = req_input.replace("_", " ").title()
+                                requirements.append(req_readable)
         
         if not requirements:
             requirements = ["Valid identification", "Proof of address", "Required documents"]
         
-        # Convert steps to public format
+        # Convert tasks to public format
         public_steps = []
-        for step in workflow.steps.values():
+        for task_id, task in dag.tasks.items():
             public_steps.append({
-                "id": step.step_id,
-                "name": step.name,
-                "description": step.description,
-                "type": step.__class__.__name__.replace("Step", "").lower(),
-                "estimatedDuration": "1-2 days" if "approval" in step.step_id else "Same day",
-                "requirements": getattr(step, 'required_inputs', [])
+                "id": task_id,
+                "name": task_id.replace("_", " ").title(),
+                "description": f"{task.__class__.__name__} operation",
+                "type": task.__class__.__name__.replace("Operator", "").lower(),
+                "estimatedDuration": "1-2 days" if "approval" in task_id else "Same day",
+                "requirements": []
             })
         
         # Translate workflow name and description
-        workflow_name = workflow.name
-        workflow_description = workflow.description
+        workflow_name = dag.description or dag.dag_id
+        workflow_description = dag.description or f"Workflow for {dag.dag_id}"
         
         # Check if we have translations for this workflow
-        workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+        workflow_key = dag.dag_id.replace("_v1", "").replace("_", "_")
         translated_name = t(f"workflow.{workflow_key}", locale)
         translated_desc = t(f"workflow.{workflow_key}_description", locale)
         
@@ -109,7 +115,7 @@ async def get_public_workflows(
             workflow_description = translated_desc
         
         workflow_data = {
-            "id": workflow.workflow_id,
+            "id": dag.dag_id,
             "name": workflow_name,
             "description": workflow_description,
             "category": workflow_category_name,
@@ -122,7 +128,7 @@ async def get_public_workflows(
         }
         
         # Apply query filter (category filter is already applied at database level)
-        if query and query.lower() not in workflow.name.lower() and query.lower() not in workflow.description.lower():
+        if query and query.lower() not in workflow_name.lower() and query.lower() not in workflow_description.lower():
             continue
             
         public_workflows.append(workflow_data)
@@ -171,9 +177,9 @@ async def get_public_workflow_detail(workflow_id: str, request: Request):
     """Get detailed information about a specific workflow"""
     locale = get_locale_from_request(request)
     
-    # Get workflow from registry
-    workflow = step_registry.get_workflow(workflow_id)
-    if not workflow:
+    # Get workflow from DAG system
+    dag = await workflow_service.get_dag(workflow_id)
+    if not dag:
         raise HTTPException(status_code=404, detail=t("workflow.not_found", locale))
     
     # Determine category
@@ -187,12 +193,12 @@ async def get_public_workflow_detail(workflow_id: str, request: Request):
     
     workflow_category = "General"
     for key, cat in category_map.items():
-        if key in workflow.workflow_id.lower():
+        if key in dag.dag_id.lower():
             workflow_category = cat
             break
     
     # Calculate estimated duration
-    step_count = len(workflow.steps)
+    step_count = len(dag.tasks)
     if step_count <= 5:
         estimated_duration = "1-3 days"
     elif step_count <= 10:
@@ -204,12 +210,14 @@ async def get_public_workflow_detail(workflow_id: str, request: Request):
     
     # Extract comprehensive requirements
     requirements = []
-    for step in workflow.steps.values():
-        if hasattr(step, 'required_inputs') and step.required_inputs:
-            for req_input in step.required_inputs:
-                req_readable = req_input.replace("_", " ").title()
-                if req_readable not in requirements:
-                    requirements.append(req_readable)
+    for task in dag.tasks.values():
+        if hasattr(task, 'kwargs') and task.kwargs:
+            for key, value in task.kwargs.items():
+                if 'required' in key.lower() and isinstance(value, list):
+                    for req_input in value:
+                        req_readable = req_input.replace("_", " ").title()
+                        if req_readable not in requirements:
+                            requirements.append(req_readable)
     
     if not requirements:
         if "permit" in workflow_id.lower():
@@ -236,43 +244,45 @@ async def get_public_workflow_detail(workflow_id: str, request: Request):
                 "Supporting documentation"
             ]
     
-    # Convert steps to detailed public format
+    # Convert tasks to detailed public format
     detailed_steps = []
-    for i, step in enumerate(workflow.steps.values()):
+    for i, (task_id, task) in enumerate(dag.tasks.items()):
         step_duration = "Same day"
-        if "approval" in step.step_id:
+        if "approval" in task_id:
             step_duration = "2-3 business days"
-        elif "inspection" in step.step_id:
+        elif "inspection" in task_id:
             step_duration = "3-5 business days"
-        elif "payment" in step.step_id:
+        elif "payment" in task_id:
             step_duration = "Immediate"
-        elif "verification" in step.step_id:
+        elif "verification" in task_id:
             step_duration = "1-2 business days"
         
         step_requirements = []
-        if hasattr(step, 'required_inputs') and step.required_inputs:
-            step_requirements = [req.replace("_", " ").title() for req in step.required_inputs]
+        if hasattr(task, 'kwargs') and task.kwargs:
+            for key, value in task.kwargs.items():
+                if 'required' in key.lower() and isinstance(value, list):
+                    step_requirements.extend([req.replace("_", " ").title() for req in value])
         
         detailed_steps.append({
-            "id": step.step_id,
-            "name": step.name,
-            "description": step.description,
-            "type": step.__class__.__name__.replace("Step", "").lower(),
+            "id": task_id,
+            "name": task_id.replace("_", " ").title(),
+            "description": f"{task.__class__.__name__} operation",
+            "type": task.__class__.__name__.replace("Operator", "").lower(),
             "estimatedDuration": step_duration,
             "requirements": step_requirements
         })
     
     # Translate workflow name and description
-    workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+    workflow_key = dag.dag_id.replace("_v1", "").replace("_", "_")
     translated_name = t(f"workflow.{workflow_key}", locale)
     translated_desc = t(f"workflow.{workflow_key}_description", locale)
     
     # Use translation if available, otherwise use original
-    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else workflow.name
-    workflow_description = translated_desc if translated_desc != f"workflow.{workflow_key}_description" else workflow.description
+    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else dag.description or dag.dag_id
+    workflow_description = translated_desc if translated_desc != f"workflow.{workflow_key}_description" else dag.description or f"Workflow for {dag.dag_id}"
     
     return {
-        "id": workflow.workflow_id,
+        "id": dag.dag_id,
         "name": workflow_name,
         "description": workflow_description,
         "category": workflow_category,
@@ -293,8 +303,40 @@ async def start_workflow_instance(
     request: Request,
     background_tasks: BackgroundTasks
 ):
-    """Start a new workflow instance for a citizen (public endpoint)"""
+    """Start a new workflow instance for an authenticated customer"""
     locale = get_locale_from_request(request)
+    
+    # Check if customer is authenticated (REQUIRED)
+    customer = None
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to start workflows. Please register or login first."
+        )
+    
+    try:
+        token = auth_header.split(" ")[1]
+        payload = AuthService.verify_token(token)
+        customer_id = payload.get("customer_id")
+        if not customer_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
+        customer = await Customer.get(customer_id)
+        if not customer or not customer.is_active:
+            raise HTTPException(
+                status_code=401,
+                detail="Customer account not found or inactive"
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
     
     # Get request body as JSON
     try:
@@ -304,106 +346,49 @@ async def start_workflow_instance(
         initial_data = {}
     
     # Validate workflow exists
-    workflow = step_registry.get_workflow(workflow_id)
-    if not workflow:
+    dag = await workflow_service.get_dag(workflow_id)
+    if not dag:
         raise HTTPException(
             status_code=404, 
             detail=t("workflow.not_found", locale)
         )
     
     # Import required services
-    from ...services.workflow_service import InstanceService
     import uuid
     
-    # Create anonymous user ID for tracking (in real system, use actual user auth)
-    citizen_id = f"citizen_{uuid.uuid4().hex[:8]}"
+    # Use authenticated customer ID (customer is guaranteed to exist at this point)
+    user_id = str(customer.id)
+    customer_tracking_id = customer.email
     
-    # Create workflow instance
+    # Create workflow instance using DAG system
     try:
-        instance = await InstanceService.create_instance(
+        dag_instance = await workflow_service.create_instance(
             workflow_id=workflow_id,
-            user_id=citizen_id,
-            initial_context=initial_data,
-            user_data={
-                "type": "citizen",
-                "started_from": "public_portal",
-                "locale": locale
-            }
+            user_id=user_id,
+            initial_data=initial_data
         )
         
-        # AUTO-ASSIGN instance immediately after creation (random selection)
-        print(f"🔍 DEBUG: Starting auto-assignment for instance {instance.instance_id}")
-        try:
-            from ...models.team import TeamModel
-            from ...models.user import UserModel
-            from ...models.workflow import AssignmentType
-            import random
-            
-            print(f"🔍 DEBUG: Getting teams for auto-assignment")
-            # Get all reviewers from all teams
-            teams = await TeamModel.find().to_list()
-            print(f"🔍 DEBUG: Found {len(teams)} teams")
-            all_reviewers = []
-            
-            for team in teams:
-                print(f"🔍 DEBUG: Processing team {team.name} with {len(team.members) if team.members else 0} members")
-                if team.members:
-                    for member in team.members:
-                        print(f"🔍 DEBUG: Looking for user with member.user_id: {member.user_id}")
-                        # UserModel uses 'id' field, not 'user_id'
-                        from bson import ObjectId
-                        try:
-                            user = await UserModel.get(member.user_id)
-                            print(f"🔍 DEBUG: Found user: {user.email if user else 'None'}")
-                            if user and user.role == "reviewer":
-                                print(f"🔍 DEBUG: Adding reviewer {user.email} from team {team.name}")
-                                all_reviewers.append({
-                                    "user": user,
-                                    "team": team
-                                })
-                        except Exception as e:
-                            print(f"🔍 DEBUG: Could not find user {member.user_id}: {e}")
-            
-            if all_reviewers:
-                # Random assignment
-                selected = random.choice(all_reviewers)
-                user_id = str(selected["user"].id)
-                
-                print(f"🔍 DEBUG: About to assign to user_id: {user_id}, user: {selected['user'].email}")
-                
-                try:
-                    # Assign to selected user and team - using positional args to avoid keyword conflict
-                    instance.assign_to_user(
-                        user_id,  # positional argument
-                        "system",  # assigned_by
-                        AssignmentType.AUTOMATIC,  # assignment_type
-                        "Auto-assigned at instance creation"  # notes
-                    )
-                    print(f"🔍 DEBUG: assign_to_user completed successfully")
-                except Exception as assign_error:
-                    print(f"🔍 DEBUG: assign_to_user failed: {assign_error}")
-                    raise assign_error
-                instance.assigned_team_id = selected["team"].team_id
-                await instance.save()
-                
-                print(f"✅ Auto-assigned instance {instance.instance_id} to {selected['user'].email} (team: {selected['team'].name})")
-            else:
-                print(f"⚠️  No reviewers found for auto-assignment of instance {instance.instance_id}")
-                
-        except Exception as e:
-            print(f"❌ Auto-assignment error for new instance {instance.instance_id}: {e}")
-            # Continue normally even if assignment fails
+        # Get the corresponding database instance
+        from ...models.workflow import WorkflowInstance
+        instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == dag_instance.instance_id
+        )
+        
+        # AUTO-ASSIGN disabled for now - instance created without assignment
+        print(f"🔍 DEBUG: Instance created without auto-assignment for now")
         
         # Execute workflow in background to handle citizen input steps
-        from .instances import execute_workflow_instance
-        background_tasks.add_task(execute_workflow_instance, instance.instance_id)
+        # TODO: Re-enable after fixing execute_workflow_instance
+        # from .instances import execute_workflow_instance
+        # background_tasks.add_task(execute_workflow_instance, instance.instance_id)
         
-        # Return instance details for citizen tracking
+        # Return instance details for customer tracking
         return {
             "instance_id": instance.instance_id,
             "workflow_id": workflow_id,
-            "workflow_name": workflow.name,
-            "citizen_tracking_id": citizen_id,
+            "workflow_name": dag.description or dag.dag_id,
+            "customer_tracking_id": customer_tracking_id,
+            "is_authenticated": True,
             "status": instance.status,
             "created_at": instance.created_at,
             "next_step": instance.current_step,
@@ -434,9 +419,9 @@ async def track_workflow_instance(instance_id: str, request: Request):
             detail=t("instance.not_found", locale)
         )
     
-    # Get workflow from registry for metadata
-    workflow = step_registry.get_workflow(instance.workflow_id)
-    if not workflow:
+    # Get workflow from DAG system for metadata
+    dag = await workflow_service.get_dag(instance.workflow_id)
+    if not dag:
         raise HTTPException(
             status_code=404,
             detail=t("workflow.not_found", locale)
@@ -455,44 +440,44 @@ async def track_workflow_instance(instance_id: str, request: Request):
     ).sort(StepExecution.started_at).to_list()
     
     # Translate workflow name
-    workflow_key = workflow.workflow_id.replace("_v1", "").replace("_", "_")
+    workflow_key = dag.dag_id.replace("_v1", "").replace("_", "_")
     translated_name = t(f"workflow.{workflow_key}", locale)
-    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else workflow.name
+    workflow_name = translated_name if translated_name != f"workflow.{workflow_key}" else dag.description or dag.dag_id
     
     # Build step progress
     step_progress = []
     current_step_data = None
     
-    for step_id, step in workflow.steps.items():
+    for task_id, task in dag.tasks.items():
         step_status = "pending"
         step_started = None
         step_completed = None
         requires_citizen_input = False
         input_form = {}
         
-        # Check if this step requires citizen input (for all steps, not just current)
-        if hasattr(step, 'requires_citizen_input'):
-            requires_citizen_input = step.requires_citizen_input
-            if requires_citizen_input and hasattr(step, 'input_form'):
-                input_form = step.input_form
+        # Check if this task requires citizen input (based on task type)
+        if task.__class__.__name__ == 'UserInputOperator':
+            requires_citizen_input = True
+            if hasattr(task, 'kwargs') and 'form_config' in task.kwargs:
+                input_form = task.kwargs['form_config']
         
-        if step_id in instance.completed_steps:
+        if task_id in instance.completed_steps:
             step_status = "completed"
-        elif step_id in instance.failed_steps:
+        elif task_id in instance.failed_steps:
             step_status = "failed"
-        elif step_id == instance.current_step:
+        elif task_id == instance.current_step:
             step_status = "in_progress"
         
         # Find execution details
-        execution = next((ex for ex in step_executions if ex.step_id == step_id), None)
+        execution = next((ex for ex in step_executions if ex.step_id == task_id), None)
         if execution:
             step_started = execution.started_at
             step_completed = execution.completed_at
         
         step_data = {
-            "step_id": step_id,
-            "name": step.name,
-            "description": step.description,
+            "step_id": task_id,
+            "name": task_id.replace("_", " ").title(),
+            "description": f"{task.__class__.__name__} operation",
             "status": step_status,
             "started_at": step_started,
             "completed_at": step_completed,
@@ -520,8 +505,11 @@ async def track_workflow_instance(instance_id: str, request: Request):
     if instance.status == "awaiting_input":
         # Look for the current step or first step that requires input
         target_step_id = instance.current_step
-        if not target_step_id and workflow.start_step:
-            target_step_id = workflow.start_step.step_id
+        if not target_step_id:
+            # Get first task in DAG
+            root_tasks = dag.get_root_tasks()
+            if root_tasks:
+                target_step_id = root_tasks[0].task_id
             
         for step_data in step_progress:
             if step_data["step_id"] == target_step_id and step_data.get("requires_citizen_input", False):
@@ -579,36 +567,40 @@ async def submit_citizen_data(
             detail="Instance is not in a state to accept input"
         )
     
-    # Get workflow from registry to check current step
-    workflow = step_registry.get_workflow(instance.workflow_id)
-    if not workflow:
+    # Get workflow from DAG system to check current step
+    dag = await workflow_service.get_dag(instance.workflow_id)
+    if not dag:
         raise HTTPException(
             status_code=404,
             detail=t("workflow.not_found", locale)
         )
     
-    # Find the step that requires input
-    input_step_id = None
-    input_step = None
+    # Find the task that requires input
+    input_task_id = None
+    input_task = None
     
     if instance.status == "awaiting_input":
-        # For awaiting_input instances, check current step or start step
-        input_step_id = instance.current_step or (workflow.start_step.step_id if workflow.start_step else None)
+        # For awaiting_input instances, check current step or root task
+        input_task_id = instance.current_step
+        if not input_task_id:
+            root_tasks = dag.get_root_tasks()
+            if root_tasks:
+                input_task_id = root_tasks[0].task_id
     else:
         # For running instances, use current step
-        input_step_id = instance.current_step
+        input_task_id = instance.current_step
     
-    if not input_step_id or input_step_id not in workflow.steps:
+    if not input_task_id or input_task_id not in dag.tasks:
         raise HTTPException(
             status_code=400,
-            detail="No valid step found that requires input"
+            detail="No valid task found that requires input"
         )
     
-    input_step = workflow.steps[input_step_id]
-    if not hasattr(input_step, 'requires_citizen_input') or not input_step.requires_citizen_input:
+    input_task = dag.tasks[input_task_id]
+    if input_task.__class__.__name__ != 'UserInputOperator':
         raise HTTPException(
             status_code=400,
-            detail="Step does not require citizen input"
+            detail="Task does not require citizen input"
         )
     
     try:
@@ -633,19 +625,19 @@ async def submit_citizen_data(
         
         # Update the instance with submitted data
         instance.context = instance.context or {}
-        instance.context[f"{input_step_id}_citizen_data"] = citizen_data
-        instance.context[f"{input_step_id}_uploaded_files"] = uploaded_files
-        instance.context[f"{input_step_id}_data_submitted_at"] = datetime.now().isoformat()
+        instance.context[f"{input_task_id}_citizen_data"] = citizen_data
+        instance.context[f"{input_task_id}_uploaded_files"] = uploaded_files
+        instance.context[f"{input_task_id}_data_submitted_at"] = datetime.now().isoformat()
         
-        # Mark step as completed and resume workflow
-        if input_step_id not in instance.completed_steps:
-            instance.completed_steps.append(input_step_id)
+        # Mark task as completed and resume workflow
+        if input_task_id not in instance.completed_steps:
+            instance.completed_steps.append(input_task_id)
         
         # Update instance status after citizen data submission
         if instance.status == "awaiting_input":
             instance.status = "pending_validation"  # Change to pending_validation after data submission
             if not instance.current_step:
-                instance.current_step = input_step_id
+                instance.current_step = input_task_id
         
         instance.updated_at = datetime.utcnow()
         await instance.save()
@@ -659,7 +651,7 @@ async def submit_citizen_data(
         step_execution = StepExecution(
             execution_id=str(uuid4()),
             instance_id=instance.instance_id,
-            step_id=input_step_id,
+            step_id=input_task_id,
             workflow_id=instance.workflow_id,
             status="completed",
             inputs=citizen_data,
@@ -703,11 +695,11 @@ async def get_public_workflow_categories(request: Request):
         # Get workflow count for this category - only count workflows that are available in registry
         db_workflows = await WorkflowDefinition.find({"category": category.category_id}).to_list()
         
-        # Count only workflows that exist in the step registry
+        # Count only workflows that exist in the DAG system
         workflow_count = 0
         for db_workflow in db_workflows:
-            workflow = step_registry.get_workflow(db_workflow.workflow_id)
-            if workflow:
+            dag = await workflow_service.get_dag(db_workflow.workflow_id)
+            if dag:
                 workflow_count += 1
                 
         if workflow_count > 0:  # Only include categories with workflows
@@ -723,3 +715,179 @@ async def get_public_workflow_categories(request: Request):
             })
     
     return public_categories
+
+
+# ============================================================
+# CITIZEN AUTHENTICATION ENDPOINTS
+# ============================================================
+
+security = HTTPBearer(auto_error=False)
+
+class CustomerRegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    phone: Optional[str] = None
+    document_number: Optional[str] = None
+
+class CustomerLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/register")
+async def register_customer(customer_data: CustomerRegisterRequest, request: Request):
+    """Register a new customer account"""
+    locale = get_locale_from_request(request)
+    
+    # Check if customer already exists
+    existing_customer = await Customer.find_one(Customer.email == customer_data.email)
+    if existing_customer:
+        raise HTTPException(
+            status_code=400,
+            detail="Customer with this email already exists"
+        )
+    
+    try:
+        # Create new customer
+        hashed_password = AuthService.get_password_hash(customer_data.password)
+        
+        customer = Customer(
+            email=customer_data.email,
+            password_hash=hashed_password,
+            full_name=customer_data.full_name,
+            phone=customer_data.phone,
+            document_number=customer_data.document_number,
+            status=CustomerStatus.ACTIVE,
+            is_active=True,
+            metadata={
+                "registered_from": "public_portal",
+                "locale": locale
+            }
+        )
+        
+        await customer.insert()
+        
+        # Create access token
+        access_token = AuthService.create_access_token(data={"sub": customer.email, "customer_id": str(customer.id)})
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "customer": customer.to_public_dict(),
+            "message": "Customer registered successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to register customer: {str(e)}"
+        )
+
+
+@router.post("/auth/login")
+async def login_customer(login_data: CustomerLoginRequest, request: Request):
+    """Login customer and return access token"""
+    locale = get_locale_from_request(request)
+    
+    # Find customer by email
+    customer = await Customer.find_one(Customer.email == login_data.email)
+    if not customer:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
+    
+    # Verify password
+    if not AuthService.verify_password(login_data.password, customer.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
+    
+    # Check if account is active
+    if not customer.is_active:
+        raise HTTPException(
+            status_code=401,
+            detail="Account is disabled"
+        )
+    
+    # Update last login
+    customer.update_last_login()
+    await customer.save()
+    
+    # Create access token
+    access_token = AuthService.create_access_token(data={"sub": customer.email, "customer_id": str(customer.id)})
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "customer": customer.to_public_dict(),
+        "message": "Login successful"
+    }
+
+
+async def get_current_customer(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Get current authenticated customer from token"""
+    if not credentials:
+        return None
+    
+    try:
+        payload = AuthService.verify_token(credentials.credentials)
+        customer_id = payload.get("customer_id")
+        if not customer_id:
+            return None
+            
+        customer = await Customer.get(customer_id)
+        if customer and customer.is_active:
+            return customer
+        return None
+        
+    except Exception:
+        return None
+
+
+@router.get("/auth/me")
+async def get_current_customer_info(customer: Customer = Depends(get_current_customer)):
+    """Get current customer information"""
+    if not customer:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    return customer.to_public_dict()
+
+
+@router.get("/auth/my-workflows")
+async def get_customer_workflows(customer: Customer = Depends(get_current_customer)):
+    """Get all workflow instances for authenticated customer"""
+    if not customer:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Get all instances for this customer
+    instances = await WorkflowInstance.find(
+        WorkflowInstance.user_id == str(customer.id)
+    ).sort(-WorkflowInstance.created_at).to_list()
+    
+    workflow_instances = []
+    for instance in instances:
+        # Get workflow metadata
+        dag = await workflow_service.get_dag(instance.workflow_id)
+        workflow_name = dag.description if dag else instance.workflow_id
+        
+        workflow_instances.append({
+            "instance_id": instance.instance_id,
+            "workflow_id": instance.workflow_id,
+            "workflow_name": workflow_name,
+            "status": instance.status,
+            "progress_percentage": (len(instance.completed_steps) / await WorkflowStep.find(WorkflowStep.workflow_id == instance.workflow_id).count() * 100) if instance.completed_steps else 0,
+            "created_at": instance.created_at,
+            "updated_at": instance.updated_at,
+            "completed_at": instance.completed_at,
+            "current_step": instance.current_step,
+            "tracking_url": f"/track/{instance.instance_id}"
+        })
+    
+    return {
+        "customer_id": str(customer.id),
+        "total_workflows": len(workflow_instances),
+        "workflows": workflow_instances
+    }

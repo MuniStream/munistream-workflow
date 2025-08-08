@@ -1,282 +1,331 @@
 """
-Step execution engine with performance monitoring and validation.
+DAG Executor for orchestrating sequential execution of self-contained operators.
+Manages multiple concurrent DAG instances while maintaining context isolation.
 """
-
-import time
-import psutil
-import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List, Optional, Set
 from datetime import datetime
-from uuid import uuid4
+import asyncio
+import logging
+from enum import Enum
 
-from .base import BaseStep, StepResult, StepStatus, ValidationResult
-from .workflow import WorkflowInstance
+from .dag import DAGInstance, InstanceStatus
+from .operators.base import BaseOperator, TaskStatus
 
 
-class StepExecutionContext:
-    """Context for step execution with timing and monitoring"""
+logger = logging.getLogger(__name__)
+
+
+class ExecutorStatus(str, Enum):
+    """Executor status"""
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+
+class DAGExecutor:
+    """
+    Orchestrates execution of DAG instances.
+    Each instance runs independently with isolated context.
+    Only the executor knows the sequence - operators remain agnostic.
+    """
     
-    def __init__(self, 
-                 instance_id: str,
-                 user_id: str,
-                 execution_environment: str = "production"):
-        self.instance_id = instance_id
-        self.user_id = user_id
-        self.execution_environment = execution_environment
-        self.queued_at: Optional[datetime] = None
-        self.execution_id = str(uuid4())
+    def __init__(
+        self,
+        max_concurrent_instances: int = 10,
+        task_timeout_seconds: int = 3600,
+        heartbeat_interval: int = 30
+    ):
+        """
+        Initialize DAG executor.
         
-    def mark_queued(self):
-        """Mark when the step was queued for execution"""
-        self.queued_at = datetime.utcnow()
-
-
-class StepExecutor:
-    """Advanced step executor with performance monitoring"""
+        Args:
+            max_concurrent_instances: Maximum number of instances to run concurrently
+            task_timeout_seconds: Timeout for individual task execution
+            heartbeat_interval: Interval for status updates
+        """
+        self.max_concurrent_instances = max_concurrent_instances
+        self.task_timeout_seconds = task_timeout_seconds
+        self.heartbeat_interval = heartbeat_interval
+        
+        # Execution state
+        self.status = ExecutorStatus.IDLE
+        self.running_instances: Dict[str, DAGInstance] = {}
+        self.execution_queue: List[str] = []  # Queue of instance IDs
+        
+        # Monitoring
+        self.total_executed = 0
+        self.total_failed = 0
+        self.started_at: Optional[datetime] = None
+        
+        # Background task for continuous execution
+        self._execution_task: Optional[asyncio.Task] = None
+        self._should_stop = False
     
-    def __init__(self):
-        self.execution_metrics: Dict[str, List[StepResult]] = {}
+    async def start(self):
+        """Start the executor"""
+        if self.status == ExecutorStatus.RUNNING:
+            return
         
-    async def execute_step(self, 
-                          step: BaseStep,
-                          inputs: Dict[str, Any],
-                          context: Dict[str, Any],
-                          execution_context: StepExecutionContext) -> StepResult:
-        """Execute a single step with comprehensive monitoring"""
+        self.status = ExecutorStatus.RUNNING
+        self.started_at = datetime.utcnow()
+        self._should_stop = False
         
-        result = StepResult(
-            step_id=step.step_id,
-            status=StepStatus.PENDING,
-            executed_by=execution_context.user_id,
-            execution_environment=execution_context.execution_environment,
-            step_version="1.0.0"
-        )
+        # Start background execution loop
+        self._execution_task = asyncio.create_task(self._execution_loop())
         
-        # Calculate queue time
-        if execution_context.queued_at:
-            queue_duration = (datetime.utcnow() - execution_context.queued_at).total_seconds() * 1000
-            result.queue_time_ms = int(queue_duration)
+        logger.info(f"DAG Executor started with max {self.max_concurrent_instances} concurrent instances")
+    
+    async def stop(self):
+        """Stop the executor gracefully"""
+        self._should_stop = True
         
-        # Start execution timing
-        start_time = time.time()
-        memory_before = self._get_memory_usage()
+        if self._execution_task:
+            self._execution_task.cancel()
+            try:
+                await self._execution_task
+            except asyncio.CancelledError:
+                pass
         
-        result.started_at = datetime.utcnow()
-        result.status = StepStatus.RUNNING
+        self.status = ExecutorStatus.STOPPED
+        logger.info("DAG Executor stopped")
+    
+    def submit_instance(self, instance: DAGInstance):
+        """
+        Submit a DAG instance for execution.
+        
+        Args:
+            instance: DAG instance to execute
+        """
+        if instance.instance_id in self.running_instances:
+            raise ValueError(f"Instance {instance.instance_id} is already running")
+        
+        # Add to execution queue
+        self.execution_queue.append(instance.instance_id)
+        self.running_instances[instance.instance_id] = instance
+        
+        logger.info(f"Instance {instance.instance_id} submitted for execution")
+    
+    async def execute_instance(self, instance: DAGInstance) -> bool:
+        """
+        Execute a single DAG instance completely.
+        
+        Args:
+            instance: DAG instance to execute
+            
+        Returns:
+            True if completed successfully, False if failed
+        """
+        try:
+            instance.status = InstanceStatus.RUNNING
+            instance.started_at = datetime.utcnow()
+            
+            logger.info(f"Starting execution of instance {instance.instance_id}")
+            
+            # Execute tasks in sequence
+            while not instance.is_completed() and not instance.has_failed():
+                # Get next executable tasks
+                executable_tasks = instance.get_executable_tasks()
+                
+                if not executable_tasks:
+                    # No executable tasks - check if waiting or stuck
+                    waiting_tasks = self._get_waiting_tasks(instance)
+                    
+                    if waiting_tasks:
+                        # Tasks are waiting for external input/approval
+                        logger.info(f"Instance {instance.instance_id} waiting for: {waiting_tasks}")
+                        break  # Exit execution loop, will resume when input arrives
+                    else:
+                        # No waiting tasks but not completed - might be stuck
+                        logger.error(f"Instance {instance.instance_id} appears stuck")
+                        instance.status = InstanceStatus.FAILED
+                        break
+                
+                # Execute each ready task
+                for task_id in executable_tasks:
+                    success = await self._execute_task(instance, task_id)
+                    if not success:
+                        instance.status = InstanceStatus.FAILED
+                        break
+                
+                # Small delay to prevent tight loops
+                await asyncio.sleep(0.1)
+            
+            # Determine final status
+            if instance.is_completed():
+                instance.status = InstanceStatus.COMPLETED
+                instance.completed_at = datetime.utcnow()
+                self.total_executed += 1
+                logger.info(f"Instance {instance.instance_id} completed successfully")
+                return True
+            
+            elif instance.has_failed():
+                instance.status = InstanceStatus.FAILED
+                instance.completed_at = datetime.utcnow()
+                self.total_failed += 1
+                logger.error(f"Instance {instance.instance_id} failed")
+                return False
+            
+            else:
+                # Paused/waiting state
+                instance.status = InstanceStatus.PAUSED
+                logger.info(f"Instance {instance.instance_id} paused - waiting for input")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error executing instance {instance.instance_id}: {str(e)}")
+            instance.status = InstanceStatus.FAILED
+            instance.completed_at = datetime.utcnow()
+            self.total_failed += 1
+            return False
+        
+        finally:
+            # Remove from running instances if completed or failed
+            if instance.status in [InstanceStatus.COMPLETED, InstanceStatus.FAILED]:
+                self.running_instances.pop(instance.instance_id, None)
+    
+    async def _execute_task(self, instance: DAGInstance, task_id: str) -> bool:
+        """
+        Execute a single task within an instance.
+        
+        Args:
+            instance: DAG instance
+            task_id: Task to execute
+            
+        Returns:
+            True if task succeeded
+        """
+        task = instance.dag.tasks[task_id]
         
         try:
-            # Validation phase
-            validation_start = time.time()
-            validation_result = await self._validate_step_inputs(step, inputs)
-            validation_duration = (time.time() - validation_start) * 1000
-            result.validation_duration_ms = int(validation_duration)
+            logger.debug(f"Executing task {task_id} in instance {instance.instance_id}")
             
-            if not validation_result.is_valid:
-                result.status = StepStatus.FAILED
-                result.error = f"Validation failed: {', '.join(validation_result.errors)}"
-                result.completed_at = datetime.utcnow()
-                result.calculate_duration()
-                return result
+            # Update task status to executing
+            instance.update_task_status(task_id, "executing")
             
-            # Check for blocking dependencies
-            blocking_deps = await self._check_blocking_dependencies(step, context)
-            if blocking_deps:
-                result.blocking_dependencies = blocking_deps
-                result.status = StepStatus.PENDING
-                return result
+            # Execute the task (task is self-contained and agnostic)
+            result_status = task.run(instance.context)
             
-            # Execute the step
-            step_outputs = await self._execute_step_logic(step, inputs, context)
+            # Process result based on status
+            if result_status == "continue":
+                # Task completed successfully
+                task_result = task.get_output()
+                instance.update_task_status(task_id, "completed", result=task_result)
+                return True
+                
+            elif result_status == "waiting":
+                # Task is waiting for external input/approval
+                instance.update_task_status(task_id, "waiting")
+                return True  # Not failed, just waiting
+                
+            elif result_status == "retry":
+                # Task needs to retry
+                instance.update_task_status(task_id, "retry")
+                # For now, treat as waiting (could implement retry logic)
+                return True
+                
+            elif result_status == "skip":
+                # Task was skipped
+                instance.update_task_status(task_id, "skipped")
+                return True
+                
+            elif result_status == "failed":
+                # Task failed
+                error_msg = task.state.error_message or "Task failed without error message"
+                instance.update_task_status(task_id, "failed", error=error_msg)
+                return False
             
-            # Check if step is waiting for external dependencies
-            if hasattr(step, 'approvers'):
-                result.waiting_for_approval = True
-            elif hasattr(step, 'service_name'):
-                result.waiting_for_external_service = True
-            
-            result.outputs = step_outputs
-            result.status = StepStatus.COMPLETED
+            else:
+                # Unknown status
+                instance.update_task_status(task_id, "failed", error=f"Unknown task status: {result_status}")
+                return False
+                
+        except asyncio.TimeoutError:
+            instance.update_task_status(task_id, "failed", error="Task timeout")
+            logger.error(f"Task {task_id} in instance {instance.instance_id} timed out")
+            return False
             
         except Exception as e:
-            result.status = StepStatus.FAILED
-            result.error = str(e)
-            
-        finally:
-            # Calculate performance metrics
-            result.completed_at = datetime.utcnow()
-            result.calculate_duration()
-            
-            memory_after = self._get_memory_usage()
-            if memory_before and memory_after:
-                result.memory_usage_mb = memory_after - memory_before
-            
-            # Store metrics for analysis
-            self._store_execution_metrics(result)
-        
-        return result
+            instance.update_task_status(task_id, "failed", error=str(e))
+            logger.error(f"Error executing task {task_id} in instance {instance.instance_id}: {str(e)}")
+            return False
     
-    async def validate_step_execution(self, 
-                                    step: BaseStep,
-                                    inputs: Dict[str, Any],
-                                    dry_run: bool = True) -> ValidationResult:
-        """Validate step execution without actually running it"""
-        errors = []
-        
-        # Check required inputs
-        for required_input in step.required_inputs:
-            if required_input not in inputs:
-                errors.append(f"Missing required input: {required_input}")
-        
-        # Run validation functions
-        for validation_func in step.validations:
+    def _get_waiting_tasks(self, instance: DAGInstance) -> List[str]:
+        """Get tasks that are waiting for external input"""
+        return [
+            task_id for task_id, state in instance.task_states.items()
+            if state["status"] in ["waiting", "waiting_input", "waiting_approval"]
+        ]
+    
+    async def _execution_loop(self):
+        """Background execution loop"""
+        while not self._should_stop:
             try:
-                validation_result = validation_func(inputs)
-                if isinstance(validation_result, ValidationResult):
-                    if not validation_result.is_valid:
-                        errors.extend(validation_result.errors)
-                elif not validation_result:
-                    errors.append(f"Validation failed: {validation_func.__name__}")
+                # Process execution queue
+                if (len(self.running_instances) < self.max_concurrent_instances 
+                    and self.execution_queue):
+                    
+                    instance_id = self.execution_queue.pop(0)
+                    instance = self.running_instances.get(instance_id)
+                    
+                    if instance:
+                        # Execute instance in background
+                        asyncio.create_task(self.execute_instance(instance))
+                
+                # Heartbeat delay
+                await asyncio.sleep(self.heartbeat_interval)
+                
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                errors.append(f"Validation error in {validation_func.__name__}: {str(e)}")
-        
-        # Check step-specific validation
-        if hasattr(step, 'validate_execution'):
-            try:
-                step_validation = await step.validate_execution(inputs, dry_run)
-                if isinstance(step_validation, ValidationResult):
-                    if not step_validation.is_valid:
-                        errors.extend(step_validation.errors)
-            except Exception as e:
-                errors.append(f"Step validation error: {str(e)}")
-        
-        return ValidationResult(is_valid=len(errors) == 0, errors=errors)
+                logger.error(f"Error in execution loop: {str(e)}")
+                await asyncio.sleep(5)  # Wait before retrying
     
-    async def _validate_step_inputs(self, step: BaseStep, inputs: Dict[str, Any]) -> ValidationResult:
-        """Internal validation of step inputs"""
-        return step.validate_inputs(inputs)
+    def resume_instance(self, instance_id: str):
+        """
+        Resume a paused instance.
+        
+        Args:
+            instance_id: Instance to resume
+        """
+        instance = self.running_instances.get(instance_id)
+        if instance and instance.status == InstanceStatus.PAUSED:
+            # Add back to execution queue
+            if instance_id not in self.execution_queue:
+                self.execution_queue.append(instance_id)
+                logger.info(f"Instance {instance_id} resumed")
     
-    async def _check_blocking_dependencies(self, step: BaseStep, context: Dict[str, Any]) -> List[str]:
-        """Check for blocking dependencies that prevent execution"""
-        blocking = []
+    def cancel_instance(self, instance_id: str):
+        """
+        Cancel a running instance.
         
-        # Check if previous steps are completed
-        if hasattr(step, 'depends_on'):
-            for dependency in step.depends_on:
-                if context.get(f"{dependency}_completed") != True:
-                    blocking.append(dependency)
-        
-        # Check external service availability
-        if hasattr(step, 'service_name'):
-            # In a real implementation, check service health
-            pass
-        
-        return blocking
+        Args:
+            instance_id: Instance to cancel
+        """
+        instance = self.running_instances.get(instance_id)
+        if instance:
+            instance.status = InstanceStatus.CANCELLED
+            instance.completed_at = datetime.utcnow()
+            self.running_instances.pop(instance_id, None)
+            
+            # Remove from queue if present
+            if instance_id in self.execution_queue:
+                self.execution_queue.remove(instance_id)
+                
+            logger.info(f"Instance {instance_id} cancelled")
     
-    async def _execute_step_logic(self, step: BaseStep, inputs: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the actual step logic"""
-        if hasattr(step, 'execute'):
-            return await step.execute(inputs, context)
-        else:
-            # Default execution for basic steps
-            return {"executed": True, "timestamp": datetime.utcnow().isoformat()}
-    
-    def _get_memory_usage(self) -> Optional[float]:
-        """Get current memory usage in MB"""
-        try:
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024  # Convert to MB
-        except:
-            return None
-    
-    def _store_execution_metrics(self, result: StepResult):
-        """Store execution metrics for analysis"""
-        if result.step_id not in self.execution_metrics:
-            self.execution_metrics[result.step_id] = []
-        self.execution_metrics[result.step_id].append(result)
-        
-        # Keep only last 100 executions per step
-        if len(self.execution_metrics[result.step_id]) > 100:
-            self.execution_metrics[result.step_id] = self.execution_metrics[result.step_id][-100:]
-    
-    def get_step_performance_metrics(self, step_id: str) -> Dict[str, Any]:
-        """Get performance metrics for a specific step"""
-        if step_id not in self.execution_metrics:
-            return {"error": "No execution data found for step"}
-        
-        executions = self.execution_metrics[step_id]
-        successful_executions = [e for e in executions if e.status == StepStatus.COMPLETED]
-        
-        if not successful_executions:
-            return {"error": "No successful executions found"}
-        
-        durations = [e.execution_duration_ms for e in successful_executions if e.execution_duration_ms]
-        queue_times = [e.queue_time_ms for e in successful_executions if e.queue_time_ms]
-        validation_times = [e.validation_duration_ms for e in successful_executions if e.validation_duration_ms]
-        
+    def get_stats(self) -> Dict[str, Any]:
+        """Get executor statistics"""
         return {
-            "step_id": step_id,
-            "total_executions": len(executions),
-            "successful_executions": len(successful_executions),
-            "success_rate": len(successful_executions) / len(executions) * 100,
-            "average_duration_ms": sum(durations) / len(durations) if durations else 0,
-            "min_duration_ms": min(durations) if durations else 0,
-            "max_duration_ms": max(durations) if durations else 0,
-            "average_queue_time_ms": sum(queue_times) / len(queue_times) if queue_times else 0,
-            "average_validation_time_ms": sum(validation_times) / len(validation_times) if validation_times else 0,
-            "common_errors": self._get_common_errors(executions),
-            "bottleneck_indicators": self._analyze_bottlenecks(successful_executions)
+            "status": self.status,
+            "running_instances": len(self.running_instances),
+            "queued_instances": len(self.execution_queue),
+            "max_concurrent": self.max_concurrent_instances,
+            "total_executed": self.total_executed,
+            "total_failed": self.total_failed,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "uptime_seconds": (
+                (datetime.utcnow() - self.started_at).total_seconds()
+                if self.started_at else 0
+            )
         }
-    
-    def _get_common_errors(self, executions: List[StepResult]) -> List[Dict[str, Any]]:
-        """Analyze common error patterns"""
-        error_counts = {}
-        for execution in executions:
-            if execution.error:
-                error_counts[execution.error] = error_counts.get(execution.error, 0) + 1
-        
-        return [{"error": error, "count": count} for error, count in 
-                sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:5]]
-    
-    def _analyze_bottlenecks(self, executions: List[StepResult]) -> Dict[str, Any]:
-        """Analyze potential bottlenecks"""
-        approval_waiting = sum(1 for e in executions if e.waiting_for_approval)
-        external_waiting = sum(1 for e in executions if e.waiting_for_external_service)
-        
-        long_queue_times = sum(1 for e in executions if e.queue_time_ms and e.queue_time_ms > 5000)
-        
-        return {
-            "approval_bottleneck_percentage": approval_waiting / len(executions) * 100 if executions else 0,
-            "external_service_bottleneck_percentage": external_waiting / len(executions) * 100 if executions else 0,
-            "long_queue_time_percentage": long_queue_times / len(executions) * 100 if executions else 0,
-            "suggested_optimizations": self._suggest_optimizations(executions)
-        }
-    
-    def _suggest_optimizations(self, executions: List[StepResult]) -> List[str]:
-        """Suggest optimizations based on execution patterns"""
-        suggestions = []
-        
-        if not executions:
-            return suggestions
-        
-        avg_duration = sum(e.execution_duration_ms for e in executions if e.execution_duration_ms) / len(executions)
-        avg_queue_time = sum(e.queue_time_ms for e in executions if e.queue_time_ms) / len(executions)
-        
-        if avg_duration > 10000:  # 10 seconds
-            suggestions.append("Consider optimizing step logic - execution time is high")
-        
-        if avg_queue_time > 5000:  # 5 seconds
-            suggestions.append("Consider adding more execution workers - queue time is high")
-        
-        approval_rate = sum(1 for e in executions if e.waiting_for_approval) / len(executions)
-        if approval_rate > 0.5:
-            suggestions.append("Consider streamlining approval process - many steps waiting for approval")
-        
-        return suggestions
-    
-    def _get_current_timestamp(self) -> str:
-        """Get current timestamp in ISO format"""
-        return datetime.utcnow().isoformat()
-
-
-# Global executor instance
-step_executor = StepExecutor()

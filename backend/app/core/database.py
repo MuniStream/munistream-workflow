@@ -16,6 +16,7 @@ from ..models.document import DocumentModel, DocumentFolderModel, DocumentShareM
 from ..models.user import UserModel, RefreshTokenModel
 from ..models.category import WorkflowCategory
 from ..models.team import TeamModel
+from ..models.customer import Customer, CustomerSession
 
 
 class Database:
@@ -48,7 +49,9 @@ async def connect_to_mongo():
             UserModel,
             RefreshTokenModel,
             WorkflowCategory,
-            TeamModel
+            TeamModel,
+            Customer,
+            CustomerSession
         ]
     )
     
