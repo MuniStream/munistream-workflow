@@ -233,8 +233,8 @@ class DAGInstance:
             if task_id in self.completed_tasks or task_id in self.failed_tasks:
                 continue
             
-            # Skip if currently running
-            if self.task_states[task_id]["status"] in ["executing", "waiting"]:
+            # Skip if currently executing (but NOT if waiting - waiting tasks can be resumed)
+            if self.task_states[task_id]["status"] == "executing":
                 continue
             
             # Check if all upstream dependencies are completed

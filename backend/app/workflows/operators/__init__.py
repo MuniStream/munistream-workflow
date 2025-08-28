@@ -5,7 +5,7 @@ Each operator is agnostic to other steps and uses context from previous executio
 
 from .base import BaseOperator, TaskResult, TaskState, TaskStatus
 from .python import PythonOperator, ShortCircuitOperator
-from .user_input import UserInputOperator, FormOperator
+from .user_input import UserInputOperator
 from .approval import ApprovalOperator, ConditionalApprovalOperator
 from .external_api import ExternalAPIOperator, HTTPOperator
 
@@ -22,7 +22,6 @@ __all__ = [
     
     # User interaction operators
     "UserInputOperator",
-    "FormOperator",
     
     # Approval operators
     "ApprovalOperator",

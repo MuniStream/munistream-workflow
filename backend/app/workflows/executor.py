@@ -1,16 +1,15 @@
 """
-DAG Executor for orchestrating sequential execution of self-contained operators.
-Manages multiple concurrent DAG instances while maintaining context isolation.
+Simplified DAG Executor that always uses database as source of truth.
+No in-memory instance caching - always fetch fresh from database.
 """
-from typing import Dict, Any, List, Optional, Set
+from typing import Optional
 from datetime import datetime
 import asyncio
 import logging
 from enum import Enum
 
-from .dag import DAGInstance, InstanceStatus
-from .operators.base import BaseOperator, TaskStatus
-
+from .dag import InstanceStatus
+from ..models.instance_log import InstanceLog, LogLevel, LogType
 
 logger = logging.getLogger(__name__)
 
@@ -19,313 +18,361 @@ class ExecutorStatus(str, Enum):
     """Executor status"""
     IDLE = "idle"
     RUNNING = "running"
-    PAUSED = "paused"
     STOPPED = "stopped"
 
 
 class DAGExecutor:
     """
-    Orchestrates execution of DAG instances.
-    Each instance runs independently with isolated context.
-    Only the executor knows the sequence - operators remain agnostic.
+    Simple executor that always fetches fresh instances from database.
+    No caching, no sync issues - database is the single source of truth.
     """
     
-    def __init__(
-        self,
-        max_concurrent_instances: int = 10,
-        task_timeout_seconds: int = 3600,
-        heartbeat_interval: int = 30
-    ):
+    def __init__(self, workflow_service=None):
         """
-        Initialize DAG executor.
+        Initialize executor.
         
         Args:
-            max_concurrent_instances: Maximum number of instances to run concurrently
-            task_timeout_seconds: Timeout for individual task execution
-            heartbeat_interval: Interval for status updates
+            workflow_service: Reference to workflow service for database access
         """
-        self.max_concurrent_instances = max_concurrent_instances
-        self.task_timeout_seconds = task_timeout_seconds
-        self.heartbeat_interval = heartbeat_interval
-        
-        # Execution state
+        self.workflow_service = workflow_service
         self.status = ExecutorStatus.IDLE
-        self.running_instances: Dict[str, DAGInstance] = {}
-        self.execution_queue: List[str] = []  # Queue of instance IDs
-        
-        # Monitoring
-        self.total_executed = 0
-        self.total_failed = 0
-        self.started_at: Optional[datetime] = None
-        
-        # Background task for continuous execution
+        self.execution_queue: list[str] = []  # Queue of instance IDs to process
         self._execution_task: Optional[asyncio.Task] = None
         self._should_stop = False
     
     async def start(self):
         """Start the executor"""
         if self.status == ExecutorStatus.RUNNING:
+            print("⚠️ Executor already running")
             return
         
         self.status = ExecutorStatus.RUNNING
-        self.started_at = datetime.utcnow()
         self._should_stop = False
-        
-        # Start background execution loop
         self._execution_task = asyncio.create_task(self._execution_loop())
-        
-        logger.info(f"DAG Executor started with max {self.max_concurrent_instances} concurrent instances")
+        print("✅ DAG Executor started - background loop running")
+        logger.info("DAG Executor started")
     
     async def stop(self):
-        """Stop the executor gracefully"""
+        """Stop the executor"""
         self._should_stop = True
-        
         if self._execution_task:
             self._execution_task.cancel()
             try:
                 await self._execution_task
             except asyncio.CancelledError:
                 pass
-        
         self.status = ExecutorStatus.STOPPED
         logger.info("DAG Executor stopped")
     
-    def submit_instance(self, instance: DAGInstance):
+    def submit_instance(self, instance_id: str):
         """
-        Submit a DAG instance for execution.
+        Submit an instance for execution by its ID.
+        We'll fetch the actual instance from database when processing.
         
         Args:
-            instance: DAG instance to execute
+            instance_id: ID of instance to execute
         """
-        if instance.instance_id in self.running_instances:
-            raise ValueError(f"Instance {instance.instance_id} is already running")
-        
-        # Add to execution queue
-        self.execution_queue.append(instance.instance_id)
-        self.running_instances[instance.instance_id] = instance
-        
-        logger.info(f"Instance {instance.instance_id} submitted for execution")
+        if instance_id not in self.execution_queue:
+            self.execution_queue.append(instance_id)
+            logger.info(f"Instance {instance_id} queued for execution")
     
-    async def execute_instance(self, instance: DAGInstance) -> bool:
+    async def execute_instance(self, instance_id: str) -> bool:
         """
-        Execute a single DAG instance completely.
+        Execute a single instance by fetching it fresh from database.
         
         Args:
-            instance: DAG instance to execute
+            instance_id: ID of instance to execute
             
         Returns:
-            True if completed successfully, False if failed
+            True if instance can continue, False if completed/failed
         """
-        try:
-            instance.status = InstanceStatus.RUNNING
-            instance.started_at = datetime.utcnow()
-            
-            logger.info(f"Starting execution of instance {instance.instance_id}")
-            
-            # Execute tasks in sequence
-            while not instance.is_completed() and not instance.has_failed():
-                # Get next executable tasks
-                executable_tasks = instance.get_executable_tasks()
-                
-                if not executable_tasks:
-                    # No executable tasks - check if waiting or stuck
-                    waiting_tasks = self._get_waiting_tasks(instance)
-                    
-                    if waiting_tasks:
-                        # Tasks are waiting for external input/approval
-                        logger.info(f"Instance {instance.instance_id} waiting for: {waiting_tasks}")
-                        break  # Exit execution loop, will resume when input arrives
-                    else:
-                        # No waiting tasks but not completed - might be stuck
-                        logger.error(f"Instance {instance.instance_id} appears stuck")
-                        instance.status = InstanceStatus.FAILED
-                        break
-                
-                # Execute each ready task
-                for task_id in executable_tasks:
-                    success = await self._execute_task(instance, task_id)
-                    if not success:
-                        instance.status = InstanceStatus.FAILED
-                        break
-                
-                # Small delay to prevent tight loops
-                await asyncio.sleep(0.1)
-            
-            # Determine final status
-            if instance.is_completed():
-                instance.status = InstanceStatus.COMPLETED
-                instance.completed_at = datetime.utcnow()
-                self.total_executed += 1
-                logger.info(f"Instance {instance.instance_id} completed successfully")
-                return True
-            
-            elif instance.has_failed():
-                instance.status = InstanceStatus.FAILED
-                instance.completed_at = datetime.utcnow()
-                self.total_failed += 1
-                logger.error(f"Instance {instance.instance_id} failed")
+        logger.info(f"Executing instance {instance_id}")
+        
+        # Get fresh instance from database
+        from ..models.workflow import WorkflowInstance
+        db_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == instance_id
+        )
+        if not db_instance:
+            logger.error(f"Instance {instance_id} not found in database")
+            return False
+        
+        # Get DAG instance from bag, or recreate it from database
+        dag_instance = self.workflow_service.dag_bag.get_instance(instance_id)
+        if not dag_instance:
+            # Try to recreate from database
+            print(f"🔄 Recreating instance {instance_id} from database")
+            dag = self.workflow_service.dag_bag.get_dag(db_instance.workflow_id)
+            if not dag:
+                logger.error(f"DAG {db_instance.workflow_id} not found for instance {instance_id}")
                 return False
             
+            # Recreate the DAG instance from database state
+            dag_instance = dag.create_instance(db_instance.user_id, db_instance.context)
+            dag_instance.instance_id = instance_id  # Keep the original ID
+            dag_instance.created_at = db_instance.created_at
+            dag_instance.started_at = db_instance.started_at
+            
+            # Restore task states from database
+            dag_instance.completed_tasks = set(db_instance.completed_steps or [])
+            dag_instance.failed_tasks = set(db_instance.failed_steps or [])
+            dag_instance.current_task = db_instance.current_step
+            
+            # Initialize task states for all tasks
+            for task_id in dag.tasks.keys():
+                if task_id in dag_instance.completed_tasks:
+                    dag_instance.task_states[task_id] = {"status": "completed"}
+                elif task_id in dag_instance.failed_tasks:
+                    dag_instance.task_states[task_id] = {"status": "failed"}
+                elif task_id == db_instance.current_step:
+                    dag_instance.task_states[task_id] = {"status": "waiting"}
+                else:
+                    dag_instance.task_states[task_id] = {"status": "pending"}
+            
+            # Add to DAG bag for future reference
+            self.workflow_service.dag_bag.instances[instance_id] = dag_instance
+            print(f"✅ Instance {instance_id} recreated successfully")
+        
+        # ALWAYS use database context as source of truth
+        dag_instance.context = db_instance.context or {}
+        logger.debug(f"Loaded context for {instance_id}: {list(dag_instance.context.keys())}")
+        
+        # Log execution start
+        await InstanceLog.log(
+            instance_id=instance_id,
+            workflow_id=dag_instance.dag.dag_id,
+            level=LogLevel.INFO,
+            log_type=LogType.SYSTEM,
+            message=f"Starting execution cycle",
+            details={"status": dag_instance.status.value if hasattr(dag_instance.status, 'value') else str(dag_instance.status)}
+        )
+        
+        # Process executable tasks
+        executable_tasks = dag_instance.get_executable_tasks()
+        print(f"🔍 Instance {instance_id} has {len(executable_tasks)} executable tasks: {executable_tasks}")
+        logger.info(f"Instance {instance_id} has {len(executable_tasks)} executable tasks: {executable_tasks}")
+        
+        await InstanceLog.log(
+            instance_id=instance_id,
+            workflow_id=dag_instance.dag.dag_id,
+            level=LogLevel.DEBUG,
+            log_type=LogType.SYSTEM,
+            message=f"Found {len(executable_tasks)} executable tasks",
+            details={"tasks": executable_tasks}
+        )
+        
+        for task_id in executable_tasks:
+            task = dag_instance.dag.tasks.get(task_id)
+            if not task:
+                continue
+            
+            # Execute task with current context
+            dag_instance.update_task_status(task_id, "executing")
+            
+            # Run the task
+            print(f"▶️ Running task {task_id}")
+            
+            await InstanceLog.log(
+                instance_id=instance_id,
+                workflow_id=dag_instance.dag.dag_id,
+                level=LogLevel.INFO,
+                log_type=LogType.TASK_START,
+                task_id=task_id,
+                message=f"Starting task execution: {task_id}"
+            )
+            
+            try:
+                # Set instance and workflow IDs on the task for logging
+                task._instance_id = instance_id
+                task._workflow_id = dag_instance.dag.dag_id
+                
+                # Check if task has an async execute method
+                if hasattr(task, 'execute_async'):
+                    # Task can handle async operations
+                    result = await task.execute_async(dag_instance.context)
+                else:
+                    # Regular synchronous execution
+                    result = task.run(dag_instance.context)
+                
+                print(f"📊 Task {task_id} returned: {result}")
+                
+                await InstanceLog.log(
+                    instance_id=instance_id,
+                    workflow_id=dag_instance.dag.dag_id,
+                    level=LogLevel.INFO,
+                    log_type=LogType.TASK_COMPLETE if result == "continue" else LogType.TASK_FAILED,
+                    task_id=task_id,
+                    message=f"Task completed with status: {result}",
+                    details={"result": result, "output": task.get_output() if hasattr(task, 'get_output') else None}
+                )
+            except Exception as e:
+                print(f"❌ Task {task_id} failed with error: {e}")
+                await InstanceLog.log(
+                    instance_id=instance_id,
+                    workflow_id=dag_instance.dag.dag_id,
+                    level=LogLevel.ERROR,
+                    log_type=LogType.ERROR,
+                    task_id=task_id,
+                    message=f"Task execution failed",
+                    error=e
+                )
+                result = "failed"
+            
+            # Update task status based on result
+            if result == "continue":
+                dag_instance.update_task_status(task_id, "completed")
+                # Update context with task output - this is critical for data flow
+                output = task.get_output()
+                if output:
+                    dag_instance.context.update(output)
+                    logger.debug(f"Task {task_id} added to context: {list(output.keys())}")
+            elif result == "waiting":
+                dag_instance.update_task_status(task_id, "waiting")
+                break  # Stop processing, we're waiting
+            elif result == "failed":
+                dag_instance.update_task_status(task_id, "failed")
+                break  # Stop processing, task failed
             else:
-                # Paused/waiting state
-                instance.status = InstanceStatus.PAUSED
-                logger.info(f"Instance {instance.instance_id} paused - waiting for input")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error executing instance {instance.instance_id}: {str(e)}")
-            instance.status = InstanceStatus.FAILED
-            instance.completed_at = datetime.utcnow()
-            self.total_failed += 1
-            return False
+                dag_instance.update_task_status(task_id, "completed")
         
-        finally:
-            # Remove from running instances if completed or failed
-            if instance.status in [InstanceStatus.COMPLETED, InstanceStatus.FAILED]:
-                self.running_instances.pop(instance.instance_id, None)
+        # Determine instance status based on task states
+        if dag_instance.is_completed():
+            dag_instance.status = InstanceStatus.COMPLETED
+            dag_instance.completed_at = datetime.utcnow()
+        elif dag_instance.has_failed():
+            dag_instance.status = InstanceStatus.FAILED
+            dag_instance.completed_at = datetime.utcnow()
+        elif self._has_waiting_tasks(dag_instance):
+            dag_instance.status = InstanceStatus.PAUSED
+        else:
+            dag_instance.status = InstanceStatus.RUNNING
+        
+        # Save everything back to database
+        old_status = db_instance.status
+        new_status = self._map_status(dag_instance.status)
+        
+        db_instance.status = new_status
+        db_instance.context = dag_instance.context
+        db_instance.current_step = dag_instance.current_task
+        db_instance.completed_steps = list(dag_instance.completed_tasks)
+        db_instance.failed_steps = list(dag_instance.failed_tasks)
+        db_instance.updated_at = datetime.utcnow()
+        
+        if dag_instance.completed_at:
+            db_instance.completed_at = dag_instance.completed_at
+        
+        await db_instance.save()
+        
+        # Log status change
+        if old_status != new_status:
+            await InstanceLog.log(
+                instance_id=instance_id,
+                workflow_id=dag_instance.dag.dag_id,
+                level=LogLevel.INFO,
+                log_type=LogType.STATUS_CHANGE,
+                message=f"Instance status changed from {old_status} to {new_status}",
+                details={
+                    "old_status": old_status,
+                    "new_status": new_status,
+                    "completed_tasks": list(dag_instance.completed_tasks),
+                    "failed_tasks": list(dag_instance.failed_tasks)
+                }
+            )
+        
+        # Return whether instance can continue processing
+        return dag_instance.status == InstanceStatus.RUNNING
     
-    async def _execute_task(self, instance: DAGInstance, task_id: str) -> bool:
-        """
-        Execute a single task within an instance.
-        
-        Args:
-            instance: DAG instance
-            task_id: Task to execute
-            
-        Returns:
-            True if task succeeded
-        """
-        task = instance.dag.tasks[task_id]
-        
-        try:
-            logger.debug(f"Executing task {task_id} in instance {instance.instance_id}")
-            
-            # Update task status to executing
-            instance.update_task_status(task_id, "executing")
-            
-            # Execute the task (task is self-contained and agnostic)
-            result_status = task.run(instance.context)
-            
-            # Process result based on status
-            if result_status == "continue":
-                # Task completed successfully
-                task_result = task.get_output()
-                instance.update_task_status(task_id, "completed", result=task_result)
+    def _has_waiting_tasks(self, instance) -> bool:
+        """Check if instance has any waiting tasks"""
+        for state in instance.task_states.values():
+            if state.get("status") in ["waiting", "waiting_input", "waiting_approval"]:
                 return True
-                
-            elif result_status == "waiting":
-                # Task is waiting for external input/approval
-                instance.update_task_status(task_id, "waiting")
-                return True  # Not failed, just waiting
-                
-            elif result_status == "retry":
-                # Task needs to retry
-                instance.update_task_status(task_id, "retry")
-                # For now, treat as waiting (could implement retry logic)
-                return True
-                
-            elif result_status == "skip":
-                # Task was skipped
-                instance.update_task_status(task_id, "skipped")
-                return True
-                
-            elif result_status == "failed":
-                # Task failed
-                error_msg = task.state.error_message or "Task failed without error message"
-                instance.update_task_status(task_id, "failed", error=error_msg)
-                return False
-            
-            else:
-                # Unknown status
-                instance.update_task_status(task_id, "failed", error=f"Unknown task status: {result_status}")
-                return False
-                
-        except asyncio.TimeoutError:
-            instance.update_task_status(task_id, "failed", error="Task timeout")
-            logger.error(f"Task {task_id} in instance {instance.instance_id} timed out")
-            return False
-            
-        except Exception as e:
-            instance.update_task_status(task_id, "failed", error=str(e))
-            logger.error(f"Error executing task {task_id} in instance {instance.instance_id}: {str(e)}")
-            return False
+        return False
     
-    def _get_waiting_tasks(self, instance: DAGInstance) -> List[str]:
-        """Get tasks that are waiting for external input"""
-        return [
-            task_id for task_id, state in instance.task_states.items()
-            if state["status"] in ["waiting", "waiting_input", "waiting_approval"]
-        ]
+    def _map_status(self, dag_status) -> str:
+        """Map DAG status to database status string"""
+        mapping = {
+            InstanceStatus.PENDING: "pending",
+            InstanceStatus.RUNNING: "running",
+            InstanceStatus.PAUSED: "paused",
+            InstanceStatus.COMPLETED: "completed",
+            InstanceStatus.FAILED: "failed",
+            InstanceStatus.CANCELLED: "cancelled"
+        }
+        return mapping.get(dag_status, "running")
     
     async def _execution_loop(self):
-        """Background execution loop"""
+        """Background execution loop - process queue continuously"""
+        print("🔄 Execution loop started")
         while not self._should_stop:
             try:
-                # Process execution queue
-                if (len(self.running_instances) < self.max_concurrent_instances 
-                    and self.execution_queue):
-                    
+                # Process queue
+                if self.execution_queue:
                     instance_id = self.execution_queue.pop(0)
-                    instance = self.running_instances.get(instance_id)
+                    print(f"📋 Processing instance from queue: {instance_id}")
                     
-                    if instance:
-                        # Execute instance in background
-                        asyncio.create_task(self.execute_instance(instance))
+                    # Execute instance
+                    can_continue = await self.execute_instance(instance_id)
+                    
+                    # Re-queue if still running
+                    if can_continue:
+                        self.execution_queue.append(instance_id)
+                        print(f"♻️ Re-queued instance {instance_id} for continued processing")
                 
-                # Heartbeat delay
-                await asyncio.sleep(self.heartbeat_interval)
+                # Short delay between iterations
+                await asyncio.sleep(1)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in execution loop: {str(e)}")
-                await asyncio.sleep(5)  # Wait before retrying
+                logger.error(f"Execution loop error: {str(e)}")
+                await asyncio.sleep(1)
     
     def resume_instance(self, instance_id: str):
         """
-        Resume a paused instance.
+        Resume a paused instance - just add it back to the queue.
+        The fresh context will be loaded from database when executed.
         
         Args:
             instance_id: Instance to resume
         """
-        instance = self.running_instances.get(instance_id)
-        if instance and instance.status == InstanceStatus.PAUSED:
-            # Add back to execution queue
-            if instance_id not in self.execution_queue:
-                self.execution_queue.append(instance_id)
-                logger.info(f"Instance {instance_id} resumed")
+        logger.info(f"Resume requested for instance {instance_id}")
+        if instance_id not in self.execution_queue:
+            self.execution_queue.append(instance_id)
+            logger.info(f"Instance {instance_id} queued for resumption")
+        else:
+            logger.info(f"Instance {instance_id} already in queue")
     
     def cancel_instance(self, instance_id: str):
         """
-        Cancel a running instance.
+        Cancel an instance.
         
         Args:
             instance_id: Instance to cancel
         """
-        instance = self.running_instances.get(instance_id)
-        if instance:
-            instance.status = InstanceStatus.CANCELLED
-            instance.completed_at = datetime.utcnow()
-            self.running_instances.pop(instance_id, None)
-            
-            # Remove from queue if present
-            if instance_id in self.execution_queue:
-                self.execution_queue.remove(instance_id)
-                
-            logger.info(f"Instance {instance_id} cancelled")
+        # Remove from queue if present
+        if instance_id in self.execution_queue:
+            self.execution_queue.remove(instance_id)
+        
+        # Mark as cancelled in database
+        asyncio.create_task(self._mark_cancelled(instance_id))
+        logger.info(f"Instance {instance_id} cancelled")
     
-    def get_stats(self) -> Dict[str, Any]:
+    async def _mark_cancelled(self, instance_id: str):
+        """Mark instance as cancelled in database"""
+        from ..models.workflow import WorkflowInstance
+        db_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == instance_id
+        )
+        if db_instance:
+            db_instance.status = "cancelled"
+            db_instance.completed_at = datetime.utcnow()
+            await db_instance.save()
+    
+    def get_stats(self):
         """Get executor statistics"""
         return {
-            "status": self.status,
-            "running_instances": len(self.running_instances),
+            "status": self.status.value,
             "queued_instances": len(self.execution_queue),
-            "max_concurrent": self.max_concurrent_instances,
-            "total_executed": self.total_executed,
-            "total_failed": self.total_failed,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "uptime_seconds": (
-                (datetime.utcnow() - self.started_at).total_seconds()
-                if self.started_at else 0
-            )
+            "queue": self.execution_queue[:10]  # Show first 10 in queue
         }
