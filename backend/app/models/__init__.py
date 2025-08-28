@@ -12,6 +12,8 @@ from .workflow import (
 from .user import UserModel
 from .document import DocumentModel
 from .category import WorkflowCategory
+from .customer import Customer, CustomerStatus
+from .legal_entity import EntityType, LegalEntity, EntityRelationship
 
 __all__ = [
     "WorkflowStep",
@@ -23,5 +25,10 @@ __all__ = [
     "IntegrationLog",
     "UserModel",
     "DocumentModel",
-    "WorkflowCategory"
+    "WorkflowCategory",
+    "Customer",
+    "CustomerStatus",
+    "EntityType",
+    "LegalEntity",
+    "EntityRelationship"
 ]

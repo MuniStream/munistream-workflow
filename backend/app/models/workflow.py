@@ -43,6 +43,9 @@ class WorkflowStep(Document):
     requires_citizen_input: bool = Field(default=False, description="Whether this step requires citizen input")
     input_form: Dict[str, Any] = Field(default_factory=dict, description="Form configuration for citizen input")
     
+    # Operator details
+    operator_class: Optional[str] = Field(None, description="Actual operator class name (e.g., UserInputOperator, AdminInputOperator)")
+    
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

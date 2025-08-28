@@ -1,5 +1,6 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+import logging
 from beanie import PydanticObjectId
 from beanie.operators import In
 
@@ -15,13 +16,15 @@ from ..workflows.dag import DAG, DAGInstance, DAGBag, InstanceStatus
 from ..workflows.executor import DAGExecutor
 from ..workflows.operators.base import BaseOperator
 
+logger = logging.getLogger(__name__)
+
 
 class WorkflowService:
     """Service layer for new DAG-based workflow operations"""
     
     def __init__(self):
         self.dag_bag = DAGBag()
-        self.executor = DAGExecutor()
+        self.executor = DAGExecutor(workflow_service=self)
     
     async def register_dag(self, dag: DAG, created_by: str = None) -> WorkflowDefinition:
         """Register a DAG and create corresponding database records"""
@@ -46,11 +49,14 @@ class WorkflowService:
         
         # Create step records for API compatibility
         for task_id, task in dag.tasks.items():
+            # Dynamic step type mapping - categorize operators into broader types
+            step_type = self._get_step_type_from_operator(task)
+            
             step = WorkflowStep(
                 step_id=task_id,
                 workflow_id=dag.dag_id,
                 name=task_id.replace("_", " ").title(),
-                step_type=task.__class__.__name__.replace("Operator", "").lower(),
+                step_type=step_type,
                 description=f"{task.__class__.__name__} operation",
                 required_inputs=[],
                 optional_inputs=[],
@@ -58,11 +64,33 @@ class WorkflowService:
                 configuration=task.kwargs,
                 requires_citizen_input=hasattr(task, 'form_config'),
                 input_form=getattr(task, 'form_config', {}),
+                operator_class=task.__class__.__name__,  # Store the actual operator class name
                 created_by=created_by
             )
             await step.insert()
         
         return workflow_def
+    
+    def _get_step_type_from_operator(self, operator: BaseOperator) -> str:
+        """
+        Dynamically determine step type from operator class.
+        Maps any operator to one of the broad step type categories.
+        """
+        operator_name = operator.__class__.__name__.lower()
+        
+        # Check class hierarchy and name patterns to categorize
+        if hasattr(operator, 'form_config') or 'input' in operator_name:
+            return "action"  # Input operators are interactive actions
+        elif 'approval' in operator_name or hasattr(operator, 'approver_role'):
+            return "approval"
+        elif 'conditional' in operator_name or hasattr(operator, 'condition'):
+            return "conditional"  
+        elif 'terminal' in operator_name or 'end' in operator_name:
+            return "terminal"
+        elif 'integration' in operator_name or 'api' in operator_name or 'webhook' in operator_name:
+            return "integration"
+        else:
+            return "action"  # Default fallback for any custom operators
     
     async def get_dag(self, dag_id: str) -> Optional[DAG]:
         """Get DAG by ID"""
@@ -135,7 +163,7 @@ class WorkflowService:
         status_mapping = {
             InstanceStatus.PENDING: "pending",
             InstanceStatus.RUNNING: "running",
-            InstanceStatus.PAUSED: "awaiting_input",
+            InstanceStatus.PAUSED: "paused",  # Use consistent "paused" status
             InstanceStatus.COMPLETED: "completed",
             InstanceStatus.FAILED: "failed",
             InstanceStatus.CANCELLED: "cancelled"
@@ -161,17 +189,83 @@ class WorkflowService:
     
     async def execute_instance(self, instance_id: str) -> bool:
         """Execute a DAG instance"""
-        dag_instance = self.dag_bag.get_instance(instance_id)
-        if not dag_instance:
-            raise ValueError(f"Instance {instance_id} not found")
-        
-        # Submit to executor
-        self.executor.submit_instance(dag_instance)
+        # Just submit the ID - executor will fetch from database
+        self.executor.submit_instance(instance_id)
+        logger.info(f"Instance {instance_id} submitted to executor")
         return True
     
     async def get_instance(self, instance_id: str) -> Optional[DAGInstance]:
-        """Get DAG instance by ID"""
-        return self.dag_bag.get_instance(instance_id)
+        """Get DAG instance by ID - always reconstructs from database"""
+        return await self.reconstruct_instance_from_db(instance_id)
+    
+    async def reconstruct_instance_from_db(self, instance_id: str) -> Optional[DAGInstance]:
+        """Reconstruct a DAG instance from database records"""
+        from ..models.workflow import WorkflowInstance, StepExecution
+        from ..workflows.dag import DAGInstance
+        
+        # Get the database instance
+        db_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == instance_id
+        )
+        if not db_instance:
+            return None
+        
+        # Get the DAG definition
+        dag = self.dag_bag.get_dag(db_instance.workflow_id)
+        if not dag:
+            return None
+        
+        # Create a new DAG instance
+        dag_instance = DAGInstance(
+            dag=dag,
+            user_id=db_instance.user_id,
+            initial_data=db_instance.context or {}
+        )
+        # Set the instance_id after creation
+        dag_instance.instance_id = instance_id
+        
+        # Set status from database
+        dag_instance.status = db_instance.status
+        dag_instance.created_at = db_instance.created_at
+        dag_instance.updated_at = db_instance.updated_at
+        dag_instance.completed_at = db_instance.completed_at
+        dag_instance.current_task = db_instance.current_step
+        
+        # Reconstruct task states from step executions
+        step_executions = await StepExecution.find(
+            StepExecution.instance_id == instance_id
+        ).to_list()
+        
+        # Initialize all tasks as pending
+        for task_id in dag.tasks.keys():
+            dag_instance.task_states[task_id] = {"status": "pending"}
+        
+        # Update with execution data
+        for execution in step_executions:
+            dag_instance.task_states[execution.step_id] = {
+                "status": execution.status,
+                "started_at": execution.started_at.isoformat() if execution.started_at else None,
+                "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
+                "result": execution.output
+            }
+        
+        # Mark completed steps
+        for step_id in (db_instance.completed_steps or []):
+            if step_id in dag_instance.task_states:
+                dag_instance.task_states[step_id]["status"] = "completed"
+        
+        # Mark failed steps
+        for step_id in (db_instance.failed_steps or []):
+            if step_id in dag_instance.task_states:
+                dag_instance.task_states[step_id]["status"] = "failed"
+        
+        # Mark current step as waiting if instance is paused
+        if db_instance.status == "paused" and db_instance.current_step:
+            dag_instance.task_states[db_instance.current_step]["status"] = "waiting"
+            if db_instance.current_step not in step_executions:
+                dag_instance.task_states[db_instance.current_step]["started_at"] = datetime.utcnow().isoformat()
+        
+        return dag_instance
     
     async def get_user_instances(self, user_id: str) -> List[DAGInstance]:
         """Get all instances for a user"""
@@ -184,11 +278,11 @@ class WorkflowService:
         )
         
         if workflow_instance:
-            # Update status
+            # Update status - use consistent enum values
             status_mapping = {
                 InstanceStatus.PENDING: "pending",
                 InstanceStatus.RUNNING: "running",
-                InstanceStatus.PAUSED: "awaiting_input",
+                InstanceStatus.PAUSED: "paused",  # Use consistent "paused" status
                 InstanceStatus.COMPLETED: "completed", 
                 InstanceStatus.FAILED: "failed",
                 InstanceStatus.CANCELLED: "cancelled"

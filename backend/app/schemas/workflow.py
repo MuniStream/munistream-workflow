@@ -22,11 +22,12 @@ class StepType(str, Enum):
 class StepSchema(BaseModel):
     step_id: str
     name: str
-    step_type: StepType
+    step_type: str  # Accept any string - operator class name
     description: Optional[str] = None
     required_inputs: List[str] = Field(default_factory=list)
     optional_inputs: List[str] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
+    operator_class: Optional[str] = None  # Actual operator class name for extensibility
     
     class Config:
         use_enum_values = True
@@ -79,10 +80,10 @@ class WorkflowDiagram(BaseModel):
 class WorkflowExecuteRequest(BaseModel):
     workflow_id: str
     initial_context: Dict[str, Any] = Field(default_factory=dict)
-    user_id: str
 
 
 class InstanceStatus(str, Enum):
+    PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -132,9 +133,9 @@ class InstanceUpdateRequest(BaseModel):
 class ApprovalRequest(BaseModel):
     instance_id: str
     step_id: str
-    decision: str  # "approved" or "rejected"
+    decision: str  # "approved", "rejected", "request_changes", "escalate"
     comments: Optional[str] = None
-    approver_id: str
+    approver_id: Optional[str] = None  # Will be set automatically from authenticated user
 
 
 class InstanceProgressResponse(BaseModel):
@@ -249,6 +250,7 @@ class StepResponse(BaseModel):
     required_inputs: List[str]
     optional_inputs: List[str]
     next_steps: List[str]
+    operator_class: Optional[str] = None  # Actual operator class name for extensibility
     created_at: datetime
     updated_at: datetime
     
