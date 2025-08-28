@@ -55,11 +55,12 @@ async def convert_workflow_to_response(workflow: WorkflowDefinition) -> Workflow
         step_schemas.append(StepSchema(
             step_id=step.step_id,
             name=step.name,
-            step_type=StepType(step.step_type),
+            step_type=step.step_type,  # Pass the string directly
             description=step.description,
             required_inputs=step.required_inputs,
             optional_inputs=step.optional_inputs,
-            next_steps=step.next_steps
+            next_steps=step.next_steps,
+            operator_class=step.step_type  # Store the actual operator class
         ))
     
     return WorkflowResponse(

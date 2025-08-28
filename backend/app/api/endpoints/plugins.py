@@ -74,11 +74,22 @@ async def add_plugin(
 async def reload_plugins(current_user = Depends(require_admin)):
     """Reload all plugins and their workflows"""
     try:
+        # Clear existing plugins
+        plugin_manager.plugins = []
+        
         # Load configuration
         plugin_manager.load_config()
         
+        # Clear registry to avoid duplicates
+        from ...workflows.registry import step_registry
+        step_registry._workflows = {}
+        
         # Discover and load workflows
         workflows_loaded = plugin_manager.discover_and_load_workflows()
+        
+        # Sync to database
+        from ...main import sync_programmatic_workflows
+        await sync_programmatic_workflows()
         
         return PluginLoadResponse(
             success=True,
@@ -86,6 +97,8 @@ async def reload_plugins(current_user = Depends(require_admin)):
             message=f"Successfully loaded {workflows_loaded} workflows from {len(plugin_manager.plugins)} plugins"
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return PluginLoadResponse(
             success=False,
             workflows_loaded=0,

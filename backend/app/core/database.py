@@ -17,6 +17,8 @@ from ..models.user import UserModel, RefreshTokenModel
 from ..models.category import WorkflowCategory
 from ..models.team import TeamModel
 from ..models.customer import Customer, CustomerSession
+from ..models.legal_entity import EntityType, LegalEntity
+from ..models.instance_log import InstanceLog
 
 
 class Database:
@@ -51,7 +53,10 @@ async def connect_to_mongo():
             WorkflowCategory,
             TeamModel,
             Customer,
-            CustomerSession
+            CustomerSession,
+            EntityType,
+            LegalEntity,
+            InstanceLog
         ]
     )
     
