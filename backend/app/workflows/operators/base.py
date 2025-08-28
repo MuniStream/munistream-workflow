@@ -106,6 +106,8 @@ class BaseOperator(ABC):
         self.upstream_tasks: List['BaseOperator'] = []
         self.state = TaskState()
         self.kwargs = kwargs
+        self._instance_id: Optional[str] = None  # Set during execution
+        self._workflow_id: Optional[str] = None  # Set during execution
         
         # Auto-register with current DAG context if available
         self._auto_register_with_dag()
@@ -193,6 +195,25 @@ class BaseOperator(ABC):
             other.upstream_tasks.append(self)
             return other
     
+    def __rrshift__(self, other: Union[List['BaseOperator'], 'TaskList']) -> 'BaseOperator':
+        """
+        Implement reverse >> operator for list connections.
+        
+        Examples:
+            [task1, task2] >> task3
+        """
+        if isinstance(other, list):
+            # List of tasks connecting to this task
+            for task in other:
+                task.downstream_tasks.append(self)
+                self.upstream_tasks.append(task)
+        elif isinstance(other, TaskList):
+            # TaskList connecting to this task
+            for task in other.tasks:
+                task.downstream_tasks.append(self)
+                self.upstream_tasks.append(task)
+        return self
+    
     def __lshift__(self, other: Union['BaseOperator', List['BaseOperator']]) -> 'BaseOperator':
         """
         Implement << operator for reverse flow definition.
@@ -225,3 +246,60 @@ class BaseOperator(ABC):
     def reset(self):
         """Reset the operator state for re-execution"""
         self.state = TaskState()
+    
+    async def log_info(self, message: str, details: Optional[Dict[str, Any]] = None):
+        """Log an info message from the operator"""
+        if self._instance_id and self._workflow_id:
+            from ...models.instance_log import InstanceLog, LogLevel, LogType
+            await InstanceLog.log(
+                instance_id=self._instance_id,
+                workflow_id=self._workflow_id,
+                level=LogLevel.INFO,
+                log_type=LogType.USER_ACTION,  # Operator logs are user actions
+                message=message,
+                task_id=self.task_id,
+                details=details or {}
+            )
+    
+    async def log_error(self, message: str, error: Optional[Exception] = None, details: Optional[Dict[str, Any]] = None):
+        """Log an error message from the operator"""
+        if self._instance_id and self._workflow_id:
+            from ...models.instance_log import InstanceLog, LogLevel, LogType
+            await InstanceLog.log(
+                instance_id=self._instance_id,
+                workflow_id=self._workflow_id,
+                level=LogLevel.ERROR,
+                log_type=LogType.ERROR,
+                message=message,
+                task_id=self.task_id,
+                details=details or {},
+                error=error
+            )
+    
+    async def log_warning(self, message: str, details: Optional[Dict[str, Any]] = None):
+        """Log a warning message from the operator"""
+        if self._instance_id and self._workflow_id:
+            from ...models.instance_log import InstanceLog, LogLevel, LogType
+            await InstanceLog.log(
+                instance_id=self._instance_id,
+                workflow_id=self._workflow_id,
+                level=LogLevel.WARNING,
+                log_type=LogType.USER_ACTION,
+                message=message,
+                task_id=self.task_id,
+                details=details or {}
+            )
+    
+    async def log_debug(self, message: str, details: Optional[Dict[str, Any]] = None):
+        """Log a debug message from the operator"""
+        if self._instance_id and self._workflow_id:
+            from ...models.instance_log import InstanceLog, LogLevel, LogType
+            await InstanceLog.log(
+                instance_id=self._instance_id,
+                workflow_id=self._workflow_id,
+                level=LogLevel.DEBUG,
+                log_type=LogType.USER_ACTION,
+                message=message,
+                task_id=self.task_id,
+                details=details or {}
+            )
