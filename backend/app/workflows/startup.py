@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 async def initialize_workflow_system():
     """Initialize the workflow system with DAGs and start executor"""
     try:
+        # Use print for immediate visibility during debugging
+        print("🔧 Initializing DAG workflow system...")
         logger.info("Initializing DAG workflow system...")
         
         # Register available workflows
@@ -20,14 +22,19 @@ async def initialize_workflow_system():
         for workflow_name, dag in workflows.items():
             try:
                 await workflow_service.register_dag(dag, created_by="system")
+                print(f"✅ Registered workflow: {workflow_name} ({dag.dag_id})")
                 logger.info(f"Registered workflow: {workflow_name} ({dag.dag_id})")
             except Exception as e:
+                print(f"Failed to register workflow {workflow_name}: {str(e)}")
                 logger.error(f"Failed to register workflow {workflow_name}: {str(e)}")
         
         # Start the executor
+        print("🚀 Starting DAG executor...")
         await workflow_service.start_executor()
+        print("✅ DAG executor started successfully")
         logger.info("DAG executor started successfully")
         
+        print("✅ Workflow system initialization completed")
         logger.info("Workflow system initialization completed")
         
     except Exception as e:

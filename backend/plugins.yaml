@@ -1,7 +1,7 @@
 plugins:
   - name: aquabilidad-workflows
     repo_url: https://github.com/aquabilidad/aquabilidad-workflows.git
-    enabled: true
+    enabled: false
     version: 1.0.0
     workflows:
       - module: aquabilidad.fishing_workflows
@@ -16,15 +16,17 @@ plugins:
     enabled: true
     version: 1.0.0
     workflows:
-      - module: puente.traslado_dominio_unificado_dag
-        function: create_traslado_dominio_unificado_dag_workflow
-      - module: puente.certificado_libertad_gravamen_dag
-        function: create_certificado_libertad_gravamen_dag_workflow
-      - module: puente.inscripcion_escritura_rpp_dag
-        function: create_inscripcion_escritura_rpp_dag_workflow
-      - module: puente.actualizacion_catastral_unificada_dag
-        function: create_actualizacion_catastral_unificada_dag_workflow
-      - module: rpp.inscripciones.inscripcion_compraventa
-        function: create_inscripcion_compraventa_workflow
-      - module: catastro.registro.alta_predio
-        function: create_alta_predio_workflow
+      - module: workflows.traslado_dominio_dag
+        function: get_dag
+      - module: workflows.certificado_libertad_gravamen_dag
+        function: get_dag
+      - module: workflows.inscripcion_escritura_rpp_dag
+        function: get_dag
+      - module: workflows.actualizacion_catastral_dag
+        function: get_dag
+      - module: workflows.certificado_propiedad_dag
+        function: get_dag
+      - module: workflows.rpp_inscripcion_compraventa_dag
+        function: get_dag
+      - module: workflows.catastro_alta_predio_dag
+        function: get_dag

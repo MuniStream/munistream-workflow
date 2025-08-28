@@ -83,12 +83,19 @@ def create_simple_workflow() -> DAG:
             python_callable=validate_user_data
         )
         
-        # Step 3: Call external API for additional verification (generic operator)
-        verify_external = ExternalAPIOperator(
+        # Step 3: Mock external verification (for demo purposes)
+        verify_external = PythonOperator(
             task_id="verify_external_system",
-            endpoint="https://api.example.com/verify/{email}",
-            method="GET",
-            context_to_payload={}  # GET request, no payload needed
+            python_callable=lambda context: {
+                "api_response": {
+                    "verified": True,
+                    "verification_id": f"VERIFY-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    "status": "approved"
+                },
+                "api_status_code": 200,
+                "api_endpoint": "https://api.example.com/verify/mock",
+                "api_timestamp": datetime.now().isoformat()
+            }
         )
         
         # Step 4: Human approval (self-contained, uses context to show what to review)
@@ -162,7 +169,9 @@ def create_parallel_workflow() -> DAG:
 # Factory function to get available workflows
 def get_available_workflows():
     """Get all available workflow definitions"""
+    # Test workflows disabled - only PUENTE workflows via plugin system
     return {
-        "simple_certificate": create_simple_workflow(),
-        "parallel_validation": create_parallel_workflow()
+        # "simple_certificate": create_simple_workflow(),
+        # "parallel_validation": create_parallel_workflow(),
+        # "test_entity": create_test_entity_workflow()
     }

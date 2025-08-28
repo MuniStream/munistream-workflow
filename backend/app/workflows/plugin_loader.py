@@ -15,8 +15,8 @@ from git import Repo
 import yaml
 import json
 
-from .workflow import Workflow
-from .registry import step_registry
+from ..services.workflow_service import workflow_service
+from .dag import DAG
 
 
 class WorkflowPlugin:
@@ -57,43 +57,116 @@ class WorkflowPlugin:
         self.local_path = str(repo_path)
         return self.local_path
     
-    def load_workflows(self) -> List[Workflow]:
+    def load_workflows(self) -> List[DAG]:
         """Load all workflows from the plugin"""
         if not self.local_path:
             raise ValueError("Plugin not cloned yet. Call clone_or_update first.")
         
         loaded_workflows = []
+        errors = []
         
         # Add plugin path to Python path
         if self.local_path not in sys.path:
             sys.path.insert(0, self.local_path)
         
         try:
+            # Auto-discover if no workflows specified
+            if not self.workflows:
+                print(f"No workflows specified for {self.name}, attempting auto-discovery...")
+                discovered = self._auto_discover_workflows()
+                self.workflows = discovered
+                print(f"Auto-discovered {len(discovered)} workflow entries for {self.name}")
+            
             for workflow_info in self.workflows:
                 module_path = workflow_info.get("module")
                 function_name = workflow_info.get("function")
                 
                 if not module_path or not function_name:
+                    print(f"⚠️ Skipping workflow with missing module/function: {workflow_info}")
                     continue
                 
-                # Import the module
-                module = importlib.import_module(module_path)
-                
-                # Get the workflow creation function
-                if hasattr(module, function_name):
-                    workflow_func = getattr(module, function_name)
-                    workflow = workflow_func()
+                try:
+                    print(f"Loading {module_path}.{function_name}...")
+                    # Import the module
+                    module = importlib.import_module(module_path)
                     
-                    if isinstance(workflow, Workflow):
-                        loaded_workflows.append(workflow)
-                        print(f"Loaded workflow: {workflow.name} from {self.name}")
+                    # Get the DAG creation function (try get_dag first, then fallback)
+                    dag_func = None
+                    if hasattr(module, 'get_dag'):
+                        dag_func = getattr(module, 'get_dag')
+                    elif hasattr(module, function_name):
+                        dag_func = getattr(module, function_name)
+                    
+                    if dag_func:
+                        result = dag_func()
+                        
+                        # Check if it's a DAG
+                        if isinstance(result, DAG):
+                            loaded_workflows.append(result)
+                            print(f"✅ Loaded DAG: {result.dag_id} from {self.name}")
+                        else:
+                            error_msg = f"Function did not return a DAG"
+                            print(f"❌ {error_msg}")
+                            errors.append(error_msg)
+                    else:
+                        error_msg = f"Module {module_path} has no function {function_name}"
+                        print(f"❌ {error_msg}")
+                        errors.append(error_msg)
+                        
+                except ImportError as e:
+                    error_msg = f"Failed to import {module_path}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+                except Exception as e:
+                    error_msg = f"Error loading {module_path}.{function_name}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
                     
         finally:
             # Clean up sys.path
             if self.local_path in sys.path:
                 sys.path.remove(self.local_path)
         
+        if errors:
+            print(f"⚠️ Plugin {self.name} had {len(errors)} errors during loading")
+            for error in errors:
+                print(f"   - {error}")
+        
         return loaded_workflows
+    
+    def _auto_discover_workflows(self) -> List[Dict[str, str]]:
+        """Auto-discover workflows by scanning for DAG files"""
+        discovered = []
+        
+        # Look for common patterns
+        patterns = [
+            "**/puente/*_dag.py",
+            "**/workflows/*_dag.py",
+            "**/*_workflow.py",
+            "**/dags/*.py"
+        ]
+        
+        from pathlib import Path
+        base_path = Path(self.local_path)
+        
+        for pattern in patterns:
+            for file_path in base_path.glob(pattern):
+                if "__pycache__" in str(file_path):
+                    continue
+                    
+                # Convert file path to module path
+                relative_path = file_path.relative_to(base_path)
+                module_path = str(relative_path.with_suffix('')).replace('/', '.')
+                
+                # Look for common function names
+                for func_name in ['get_workflow', 'create_workflow', 'workflow', 'get_dag']:
+                    discovered.append({
+                        "module": module_path,
+                        "function": func_name
+                    })
+                    
+        print(f"Auto-discovered files: {[d['module'] for d in discovered]}")
+        return discovered
 
 
 class WorkflowPluginManager:
@@ -126,23 +199,49 @@ class WorkflowPluginManager:
     def discover_and_load_workflows(self) -> int:
         """Discover and load all workflows from configured plugins"""
         total_loaded = 0
+        workflow_ids_loaded = set()
+        
+        print(f"\n{'='*60}")
+        print(f"Starting workflow discovery for {len(self.plugins)} plugins")
+        print(f"{'='*60}")
         
         for plugin in self.plugins:
+            print(f"\n📦 Processing plugin: {plugin.name}")
+            print(f"   Repository: {plugin.repo_url}")
+            
             try:
                 # Clone or update the plugin repository
                 plugin.clone_or_update(self.base_path)
                 
-                # Load workflows from the plugin
-                workflows = plugin.load_workflows()
+                # Load DAGs from the plugin
+                dags = plugin.load_workflows()  # This now returns DAGs
+                print(f"   Found {len(dags)} DAGs")
                 
-                # Register workflows with the system
-                for workflow in workflows:
-                    step_registry.register_workflow(workflow)
-                    total_loaded += 1
+                # Register DAGs with the system
+                for dag in dags:
+                    if isinstance(dag, DAG):
+                        # Check for duplicates
+                        if dag.dag_id in workflow_ids_loaded:
+                            print(f"   ⚠️ Skipping duplicate DAG ID: {dag.dag_id}")
+                            continue
+                            
+                        # Add DAG to the DAGBag
+                        workflow_service.dag_bag.add_dag(dag)
+                        workflow_ids_loaded.add(dag.dag_id)
+                        total_loaded += 1
+                        print(f"   ✅ Registered DAG: {dag.dag_id}")
                     
             except Exception as e:
-                print(f"Error loading plugin {plugin.name}: {e}")
+                print(f"   ❌ Error loading plugin {plugin.name}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
+        
+        print(f"\n{'='*60}")
+        print(f"Workflow discovery complete")
+        print(f"Total workflows loaded: {total_loaded}")
+        print(f"Unique workflow IDs: {len(workflow_ids_loaded)}")
+        print(f"{'='*60}\n")
         
         return total_loaded
     
