@@ -10,6 +10,7 @@ from enum import Enum
 
 from .dag import InstanceStatus
 from ..models.instance_log import InstanceLog, LogLevel, LogType
+from ..models.workflow import WorkflowInstance
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,6 @@ class DAGExecutor:
         logger.info(f"Executing instance {instance_id}")
         
         # Get fresh instance from database
-        from ..models.workflow import WorkflowInstance
         db_instance = await WorkflowInstance.find_one(
             WorkflowInstance.instance_id == instance_id
         )
@@ -108,6 +108,7 @@ class DAGExecutor:
                 return False
             
             # Recreate the DAG instance from database state
+            print(f"DEBUG: Recreating instance with context: {list(db_instance.context.keys()) if db_instance.context else 'None'}")
             dag_instance = dag.create_instance(db_instance.user_id, db_instance.context)
             dag_instance.instance_id = instance_id  # Keep the original ID
             dag_instance.created_at = db_instance.created_at
@@ -132,8 +133,20 @@ class DAGExecutor:
             # Add to DAG bag for future reference
             self.workflow_service.dag_bag.instances[instance_id] = dag_instance
             print(f"✅ Instance {instance_id} recreated successfully")
-        
+        else:
+            # Instance exists in memory, but we need to sync task states with database
+            dag_instance.completed_tasks = set(db_instance.completed_steps or [])
+            dag_instance.failed_tasks = set(db_instance.failed_steps or [])
+            dag_instance.current_task = db_instance.current_step
+
+            # Update task states for waiting tasks
+            if db_instance.current_step and db_instance.current_step not in dag_instance.completed_tasks:
+                if dag_instance.task_states.get(db_instance.current_step):
+                    dag_instance.task_states[db_instance.current_step]["status"] = "waiting"
+
         # ALWAYS use database context as source of truth
+        print(f"DEBUG: Before overwrite, dag_instance.context keys: {list(dag_instance.context.keys())}")
+        print(f"DEBUG: Overwriting with db_instance.context keys: {list(db_instance.context.keys()) if db_instance.context else 'None'}")
         dag_instance.context = db_instance.context or {}
         logger.debug(f"Loaded context for {instance_id}: {list(dag_instance.context.keys())}")
         
@@ -150,6 +163,9 @@ class DAGExecutor:
         # Process executable tasks
         executable_tasks = dag_instance.get_executable_tasks()
         print(f"🔍 Instance {instance_id} has {len(executable_tasks)} executable tasks: {executable_tasks}")
+        # Debug: print task states
+        for task_id, state in dag_instance.task_states.items():
+            print(f"   DEBUG Task {task_id}: status={state.get('status')}")
         logger.info(f"Instance {instance_id} has {len(executable_tasks)} executable tasks: {executable_tasks}")
         
         await InstanceLog.log(
@@ -228,7 +244,13 @@ class DAGExecutor:
                     logger.debug(f"Task {task_id} added to context: {list(output.keys())}")
             elif result == "waiting":
                 dag_instance.update_task_status(task_id, "waiting")
-                break  # Stop processing, we're waiting
+                # CRITICAL: Save task output/context even when waiting (for state tracking)
+                output = task.get_output()
+                if output:
+                    dag_instance.context.update(output)
+                # Schedule re-check after a delay for polling
+                # The instance will be re-queued in the main loop since it's PAUSED
+                break  # Stop processing for now, will resume via polling
             elif result == "failed":
                 dag_instance.update_task_status(task_id, "failed")
                 break  # Stop processing, task failed
@@ -250,7 +272,8 @@ class DAGExecutor:
         # Save everything back to database
         old_status = db_instance.status
         new_status = self._map_status(dag_instance.status)
-        
+
+        print(f"DEBUG: Saving context with keys: {list(dag_instance.context.keys())}")
         db_instance.status = new_status
         db_instance.context = dag_instance.context
         db_instance.current_step = dag_instance.current_task
@@ -280,7 +303,8 @@ class DAGExecutor:
             )
         
         # Return whether instance can continue processing
-        return dag_instance.status == InstanceStatus.RUNNING
+        # PAUSED instances need to continue for polling waiting tasks
+        return dag_instance.status in [InstanceStatus.RUNNING, InstanceStatus.PAUSED]
     
     def _has_waiting_tasks(self, instance) -> bool:
         """Check if instance has any waiting tasks"""
@@ -313,9 +337,18 @@ class DAGExecutor:
                     
                     # Execute instance
                     can_continue = await self.execute_instance(instance_id)
-                    
-                    # Re-queue if still running
+
+                    # Re-queue if still running or waiting
                     if can_continue:
+                        # Check if instance is paused (waiting for external system)
+                        db_instance = await WorkflowInstance.find_one(
+                            WorkflowInstance.instance_id == instance_id
+                        )
+                        if db_instance and db_instance.status == "paused":
+                            # Add delay for polling external systems
+                            print(f"⏳ Instance {instance_id} is waiting, will re-check in 5 seconds...")
+                            await asyncio.sleep(5)
+
                         self.execution_queue.append(instance_id)
                         print(f"♻️ Re-queued instance {instance_id} for continued processing")
                 

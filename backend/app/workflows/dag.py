@@ -242,8 +242,13 @@ class DAGInstance:
             # Skip if currently executing (but NOT if waiting - waiting tasks can be resumed)
             if self.task_states[task_id]["status"] == "executing":
                 continue
-            
-            # Check if all upstream dependencies are completed
+
+            # If this task is waiting, it can be resumed
+            if self.task_states[task_id]["status"] == "waiting":
+                executable.append(task_id)
+                continue
+
+            # Check if all upstream dependencies are completed (not waiting!)
             upstream_tasks = list(self.dag.graph.predecessors(task_id))
             if all(upstream in self.completed_tasks for upstream in upstream_tasks):
                 executable.append(task_id)
@@ -286,6 +291,10 @@ class DAGInstance:
             if result:
                 self.context.update(result)
             
+        elif status == "waiting":
+            # Keep waiting task as current task for persistence
+            self.current_task = task_id
+
         elif status == "failed":
             self.task_states[task_id]["completed_at"] = datetime.utcnow()
             self.failed_tasks.add(task_id)

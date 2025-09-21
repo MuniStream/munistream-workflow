@@ -169,8 +169,12 @@ def create_parallel_workflow() -> DAG:
 # Factory function to get available workflows
 def get_available_workflows():
     """Get all available workflow definitions"""
-    # Test workflows disabled - only PUENTE workflows via plugin system
+    # Import Airflow integration workflow
+    from .airflow_integration_workflow import create_airflow_integration_workflow
+
+    # Test workflows - Add Airflow integration for testing
     return {
+        "airflow_integration": create_airflow_integration_workflow(),
         # "simple_certificate": create_simple_workflow(),
         # "parallel_validation": create_parallel_workflow(),
         # "test_entity": create_test_entity_workflow()

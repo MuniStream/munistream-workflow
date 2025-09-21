@@ -8,26 +8,28 @@ from .python import PythonOperator, ShortCircuitOperator
 from .user_input import UserInputOperator
 from .approval import ApprovalOperator, ConditionalApprovalOperator
 from .external_api import ExternalAPIOperator, HTTPOperator
+from .airflow_operator import AirflowOperator
 
 __all__ = [
     # Base classes
     "BaseOperator",
-    "TaskResult", 
+    "TaskResult",
     "TaskState",
     "TaskStatus",
-    
+
     # Python operators
     "PythonOperator",
-    "ShortCircuitOperator", 
-    
+    "ShortCircuitOperator",
+
     # User interaction operators
     "UserInputOperator",
-    
+
     # Approval operators
     "ApprovalOperator",
     "ConditionalApprovalOperator",
-    
+
     # External integration operators
     "ExternalAPIOperator",
-    "HTTPOperator"
+    "HTTPOperator",
+    "AirflowOperator"
 ]
