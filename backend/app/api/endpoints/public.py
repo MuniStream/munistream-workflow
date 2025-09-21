@@ -69,11 +69,17 @@ async def submit_data(
         for key, value in form.items():
             # Handle file uploads separately if needed
             if hasattr(value, 'filename'):
-                # This is a file upload - store file info for now
+                # This is a file upload - read the file content
+                import base64
+                file_content = await value.read()
+                # Convert to base64 for storage
+                file_base64 = base64.b64encode(file_content).decode('utf-8')
+                
                 data[key] = {
                     "filename": value.filename,
                     "content_type": value.content_type,
-                    # Could save file here if needed
+                    "base64": file_base64,  # Store the actual file content as base64
+                    "size": len(file_content)
                 }
             else:
                 data[key] = value
@@ -273,11 +279,16 @@ async def get_workflow_categories(
         ]
     }
     
-    # Count workflows per category
+    # Count workflows per category - use DAG data for accurate counts
     all_workflows = await workflow_service.list_workflow_definitions(status="active")
     category_counts = {}
     for w in all_workflows:
-        cat = w.category or "general"
+        # Get category from DAG if available (more accurate than database)
+        dag = workflow_service.dag_bag.get_dag(w.workflow_id)
+        if dag and hasattr(dag, 'category'):
+            cat = dag.category
+        else:
+            cat = w.category or "general"
         category_counts[cat] = category_counts.get(cat, 0) + 1
     
     # Update counts
@@ -302,26 +313,47 @@ async def search_workflows(
     """
     all_workflows = await workflow_service.list_workflow_definitions(status="active")
     
+    # Build a list with DAG data for accurate searching
+    workflows_with_dag_data = []
+    for w in all_workflows:
+        dag = workflow_service.dag_bag.get_dag(w.workflow_id)
+        if dag:
+            # Use DAG data if available
+            name = dag.name if hasattr(dag, 'name') else w.name
+            description = dag.description if dag.description else w.description
+            cat = dag.category if hasattr(dag, 'category') else (w.category or "general")
+        else:
+            name = w.name
+            description = w.description
+            cat = w.category or "general"
+        
+        workflows_with_dag_data.append({
+            "workflow": w,
+            "dag": dag,
+            "name": name,
+            "description": description,
+            "category": cat
+        })
+    
     # Filter by search query
     if q:
         q_lower = q.lower()
         filtered = [
-            w for w in all_workflows 
-            if q_lower in w.name.lower() or 
-               (w.description and q_lower in w.description.lower())
+            wd for wd in workflows_with_dag_data
+            if q_lower in wd["name"].lower() or 
+               (wd["description"] and q_lower in wd["description"].lower())
         ]
     else:
-        filtered = all_workflows
+        filtered = workflows_with_dag_data
     
     # Filter by category
     if category:
-        filtered = [w for w in filtered if w.category == category]
+        filtered = [wd for wd in filtered if wd["category"] == category]
     
     # Build results with real workflow data
     results = []
-    for w in filtered:
-        dag = workflow_service.dag_bag.get_dag(w.workflow_id)
-        workflow_data = await _get_workflow_data(w, dag, locale)
+    for wd in filtered:
+        workflow_data = await _get_workflow_data(wd["workflow"], wd["dag"], locale)
         results.append(workflow_data)
     
     return {
@@ -666,8 +698,16 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
     """Extract all workflow data from definition and DAG."""
     steps = []
     
-    # Try 1: Get steps from DAG
+    # Prefer DAG data over database data
     if dag:
+        # Get workflow info from DAG (it has the most up-to-date data)
+        name = dag.name if hasattr(dag, 'name') else workflow.name
+        description = dag.description if dag.description else workflow.description
+        category = dag.category if hasattr(dag, 'category') else (workflow.category or "general")
+        tags = dag.tags if dag.tags else (workflow.tags or [])
+        metadata = dag.metadata if hasattr(dag, 'metadata') and dag.metadata else (workflow.metadata or {})
+        
+        # Get steps from DAG
         for task_id, task in dag.tasks.items():
             step_data = {
                 "id": task_id,
@@ -689,6 +729,13 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
                     step_data["form_config"] = task.kwargs['form_config']
             
             steps.append(step_data)
+    else:
+        # Fall back to database data if no DAG
+        name = workflow.name
+        description = workflow.description or ""
+        category = workflow.category or "general"
+        tags = workflow.tags or []
+        metadata = workflow.metadata or {}
     
     # Try 2: Get steps from database if no DAG
     if not steps:
@@ -720,22 +767,19 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
                 }
                 steps.append(step_data)
     
-    # Get metadata values with defaults
-    metadata = workflow.metadata or {}
-    
     return {
         "id": workflow.workflow_id,
         "workflow_id": workflow.workflow_id,
-        "name": workflow.name,
-        "title": workflow.name,
-        "description": workflow.description or "",
-        "category": workflow.category or "general",
-        "icon": _get_workflow_icon(workflow.category),
-        "estimatedDuration": metadata.get("estimated_duration") or _calculate_duration(len(steps)),
+        "name": name,
+        "title": name,
+        "description": description,
+        "category": category,
+        "icon": metadata.get("icon") or _get_workflow_icon(category),
+        "estimatedDuration": metadata.get("estimatedTime") or metadata.get("estimated_duration") or _calculate_duration(len(steps)),
         "steps": steps,
-        "requirements": _get_workflow_requirements(workflow, locale),
-        "available": workflow.status == "active",
-        "tags": workflow.tags or [],
+        "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, locale),
+        "available": metadata.get("available", True) if "available" in metadata else workflow.status == "active",
+        "tags": tags,
         "popularity": metadata.get("popularity", 0),
         "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
         "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,

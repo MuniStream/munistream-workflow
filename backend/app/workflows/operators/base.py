@@ -116,7 +116,7 @@ class BaseOperator(ABC):
         """Auto-register this operator with the current DAG context"""
         from ..dag import DAGContext
         
-        current_dag = DAGContext.current_dag
+        current_dag = DAGContext.get_current()
         if current_dag is not None:
             current_dag.add_task(self)
     

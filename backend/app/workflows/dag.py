@@ -38,7 +38,9 @@ class DAG:
     def __init__(
         self,
         dag_id: str,
+        name: Optional[str] = None,
         description: str = "",
+        category: Optional[str] = None,
         schedule: Optional[str] = None,
         start_date: Optional[datetime] = None,
         default_args: Optional[Dict[str, Any]] = None,
@@ -50,7 +52,9 @@ class DAG:
         
         Args:
             dag_id: Unique identifier for the DAG type
+            name: Human-readable name for the workflow
             description: Description of the workflow
+            category: Workflow category for grouping
             schedule: Schedule interval (for automated runs)
             start_date: When the DAG starts being available
             default_args: Default arguments for all operators
@@ -58,7 +62,9 @@ class DAG:
             **kwargs: Additional metadata
         """
         self.dag_id = dag_id
+        self.name = name or dag_id
         self.description = description
+        self.category = category or "general"
         self.schedule = schedule
         self.start_date = start_date
         self.default_args = default_args or {}
@@ -330,9 +336,12 @@ class DAGContext:
         return cls._context_stack.pop() if cls._context_stack else None
     
     @classmethod
-    @property
-    def current_dag(cls) -> Optional[DAG]:
+    def get_current(cls) -> Optional[DAG]:
+        """Get the current DAG from the stack"""
         return cls._context_stack[-1] if cls._context_stack else None
+    
+    # Create a class-level property for backward compatibility
+    current_dag = property(lambda self: self.get_current())
     
     @classmethod
     def clear(cls):

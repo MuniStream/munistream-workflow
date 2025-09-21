@@ -97,25 +97,60 @@ class WorkflowService:
         return self.dag_bag.get_dag(dag_id)
     
     async def get_workflow_definition(self, workflow_id: str) -> Optional[WorkflowDefinition]:
-        """Get workflow definition by ID"""
-        return await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == workflow_id)
+        """Get workflow definition by ID from DAGBag (code) not database"""
+        # Get DAG from DAGBag
+        dag = self.dag_bag.get_dag(workflow_id)
+        if not dag:
+            return None
+            
+        # Create a WorkflowDefinition object from the DAG
+        return WorkflowDefinition(
+            workflow_id=dag.dag_id,
+            name=dag.name if hasattr(dag, 'name') else dag.dag_id,
+            description=dag.description or "",
+            category=dag.category if hasattr(dag, 'category') else "general",
+            status="active",  # DAGs in DAGBag are always active
+            tags=dag.tags if hasattr(dag, 'tags') else [],
+            metadata=dag.metadata if hasattr(dag, 'metadata') else {},
+            created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
+            updated_at=dag.updated_at if hasattr(dag, 'updated_at') else datetime.utcnow()
+        )
     
-    @staticmethod
     async def list_workflow_definitions(
+        self,
         status: Optional[str] = None,
         category: Optional[str] = None,
         skip: int = 0,
         limit: int = 20
     ) -> List[WorkflowDefinition]:
-        """List workflow definitions with filters"""
-        query = {}
+        """List workflow definitions from DAGBag (code) not database"""
+        # Get all DAGs from the DAGBag (loaded from code/plugins)
+        all_workflows = []
         
-        if status:
-            query["status"] = status
-        if category:
-            query["category"] = category
+        for dag_id, dag in self.dag_bag.dags.items():
+            # Create a WorkflowDefinition object from the DAG
+            workflow_def = WorkflowDefinition(
+                workflow_id=dag.dag_id,
+                name=dag.name if hasattr(dag, 'name') else dag.dag_id,
+                description=dag.description or "",
+                category=dag.category if hasattr(dag, 'category') else "general",
+                status="active",  # DAGs in DAGBag are always active
+                tags=dag.tags if hasattr(dag, 'tags') else [],
+                metadata=dag.metadata if hasattr(dag, 'metadata') else {},
+                created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
+                updated_at=dag.updated_at if hasattr(dag, 'updated_at') else datetime.utcnow()
+            )
+            
+            # Apply filters
+            if status and workflow_def.status != status:
+                continue
+            if category and workflow_def.category != category:
+                continue
+                
+            all_workflows.append(workflow_def)
         
-        return await WorkflowDefinition.find(query).skip(skip).limit(limit).to_list()
+        # Apply pagination
+        return all_workflows[skip:skip + limit] if limit else all_workflows[skip:]
     
     @staticmethod
     async def update_workflow_definition(
