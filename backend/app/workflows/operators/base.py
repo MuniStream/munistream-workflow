@@ -158,6 +158,8 @@ class BaseOperator(ABC):
                 self.state.completed_at = datetime.utcnow()
             elif result.status == "waiting":
                 self.state.status = TaskStatus.WAITING_INPUT
+                # IMPORTANT: Save data even when waiting (for state persistence)
+                self.state.output_data = result.data or {}
             elif result.status == "failed":
                 self.state.status = TaskStatus.FAILED
                 self.state.error_message = result.error

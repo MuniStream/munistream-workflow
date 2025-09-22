@@ -59,6 +59,37 @@ class AirflowOperator(BaseOperator):
         self.dag_conf = dag_conf or {}
         self.timeout_minutes = timeout_minutes
         self.poll_interval_seconds = poll_interval_seconds
+        self._state_key = f"airflow_{task_id}_state"
+
+    def _waiting_result(self, message: str, **metadata) -> TaskResult:
+        """Create a waiting TaskResult with state preservation."""
+        # Always include the state if it exists
+        data = {}
+        if hasattr(self, '_airflow_state') and self._airflow_state:
+            data[self._state_key] = self._airflow_state
+        return TaskResult(
+            status="waiting",
+            data=data,
+            metadata={"message": message, **metadata}
+        )
+
+    def _success_result(self, data: Dict[str, Any]) -> TaskResult:
+        """Create a success TaskResult."""
+        return TaskResult(status="continue", data=data)
+
+    def _failed_result(self, error: str) -> TaskResult:
+        """Create a failed TaskResult."""
+        return TaskResult(status="failed", error=error)
+
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for Airflow API."""
+        auth_str = f"{self.airflow_username}:{self.airflow_password}"
+        auth_b64 = b64encode(auth_str.encode('ascii')).decode('ascii')
+        return {
+            "Authorization": f"Basic {auth_b64}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
@@ -81,45 +112,27 @@ class AirflowOperator(BaseOperator):
         Returns:
             TaskResult with status "waiting", "continue", or "failed"
         """
-        # Check if we're already monitoring a DAG run
-        airflow_state_key = f"airflow_{self.task_id}_state"
-        airflow_state = context.get(airflow_state_key, {})
+        # Get or initialize Airflow state
+        self._airflow_state = context.get(self._state_key, {})
 
-        print(f"DEBUG: Airflow operator checking state for key {airflow_state_key}")
-        print(f"DEBUG: Found state: {airflow_state}")
-        print(f"DEBUG: Full context keys: {list(context.keys())}")
+        logger.debug(f"Airflow operator state for {self._state_key}: {self._airflow_state}")
 
-        if not airflow_state:
+        if not self._airflow_state:
             # First execution - trigger the DAG
-            return await self._trigger_dag(context, airflow_state_key)
+            return await self._trigger_dag(context)
         else:
             # Subsequent execution - check DAG status
-            return await self._check_dag_status(context, airflow_state_key, airflow_state)
+            return await self._check_dag_status()
 
-    async def _trigger_dag(self, context: Dict[str, Any], state_key: str) -> TaskResult:
-        """
-        Trigger an Airflow DAG and store tracking information.
-
-        Args:
-            context: Workflow execution context
-            state_key: Key to store Airflow state in context
-
-        Returns:
-            TaskResult with status "waiting" or "failed"
-        """
+    async def _trigger_dag(self, context: Dict[str, Any]) -> TaskResult:
+        """Trigger an Airflow DAG and store tracking information."""
         try:
             # Generate unique run ID
             dag_run_id = f"munistream_{self.task_id}_{int(time.time())}"
 
             # Prepare DAG configuration
-            # Merge static config with dynamic context values
-            dag_conf = self.dag_conf.copy()
+            dag_conf = {**self.dag_conf, **context.get(f"{self.task_id}_dag_conf", {})}
 
-            # Allow context to override or add to dag_conf
-            context_dag_conf = context.get(f"{self.task_id}_dag_conf", {})
-            dag_conf.update(context_dag_conf)
-
-            # Log the trigger attempt
             await self.log_info(
                 f"Triggering Airflow DAG: {self.dag_id}",
                 {"dag_run_id": dag_run_id, "conf": dag_conf}
@@ -127,234 +140,138 @@ class AirflowOperator(BaseOperator):
 
             # Make API call to trigger DAG
             url = f"{self.airflow_base_url}/dags/{self.dag_id}/dagRuns"
-            payload = {
-                "dag_run_id": dag_run_id,
-                "conf": dag_conf
-            }
-
-            # Create auth header
-            auth_str = f"{self.airflow_username}:{self.airflow_password}"
-            auth_bytes = auth_str.encode('ascii')
-            auth_b64 = b64encode(auth_bytes).decode('ascii')
-            headers = {
-                "Authorization": f"Basic {auth_b64}",
-                "Content-Type": "application/json"
-            }
+            payload = {"dag_run_id": dag_run_id, "conf": dag_conf}
 
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as response:
-                    response_text = await response.text()
-
+                async with session.post(url, json=payload, headers=self._get_auth_headers()) as response:
                     if response.status in [200, 201]:
-                        # Successfully triggered
                         await self.log_info(
                             f"Successfully triggered DAG {self.dag_id}",
                             {"dag_run_id": dag_run_id, "status_code": response.status}
                         )
 
                         # Store state for polling
-                        context[state_key] = {
+                        self._airflow_state = {
                             "dag_run_id": dag_run_id,
                             "triggered_at": datetime.utcnow().isoformat(),
                             "last_check": datetime.utcnow().isoformat(),
                             "status": "triggered"
                         }
+                        context[self._state_key] = self._airflow_state
 
+                        # Return with the state data explicitly
                         return TaskResult(
                             status="waiting",
+                            data={self._state_key: self._airflow_state},
                             metadata={
                                 "message": f"Airflow DAG {self.dag_id} triggered",
                                 "dag_run_id": dag_run_id
                             }
                         )
                     else:
-                        # Failed to trigger
+                        response_text = await response.text()
                         await self.log_error(
                             f"Failed to trigger DAG {self.dag_id}",
                             details={"status_code": response.status, "response": response_text[:500]}
                         )
-
-                        return TaskResult(
-                            status="failed",
-                            error=f"Failed to trigger DAG: HTTP {response.status}"
-                        )
+                        return self._failed_result(f"Failed to trigger DAG: HTTP {response.status}")
 
         except Exception as e:
-            await self.log_error(
-                f"Error triggering DAG {self.dag_id}",
-                error=e
-            )
-            return TaskResult(
-                status="failed",
-                error=f"Error triggering DAG: {str(e)}"
-            )
+            await self.log_error(f"Error triggering DAG {self.dag_id}", error=e)
+            return self._failed_result(f"Error triggering DAG: {str(e)}")
 
-    async def _check_dag_status(
-        self,
-        context: Dict[str, Any],
-        state_key: str,
-        airflow_state: Dict[str, Any]
-    ) -> TaskResult:
-        """
-        Check the status of a running DAG.
+    async def _check_dag_status(self) -> TaskResult:
+        """Check the status of a running DAG."""
+        dag_run_id = self._airflow_state["dag_run_id"]
+        triggered_at = datetime.fromisoformat(self._airflow_state["triggered_at"])
+        last_check = datetime.fromisoformat(self._airflow_state["last_check"])
 
-        Args:
-            context: Workflow execution context
-            state_key: Key where Airflow state is stored
-            airflow_state: Current Airflow tracking state
-
-        Returns:
-            TaskResult with status "waiting", "continue", or "failed"
-        """
-        dag_run_id = airflow_state["dag_run_id"]
-        triggered_at = datetime.fromisoformat(airflow_state["triggered_at"])
-        last_check = datetime.fromisoformat(airflow_state["last_check"])
-
-        # Check if we should poll yet (rate limiting)
+        # Rate limiting
         time_since_last_check = (datetime.utcnow() - last_check).total_seconds()
         if time_since_last_check < self.poll_interval_seconds:
-            # Too soon to check again
-            return TaskResult(
-                status="waiting",
-                metadata={
-                    "message": f"Waiting {self.poll_interval_seconds - int(time_since_last_check)}s before next check",
-                    "dag_run_id": dag_run_id
-                }
+            wait_time = self.poll_interval_seconds - int(time_since_last_check)
+            return self._waiting_result(
+                f"Waiting {wait_time}s before next check",
+                dag_run_id=dag_run_id
             )
 
-        # Check for timeout
-        time_since_trigger = (datetime.utcnow() - triggered_at).total_seconds() / 60
-        if time_since_trigger > self.timeout_minutes:
+        # Timeout check
+        elapsed_minutes = (datetime.utcnow() - triggered_at).total_seconds() / 60
+        if elapsed_minutes > self.timeout_minutes:
             await self.log_error(
                 f"DAG {self.dag_id} timed out after {self.timeout_minutes} minutes",
                 details={"dag_run_id": dag_run_id}
             )
-
-            # Clean up state
-            del context[state_key]
-
-            return TaskResult(
-                status="failed",
-                error=f"DAG execution timed out after {self.timeout_minutes} minutes"
-            )
+            return self._failed_result(f"DAG execution timed out after {self.timeout_minutes} minutes")
 
         try:
             # Check DAG status via API
             url = f"{self.airflow_base_url}/dags/{self.dag_id}/dagRuns/{dag_run_id}"
 
-            # Create auth header
-            auth_str = f"{self.airflow_username}:{self.airflow_password}"
-            auth_bytes = auth_str.encode('ascii')
-            auth_b64 = b64encode(auth_bytes).decode('ascii')
-            headers = {
-                "Authorization": f"Basic {auth_b64}",
-                "Accept": "application/json"
-            }
-
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        dag_state = data.get("state", "unknown")
-
-                        # Update last check time
-                        airflow_state["last_check"] = datetime.utcnow().isoformat()
-                        airflow_state["status"] = dag_state
-                        context[state_key] = airflow_state
-
-                        # Check if DAG is complete
-                        if dag_state == "success":
-                            await self.log_info(
-                                f"DAG {self.dag_id} completed successfully",
-                                {"dag_run_id": dag_run_id, "duration_minutes": round(time_since_trigger, 1)}
-                            )
-
-                            # Clean up state and return success
-                            del context[state_key]
-
-                            return TaskResult(
-                                status="continue",
-                                data={
-                                    "dag_run_id": dag_run_id,
-                                    "dag_id": self.dag_id,
-                                    "execution_time_minutes": round(time_since_trigger, 1),
-                                    "final_state": dag_state
-                                }
-                            )
-
-                        elif dag_state == "failed":
-                            await self.log_error(
-                                f"DAG {self.dag_id} failed",
-                                details={"dag_run_id": dag_run_id}
-                            )
-
-                            # Clean up state and return failure
-                            del context[state_key]
-
-                            return TaskResult(
-                                status="failed",
-                                error=f"Airflow DAG {self.dag_id} failed"
-                            )
-
-                        elif dag_state in ["running", "queued"]:
-                            # Still running - continue waiting
-                            await self.log_debug(
-                                f"DAG {self.dag_id} still {dag_state}",
-                                {"dag_run_id": dag_run_id, "elapsed_minutes": round(time_since_trigger, 1)}
-                            )
-
-                            return TaskResult(
-                                status="waiting",
-                                metadata={
-                                    "message": f"DAG is {dag_state} ({round(time_since_trigger, 1)} minutes elapsed)",
-                                    "dag_run_id": dag_run_id,
-                                    "state": dag_state
-                                }
-                            )
-
-                        else:
-                            # Unexpected state
-                            await self.log_warning(
-                                f"DAG {self.dag_id} in unexpected state: {dag_state}",
-                                {"dag_run_id": dag_run_id}
-                            )
-
-                            return TaskResult(
-                                status="waiting",
-                                metadata={
-                                    "message": f"DAG in state: {dag_state}",
-                                    "dag_run_id": dag_run_id
-                                }
-                            )
-
-                    else:
-                        # Error checking status
+                async with session.get(url, headers=self._get_auth_headers()) as response:
+                    if response.status != 200:
                         response_text = await response.text()
                         await self.log_error(
                             f"Failed to check DAG status",
                             details={"status_code": response.status, "response": response_text[:500]}
                         )
+                        return self._waiting_result(
+                            f"Error checking status (HTTP {response.status}), will retry",
+                            dag_run_id=dag_run_id
+                        )
 
-                        # Continue waiting - might be temporary issue
-                        return TaskResult(
-                            status="waiting",
-                            metadata={
-                                "message": f"Error checking status (HTTP {response.status}), will retry",
-                                "dag_run_id": dag_run_id
-                            }
+                    data = await response.json()
+                    dag_state = data.get("state", "unknown")
+
+                    # Update state
+                    self._airflow_state["last_check"] = datetime.utcnow().isoformat()
+                    self._airflow_state["status"] = dag_state
+
+                    # Handle different DAG states
+                    if dag_state == "success":
+                        await self.log_info(
+                            f"DAG {self.dag_id} completed successfully",
+                            {"dag_run_id": dag_run_id, "duration_minutes": round(elapsed_minutes, 1)}
+                        )
+                        return self._success_result({
+                            "dag_run_id": dag_run_id,
+                            "dag_id": self.dag_id,
+                            "execution_time_minutes": round(elapsed_minutes, 1),
+                            "final_state": dag_state
+                        })
+
+                    elif dag_state == "failed":
+                        await self.log_error(
+                            f"DAG {self.dag_id} failed",
+                            details={"dag_run_id": dag_run_id}
+                        )
+                        return self._failed_result(f"Airflow DAG {self.dag_id} failed")
+
+                    elif dag_state in ["running", "queued"]:
+                        await self.log_debug(
+                            f"DAG {self.dag_id} still {dag_state}",
+                            {"dag_run_id": dag_run_id, "elapsed_minutes": round(elapsed_minutes, 1)}
+                        )
+                        return self._waiting_result(
+                            f"DAG is {dag_state} ({round(elapsed_minutes, 1)} minutes elapsed)",
+                            dag_run_id=dag_run_id,
+                            state=dag_state
+                        )
+
+                    else:
+                        await self.log_warning(
+                            f"DAG {self.dag_id} in unexpected state: {dag_state}",
+                            {"dag_run_id": dag_run_id}
+                        )
+                        return self._waiting_result(
+                            f"DAG in state: {dag_state}",
+                            dag_run_id=dag_run_id
                         )
 
         except Exception as e:
-            await self.log_error(
-                f"Error checking DAG status",
-                error=e
-            )
-
-            # Continue waiting - might be temporary network issue
-            return TaskResult(
-                status="waiting",
-                metadata={
-                    "message": f"Error checking status: {str(e)[:100]}, will retry",
-                    "dag_run_id": dag_run_id
-                }
+            await self.log_error(f"Error checking DAG status", error=e)
+            return self._waiting_result(
+                f"Error checking status: {str(e)[:100]}, will retry",
+                dag_run_id=dag_run_id
             )

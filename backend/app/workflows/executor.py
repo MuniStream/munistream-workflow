@@ -121,12 +121,13 @@ class DAGExecutor:
             
             # Initialize task states for all tasks
             for task_id in dag.tasks.keys():
-                if task_id in dag_instance.completed_tasks:
+                if task_id == db_instance.current_step and task_id not in dag_instance.completed_tasks:
+                    # Current task that's not completed must be waiting
+                    dag_instance.task_states[task_id] = {"status": "waiting"}
+                elif task_id in dag_instance.completed_tasks:
                     dag_instance.task_states[task_id] = {"status": "completed"}
                 elif task_id in dag_instance.failed_tasks:
                     dag_instance.task_states[task_id] = {"status": "failed"}
-                elif task_id == db_instance.current_step:
-                    dag_instance.task_states[task_id] = {"status": "waiting"}
                 else:
                     dag_instance.task_states[task_id] = {"status": "pending"}
             
@@ -205,11 +206,15 @@ class DAGExecutor:
                 # Check if task has an async execute method
                 if hasattr(task, 'execute_async'):
                     # Task can handle async operations
-                    result = await task.execute_async(dag_instance.context)
+                    task_result = await task.execute_async(dag_instance.context)
+                    # Extract status string and update task's output data
+                    result = task_result.status
+                    if task_result.data:
+                        task.state.output_data = task_result.data
                 else:
                     # Regular synchronous execution
                     result = task.run(dag_instance.context)
-                
+
                 print(f"📊 Task {task_id} returned: {result}")
                 
                 await InstanceLog.log(
@@ -235,6 +240,7 @@ class DAGExecutor:
                 result = "failed"
             
             # Update task status based on result
+            print(f"🔄 Task {task_id} returned result: '{result}'")
             if result == "continue":
                 dag_instance.update_task_status(task_id, "completed")
                 # Update context with task output - this is critical for data flow
@@ -243,11 +249,14 @@ class DAGExecutor:
                     dag_instance.context.update(output)
                     logger.debug(f"Task {task_id} added to context: {list(output.keys())}")
             elif result == "waiting":
+                print(f"⏳ Task {task_id} is waiting - setting status and saving context")
                 dag_instance.update_task_status(task_id, "waiting")
                 # CRITICAL: Save task output/context even when waiting (for state tracking)
                 output = task.get_output()
                 if output:
                     dag_instance.context.update(output)
+                    print(f"💾 Saved waiting task output: {list(output.keys())}")
+                print(f"📋 Completed tasks after waiting: {dag_instance.completed_tasks}")
                 # Schedule re-check after a delay for polling
                 # The instance will be re-queued in the main loop since it's PAUSED
                 break  # Stop processing for now, will resume via polling

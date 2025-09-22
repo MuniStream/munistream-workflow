@@ -250,7 +250,13 @@ class DAGInstance:
 
             # Check if all upstream dependencies are completed (not waiting!)
             upstream_tasks = list(self.dag.graph.predecessors(task_id))
-            if all(upstream in self.completed_tasks for upstream in upstream_tasks):
+            # All upstream tasks must be completed AND not currently waiting
+            all_upstream_done = all(
+                upstream in self.completed_tasks and
+                self.task_states.get(upstream, {}).get("status") != "waiting"
+                for upstream in upstream_tasks
+            )
+            if all_upstream_done:
                 executable.append(task_id)
         
         return executable
@@ -294,6 +300,9 @@ class DAGInstance:
         elif status == "waiting":
             # Keep waiting task as current task for persistence
             self.current_task = task_id
+            # CRITICAL: Remove from completed_tasks if it was there
+            if task_id in self.completed_tasks:
+                self.completed_tasks.remove(task_id)
 
         elif status == "failed":
             self.task_states[task_id]["completed_at"] = datetime.utcnow()
