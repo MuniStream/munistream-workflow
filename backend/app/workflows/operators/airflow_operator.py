@@ -66,7 +66,8 @@ class AirflowOperator(BaseOperator):
         # Always include the state if it exists
         data = {}
         if hasattr(self, '_airflow_state') and self._airflow_state:
-            data[self._state_key] = self._airflow_state
+            # IMPORTANT: Update the context with the current state
+            data[self._state_key] = self._airflow_state.copy()
         return TaskResult(
             status="waiting",
             data=data,
@@ -116,6 +117,10 @@ class AirflowOperator(BaseOperator):
         self._airflow_state = context.get(self._state_key, {})
 
         logger.debug(f"Airflow operator state for {self._state_key}: {self._airflow_state}")
+        logger.info(f"Context keys available: {list(context.keys())}")
+        logger.info(f"Looking for dag_conf at key: {self.task_id}_dag_conf")
+        if f"{self.task_id}_dag_conf" in context:
+            logger.info(f"Found dag_conf: {context[f'{self.task_id}_dag_conf']}")
 
         if not self._airflow_state:
             # First execution - trigger the DAG
@@ -188,8 +193,10 @@ class AirflowOperator(BaseOperator):
 
         # Rate limiting
         time_since_last_check = (datetime.utcnow() - last_check).total_seconds()
+        logger.info(f"Time since last check: {time_since_last_check}s, poll interval: {self.poll_interval_seconds}s")
         if time_since_last_check < self.poll_interval_seconds:
             wait_time = self.poll_interval_seconds - int(time_since_last_check)
+            logger.info(f"Rate limiting: waiting {wait_time}s more")
             return self._waiting_result(
                 f"Waiting {wait_time}s before next check",
                 dag_run_id=dag_run_id
@@ -224,9 +231,12 @@ class AirflowOperator(BaseOperator):
                     data = await response.json()
                     dag_state = data.get("state", "unknown")
 
-                    # Update state
+                    # Update state - this needs to be persisted!
                     self._airflow_state["last_check"] = datetime.utcnow().isoformat()
                     self._airflow_state["status"] = dag_state
+
+                    # Debug logging
+                    logger.info(f"DAG {self.dag_id} state: {dag_state}, last_check updated to {self._airflow_state['last_check']}")
 
                     # Handle different DAG states
                     if dag_state == "success":

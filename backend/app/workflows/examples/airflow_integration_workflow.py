@@ -20,14 +20,15 @@ def prepare_pdf_data(context):
     # For demo, use a public PDF URL
     pdf_url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
 
-    # Add to context for Airflow DAG
-    return TaskResult(
-        status="continue",
-        data={
-            "pdf_url": pdf_url,
-            "pdf_source": "W3C test PDF"
+    # Return a dict - PythonOperator will wrap it in TaskResult
+    # The AirflowOperator looks for {task_id}_dag_conf in the context
+    return {
+        "pdf_url": pdf_url,
+        "pdf_source": "W3C test PDF",
+        "trigger_airflow_dag_dag_conf": {  # This will be used by the AirflowOperator
+            "pdf_url": pdf_url
         }
-    )
+    }
 
 
 def process_airflow_results(context):
@@ -45,14 +46,11 @@ def process_airflow_results(context):
     print(f"   Run ID: {dag_run_id}")
     print(f"   Execution time: {execution_time} minutes")
 
-    # You could store results in database, send notifications, etc.
-    return TaskResult(
-        status="continue",
-        data={
-            "processing_complete": True,
-            "summary": f"Successfully processed via Airflow DAG {dag_id}"
-        }
-    )
+    # Return a dict - PythonOperator will wrap it in TaskResult
+    return {
+        "processing_complete": True,
+        "summary": f"Successfully processed via Airflow DAG {dag_id}"
+    }
 
 
 def create_airflow_integration_workflow():
