@@ -28,9 +28,8 @@ from ...models.workflow import (
 from ...core.database import get_database
 from ...workflows.dag import DAGInstance, InstanceStatus
 from ...services.workflow_service import workflow_service
-from ...services.auth_service import require_permission, get_current_user
+from ...auth.provider import require_permission, get_current_user
 from ...services.assignment_service import assignment_service
-from ...models.user import UserModel, Permission, UserRole
 from ...models.team import TeamModel
 
 router = APIRouter()
@@ -39,12 +38,12 @@ router = APIRouter()
 @router.post("/", response_model=InstanceResponse)
 async def create_workflow_instance(
     request: WorkflowExecuteRequest,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create and execute a new workflow instance using DAG architecture"""
     try:
         # Always use authenticated user's ID for security
-        user_id = str(current_user.id)
+        user_id = str(current_user.get("sub"))
         
         # Create DAG instance with authenticated user
         dag_instance = await workflow_service.create_instance(
@@ -77,7 +76,7 @@ async def create_workflow_instance(
 @router.get("/{instance_id}", response_model=InstanceResponse)
 async def get_instance(
     instance_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get DAG instance details"""
     dag_instance = await workflow_service.get_instance(instance_id)
@@ -86,7 +85,7 @@ async def get_instance(
         raise HTTPException(status_code=404, detail="Instance not found")
     
     # Check permissions - user can only see their own instances unless admin
-    if dag_instance.user_id != str(current_user.id) and current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    if dag_instance.user_id != str(current_user.get("sub")) and "admin" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Access denied")
     
     return InstanceResponse(
@@ -105,7 +104,7 @@ async def get_instance(
 
 @router.get("/my-assignments", response_model=InstanceListResponse)
 async def get_my_assigned_instances(
-    current_user: UserModel = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     assignment_status: Optional[str] = Query(None, description="Filter by assignment status"),
@@ -118,7 +117,7 @@ async def get_my_assigned_instances(
     query = {}
     
     # Admin and managers can see all assignments or filter by specific team
-    if current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" in current_user.get("roles", []):
         if team_id:
             # Filter by specific team if requested
             query["assigned_team_id"] = team_id
@@ -130,10 +129,10 @@ async def get_my_assigned_instances(
             ]
     else:
         # Reviewers and other roles see only their assignments and team assignments
-        user_teams = [str(team_id) for team_id in current_user.team_ids] if current_user.team_ids else []
+        user_teams = [str(team_id) for team_id in current_user.get("team_ids", [])] if current_user.get("team_ids", []) else []
         
         or_conditions = [
-            {"assigned_user_id": str(current_user.id)}
+            {"assigned_user_id": str(current_user.get("sub"))}
         ]
         
         # Add team assignments if user belongs to teams
@@ -168,12 +167,12 @@ async def get_my_assigned_instances(
 
 @router.get("/assignment-statistics")
 async def get_assignment_statistics_early(
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get statistics about automatic vs manual assignments"""
     
     # Require admin or manager permission
-    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" not in current_user.get("roles", []):
         raise HTTPException(
             status_code=403, 
             detail="Only administrators and managers can view assignment statistics"
@@ -188,12 +187,12 @@ async def get_unassigned_instances_early(
     workflow_id: Optional[str] = Query(None, description="Filter by workflow ID"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get list of unassigned instances that can be auto-assigned"""
     
     # Require admin or manager permission
-    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" not in current_user.get("roles", []):
         raise HTTPException(
             status_code=403, 
             detail="Only administrators and managers can view unassigned instances"
@@ -232,12 +231,12 @@ async def get_unassigned_instances_early(
 async def bulk_auto_assign_instances_early(
     workflow_id: Optional[str] = None,
     limit: int = Query(10, ge=1, le=100, description="Maximum number of instances to assign"),
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Automatically assign multiple unassigned instances"""
     
     # Require admin or manager permission
-    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" not in current_user.get("roles", []):
         raise HTTPException(
             status_code=403, 
             detail="Only administrators and managers can trigger bulk auto-assignment"
@@ -351,7 +350,7 @@ def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse
 @router.post("/{instance_id}/cancel")
 async def cancel_instance(
     instance_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Cancel a running instance"""
     # Cancel through workflow service
@@ -395,7 +394,7 @@ async def auto_assign_new_instance(instance_id: str, workflow_def: WorkflowDefin
 
 @router.get("/", response_model=InstanceListResponse)
 async def list_instances(
-    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES)),
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     workflow_id: Optional[str] = None,
@@ -437,7 +436,7 @@ async def list_instances(
 
 @router.get("/active", response_model=ActiveInstancesResponse)
 async def get_active_instances(
-    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES)),
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
     status: Optional[str] = Query(None, description="Filter by status"),
     user_id: Optional[str] = Query(None, description="Filter by user/citizen ID"),
     workflow_id: Optional[str] = Query(None, description="Filter by workflow ID"),
@@ -497,7 +496,7 @@ async def get_active_instances(
 @router.get("/{instance_id}/logs")
 async def get_instance_logs(
     instance_id: str,
-    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES)),
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
     level: Optional[str] = None,
     limit: int = Query(100, ge=1, le=500),
     group_by_step: bool = Query(False, description="Group logs by workflow step")
@@ -628,7 +627,7 @@ async def get_bottleneck_analysis():
 
 @router.get("/citizen-validations", response_model=List[Dict[str, Any]])
 async def get_citizen_validations(
-    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES)),
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES")),
     status: Optional[str] = Query(None, description="Filter by status: awaiting_input, pending_validation"),
     limit: int = Query(100, description="Maximum number of results")
 ):
@@ -862,7 +861,7 @@ async def approve_step_dag(
 ):
     """Submit approval decision for ApprovalOperator - integrates with DAG system"""
     # Set approver_id from authenticated user
-    approval.approver_id = str(current_user.id)
+    approval.approver_id = str(current_user.get("sub"))
     
     instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == approval.instance_id)
     if not instance:
@@ -1055,7 +1054,7 @@ async def validate_citizen_data(
     instance_id: str,
     validation_request: Dict[str, Any],
     background_tasks: BackgroundTasks,
-    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
 ):
     """Validate or reject citizen submitted data"""
     from ...models.user import UserModel
@@ -1127,7 +1126,7 @@ async def validate_citizen_data(
     instance.context.update({
         step_validation_key: decision,
         step_comments_key: comments,
-        step_validator_key: str(current_user.id),
+        step_validator_key: str(current_user.get("sub")),
         step_timestamp_key: datetime.utcnow().isoformat()
     })
     
@@ -1224,7 +1223,7 @@ async def validate_citizen_data(
         workflow_id=instance.workflow_id,
         status="completed" if decision == "approve" else "failed",
         inputs={"admin_decision": decision, "comments": comments},
-        outputs={"validation_result": decision, "validator": str(current_user.id)},
+        outputs={"validation_result": decision, "validator": str(current_user.get("sub"))},
         started_at=datetime.utcnow(),
         completed_at=datetime.utcnow(),
         duration_seconds=0
@@ -1241,7 +1240,7 @@ async def validate_citizen_data(
         "instance_id": instance_id,
         "decision": decision,
         "next_status": instance.status,
-        "validated_by": str(current_user.id),
+        "validated_by": str(current_user.get("sub")),
         "validation_timestamp": datetime.utcnow().isoformat()
     }
 
@@ -1249,7 +1248,7 @@ async def validate_citizen_data(
 @router.get("/{instance_id}/citizen-data")
 async def get_citizen_data(
     instance_id: str,
-    current_user: UserModel = Depends(require_permission(Permission.VIEW_INSTANCES))
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES"))
 ):
     """Get detailed citizen data for an instance"""
     from ...models.user import UserModel
@@ -1333,7 +1332,7 @@ async def get_citizen_data(
 async def assign_instance_to_user(
     instance_id: str,
     request: Dict[str, Any],
-    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
 ):
     """Assign instance to a specific user"""
     
@@ -1350,7 +1349,7 @@ async def assign_instance_to_user(
         raise HTTPException(status_code=400, detail="user_id is required")
     
     # Verify target user exists
-    target_user = await UserModel.get(user_id)
+    target_user = None
     if not target_user:
         raise HTTPException(status_code=404, detail="Target user not found")
     
@@ -1364,7 +1363,7 @@ async def assign_instance_to_user(
     # Assign instance
     instance.assign_to_user(
         user_id=user_id,
-        assigned_by=str(current_user.id),
+        assigned_by=str(current_user.get("sub")),
         assignment_type=AssignmentType.MANUAL,
         notes=notes
     )
@@ -1373,14 +1372,14 @@ async def assign_instance_to_user(
     
     return {
         "success": True,
-        "message": f"Instance assigned to user {target_user.full_name}",
+        "message": f"Instance assigned to user {user_id}",
         "instance_id": instance_id,
         "assigned_to": {
             "user_id": user_id,
-            "name": target_user.full_name,
-            "email": target_user.email
+            "name": user_id,
+            "email": ""
         },
-        "assigned_by": current_user.full_name,
+        "assigned_by": current_user.get("name", current_user.get("username", "Unknown")),
         "assigned_at": instance.assigned_at.isoformat()
     }
 
@@ -1389,7 +1388,7 @@ async def assign_instance_to_user(
 async def assign_instance_to_team(
     instance_id: str,
     request: Dict[str, Any],
-    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
 ):
     """Assign instance to a team"""
     
@@ -1420,7 +1419,7 @@ async def assign_instance_to_team(
     # Assign instance
     instance.assign_to_team(
         team_id=team_id,
-        assigned_by=str(current_user.id),
+        assigned_by=str(current_user.get("sub")),
         assignment_type=AssignmentType.MANUAL,
         notes=notes
     )
@@ -1436,7 +1435,7 @@ async def assign_instance_to_team(
             "name": target_team.name,
             "members": len(target_team.members)
         },
-        "assigned_by": current_user.full_name,
+        "assigned_by": current_user.get("name", current_user.get("username", "Unknown")),
         "assigned_at": instance.assigned_at.isoformat()
     }
 
@@ -1444,7 +1443,7 @@ async def assign_instance_to_team(
 @router.post("/{instance_id}/start-review")
 async def start_review_on_instance(
     instance_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Start reviewing an assigned instance"""
     
@@ -1453,16 +1452,16 @@ async def start_review_on_instance(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    user_id = str(current_user.id)
+    user_id = str(current_user.get("sub"))
     
     # Check if user can review this instance (directly assigned, team member, or admin/manager)
     can_review = False
     
     if instance.assigned_user_id == user_id:
         can_review = True
-    elif instance.assigned_team_id and current_user.team_ids and instance.assigned_team_id in [str(t) for t in current_user.team_ids]:
+    elif instance.assigned_team_id and current_user.get("team_ids", []) and instance.assigned_team_id in [str(t) for t in current_user.get("team_ids", [])]:
         can_review = True
-    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    elif "admin" in current_user.get("roles", []):
         can_review = True
     
     if not can_review:
@@ -1485,7 +1484,7 @@ async def start_review_on_instance(
         "message": "Review started on instance",
         "instance_id": instance_id,
         "assignment_status": instance.assignment_status.value,
-        "reviewer": current_user.full_name,
+        "reviewer": current_user.get("name", current_user.get("username", "Unknown")),
         "updated_at": instance.updated_at.isoformat()
     }
 
@@ -1494,7 +1493,7 @@ async def start_review_on_instance(
 async def approve_instance_by_reviewer(
     instance_id: str,
     request: Optional[Dict[str, Any]] = None,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Reviewer approves instance - sends to approver for final signature"""
     
@@ -1503,14 +1502,14 @@ async def approve_instance_by_reviewer(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    user_id = str(current_user.id)
+    user_id = str(current_user.get("sub"))
     
     # Check if user can approve (must be the reviewer or admin/manager)
     can_approve = False
     
     if instance.reviewed_by == user_id:
         can_approve = True
-    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    elif "admin" in current_user.get("roles", []):
         can_approve = True
     
     if not can_approve:
@@ -1562,7 +1561,7 @@ async def approve_instance_by_reviewer(
         "message": "Instance approved by reviewer - forwarded for final approval",
         "instance_id": instance_id,
         "assignment_status": instance.assignment_status.value,
-        "approved_by": current_user.full_name,
+        "approved_by": current_user.get("name", current_user.get("username", "Unknown")),
         "comments": comments,
         "updated_at": instance.updated_at.isoformat()
     }
@@ -1572,7 +1571,7 @@ async def approve_instance_by_reviewer(
 async def reject_instance_by_reviewer(
     instance_id: str,
     request: Dict[str, Any],
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Reviewer rejects instance with reason"""
     
@@ -1581,14 +1580,14 @@ async def reject_instance_by_reviewer(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    user_id = str(current_user.id)
+    user_id = str(current_user.get("sub"))
     
     # Check if user can reject (must be the reviewer or admin/manager)
     can_reject = False
     
     if instance.reviewed_by == user_id:
         can_reject = True
-    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    elif "admin" in current_user.get("roles", []):
         can_reject = True
     
     if not can_reject:
@@ -1618,7 +1617,7 @@ async def reject_instance_by_reviewer(
         "message": "Instance rejected by reviewer",
         "instance_id": instance_id,
         "assignment_status": instance.assignment_status.value,
-        "rejected_by": current_user.full_name,
+        "rejected_by": current_user.get("name", current_user.get("username", "Unknown")),
         "reason": reason,
         "comments": comments,
         "updated_at": instance.updated_at.isoformat()
@@ -1629,7 +1628,7 @@ async def reject_instance_by_reviewer(
 async def request_modifications_by_reviewer(
     instance_id: str,
     request: Dict[str, Any],
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Reviewer requests modifications from citizen"""
     
@@ -1638,14 +1637,14 @@ async def request_modifications_by_reviewer(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    user_id = str(current_user.id)
+    user_id = str(current_user.get("sub"))
     
     # Check if user can request modifications (must be the reviewer or admin/manager)
     can_request = False
     
     if instance.reviewed_by == user_id:
         can_request = True
-    elif current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    elif "admin" in current_user.get("roles", []):
         can_request = True
     
     if not can_request:
@@ -1675,7 +1674,7 @@ async def request_modifications_by_reviewer(
         "message": "Modifications requested from citizen",
         "instance_id": instance_id,
         "assignment_status": instance.assignment_status.value,
-        "requested_by": current_user.full_name,
+        "requested_by": current_user.get("name", current_user.get("username", "Unknown")),
         "modifications": modifications,
         "comments": comments,
         "updated_at": instance.updated_at.isoformat()
@@ -1686,7 +1685,7 @@ async def request_modifications_by_reviewer(
 async def give_final_approval(
     instance_id: str,
     request: Optional[Dict[str, Any]] = None,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Final approval and signature by manager/approver"""
     
@@ -1696,7 +1695,7 @@ async def give_final_approval(
         raise HTTPException(status_code=404, detail="Instance not found")
     
     # Check if user can give final approval (managers and approvers)
-    can_approve = current_user.role in [UserRole.ADMIN, UserRole.MANAGER, UserRole.APPROVER]
+    can_approve = "admin" in current_user.get("roles", [])
     
     if not can_approve:
         raise HTTPException(
@@ -1704,7 +1703,7 @@ async def give_final_approval(
             detail="You are not authorized to give final approval"
         )
     
-    user_id = str(current_user.id)
+    user_id = str(current_user.get("sub"))
     
     # Get approval comments
     comments = None
@@ -1725,7 +1724,7 @@ async def give_final_approval(
         "message": "Instance approved and signed - process completed",
         "instance_id": instance_id,
         "assignment_status": instance.assignment_status.value,
-        "approved_by": current_user.full_name,
+        "approved_by": current_user.get("name", current_user.get("username", "Unknown")),
         "comments": comments,
         "updated_at": instance.updated_at.isoformat()
     }
@@ -1735,7 +1734,7 @@ async def give_final_approval(
 async def unassign_instance(
     instance_id: str,
     request: Optional[Dict[str, Any]] = None,
-    current_user: UserModel = Depends(require_permission(Permission.MANAGE_INSTANCES))
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
 ):
     """Remove assignment from instance"""
     
@@ -1750,14 +1749,14 @@ async def unassign_instance(
         reason = request.get("reason", reason)
     
     # Unassign
-    instance.unassign(reason=reason, unassigned_by=str(current_user.id))
+    instance.unassign(reason=reason, unassigned_by=str(current_user.get("sub")))
     await instance.save()
     
     return {
         "success": True,
         "message": "Instance unassigned successfully",
         "instance_id": instance_id,
-        "unassigned_by": current_user.full_name,
+        "unassigned_by": current_user.get("name", current_user.get("username", "Unknown")),
         "reason": reason,
         "updated_at": instance.updated_at.isoformat()
     }
@@ -1766,12 +1765,12 @@ async def unassign_instance(
 @router.post("/{instance_id}/auto-assign")
 async def auto_assign_instance(
     instance_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Automatically assign an instance to the best available team/user"""
     
     # Require admin or manager permission
-    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" not in current_user.get("roles", []):
         raise HTTPException(
             status_code=403, 
             detail="Only administrators and managers can trigger auto-assignment"
@@ -1813,7 +1812,7 @@ async def auto_assign_instance(
                 "assignment_type": updated_instance.assignment_type,
                 "assigned_at": updated_instance.assigned_at.isoformat() if updated_instance.assigned_at else None
             },
-            "triggered_by": current_user.full_name
+            "triggered_by": current_user.get("name", current_user.get("username", "Unknown"))
         }
     else:
         raise HTTPException(
@@ -1826,7 +1825,7 @@ async def auto_assign_instance(
 async def validate_instance_data(
     instance_id: str,
     request: dict,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Validate individual fields of submitted citizen data"""
     
@@ -1839,11 +1838,11 @@ async def validate_instance_data(
     # Must be assigned to the user or user's team, or user must be admin/manager
     can_validate = False
     
-    if current_user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" in current_user.get("roles", []):
         can_validate = True
-    elif instance.assigned_user_id == str(current_user.id):
+    elif instance.assigned_user_id == str(current_user.get("sub")):
         can_validate = True
-    elif instance.assigned_team_id and current_user.team_ids and instance.assigned_team_id in [str(tid) for tid in current_user.team_ids]:
+    elif instance.assigned_team_id and current_user.get("team_ids", []) and instance.assigned_team_id in [str(tid) for tid in current_user.get("team_ids", [])]:
         can_validate = True
     
     if not can_validate:
@@ -1863,7 +1862,7 @@ async def validate_instance_data(
         
         instance.context["field_validations"] = field_validations
         instance.context["validation_summary"] = validation_summary
-        instance.context["validated_by"] = str(current_user.id)
+        instance.context["validated_by"] = str(current_user.get("sub"))
         instance.context["validated_at"] = datetime.utcnow().isoformat()
         
         # Update assignment status based on validation result
@@ -1882,7 +1881,7 @@ async def validate_instance_data(
             "message": f"Data validation completed: {overall_status}",
             "instance_id": instance_id,
             "validation_summary": validation_summary,
-            "validated_by": current_user.full_name,
+            "validated_by": current_user.get("name", current_user.get("username", "Unknown")),
             "assignment_status": instance.assignment_status
         }
         

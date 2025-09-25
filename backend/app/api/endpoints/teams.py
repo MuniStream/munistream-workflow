@@ -7,7 +7,6 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from datetime import datetime
 
 from ...models.team import TeamModel
-from ...models.user import UserModel
 from ...schemas.team import (
     TeamCreate,
     TeamUpdate,
@@ -21,7 +20,7 @@ from ...schemas.team import (
     TaskAssignmentRequest,
     TaskAssignmentResponse
 )
-from ...services.auth_service import get_current_user, require_admin, require_manager_or_admin
+from ...auth.provider import get_current_user, require_admin, require_manager_or_admin
 
 router = APIRouter()
 
@@ -58,7 +57,7 @@ async def convert_team_to_response(team: TeamModel) -> TeamResponse:
 @router.post("/", response_model=TeamResponse)
 async def create_team(
     team_data: TeamCreate,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Create a new team"""
     # Check if team_id already exists
@@ -88,7 +87,7 @@ async def list_teams(
     page_size: int = Query(20, ge=1, le=100),
     department: Optional[str] = None,
     is_active: bool = True,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """List teams with pagination"""
     query = {"is_active": is_active}
@@ -118,7 +117,7 @@ async def list_teams(
 @router.get("/{team_id}", response_model=TeamResponse)
 async def get_team(
     team_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get a specific team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -132,7 +131,7 @@ async def get_team(
 async def update_team(
     team_id: str,
     update_data: TeamUpdate,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Update a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -164,7 +163,7 @@ async def update_team(
 @router.delete("/{team_id}")
 async def delete_team(
     team_id: str,
-    current_user: UserModel = Depends(require_admin())
+    current_user: dict = Depends(require_admin)
 ):
     """Delete a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -181,7 +180,7 @@ async def delete_team(
 async def add_team_member(
     team_id: str,
     member_data: TeamMemberCreate,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Add a member to a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -189,7 +188,7 @@ async def add_team_member(
         raise HTTPException(status_code=404, detail="Team not found")
     
     # Check if user exists
-    user = await UserModel.get(member_data.user_id)
+    user = None
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -206,7 +205,7 @@ async def update_team_member(
     team_id: str,
     user_id: str,
     update_data: TeamMemberUpdate,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Update a team member"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -242,7 +241,7 @@ async def update_team_member(
 async def remove_team_member(
     team_id: str,
     user_id: str,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Remove a member from a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -262,7 +261,7 @@ async def remove_team_member(
 async def assign_workflow_to_team(
     team_id: str,
     workflow_id: str,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Assign a workflow to a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -280,7 +279,7 @@ async def assign_workflow_to_team(
 async def unassign_workflow_from_team(
     team_id: str,
     workflow_id: str,
-    current_user: UserModel = Depends(require_manager_or_admin())
+    current_user: dict = Depends(require_manager_or_admin)
 ):
     """Unassign a workflow from a team"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -299,7 +298,7 @@ async def unassign_workflow_from_team(
 @router.get("/{team_id}/stats", response_model=TeamStats)
 async def get_team_stats(
     team_id: str,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Get team statistics and performance metrics"""
     team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -326,7 +325,7 @@ async def get_team_stats(
 @router.post("/assign-task", response_model=TaskAssignmentResponse)
 async def assign_task_to_team(
     request: TaskAssignmentRequest,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Intelligently assign a task to the best available team"""
     

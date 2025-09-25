@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "your-secret-key-here-change-in-production"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # Keycloak
+    KEYCLOAK_URL: str = "http://localhost:8180"
+    KEYCLOAK_REALM: str = "munistream"
+    KEYCLOAK_CLIENT_ID: str = "munistream-backend"
+    KEYCLOAK_CLIENT_SECRET: Optional[str] = None
     
     # Azure
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = None

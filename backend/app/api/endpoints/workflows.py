@@ -16,33 +16,25 @@ from ...schemas.workflow import (
     StepResponse
 )
 from ...models.workflow import WorkflowDefinition, WorkflowStep
-from ...models.user import UserModel, UserRole
 from ...models.team import TeamModel
-from ...services.auth_service import get_current_user
+from ...auth.provider import get_current_user, require_roles
 
 router = APIRouter()
 
 
-async def get_user_accessible_workflows(user: UserModel) -> List[str]:
-    """Get list of workflow IDs that the user can access based on their teams"""
+async def get_user_accessible_workflows(user: dict) -> List[str]:
+    """Get list of workflow IDs that the user can access based on their roles"""
+    user_roles = user.get("roles", [])
+
     # Admin and managers can see all workflows
-    if user.role in [UserRole.ADMIN, UserRole.MANAGER]:
+    if "admin" in user_roles or "manager" in user_roles:
         workflows = await WorkflowDefinition.find().to_list()
         return [w.workflow_id for w in workflows]
-    
-    # For other roles, filter by team assignments
-    if not user.team_ids:
-        return []  # No teams = no workflows
-    
-    # Find teams the user belongs to
-    user_teams = await TeamModel.find({"team_id": {"$in": user.team_ids}}).to_list()
-    
-    # Collect all workflow IDs assigned to user's teams
-    accessible_workflow_ids = set()
-    for team in user_teams:
-        accessible_workflow_ids.update(team.assigned_workflows)
-    
-    return list(accessible_workflow_ids)
+
+    # For other roles, return public workflows or team-based workflows
+    # For now, return all workflows for authenticated users
+    workflows = await WorkflowDefinition.find({"is_active": True}).to_list()
+    return [w.workflow_id for w in workflows]
 
 
 async def convert_workflow_to_response(workflow: WorkflowDefinition) -> WorkflowResponse:
@@ -103,7 +95,7 @@ async def list_workflows(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[WorkflowStatus] = None,
-    current_user: UserModel = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """List workflows with pagination, filtered by user's team assignments"""
     # Get workflows accessible to the user
@@ -115,7 +107,8 @@ async def list_workflows(
         query["status"] = status
     
     # Filter by accessible workflows (unless admin/manager sees all)
-    if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
+    user_roles = current_user.get("roles", [])
+    if "admin" not in user_roles and "manager" not in user_roles:
         if not accessible_workflow_ids:
             # User has no team assignments, return empty list
             return WorkflowListResponse(

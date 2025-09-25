@@ -51,10 +51,16 @@ services:
       # Database
       MONGODB_URL: mongodb://admin:munistream123@mongodb:27017/munistream?authSource=admin
       MONGODB_DB_NAME: munistream
-      
+
       # Security
       SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
-      
+
+      # Keycloak
+      KEYCLOAK_URL: ${KEYCLOAK_URL:-http://host.docker.internal:8180}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-munistream}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-munistream-backend}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-changeme-backend-secret-in-production}
+
       # Optional services
       REDIS_URL: redis://redis:6379
     ports:
@@ -62,7 +68,7 @@ services:
     volumes:
       - ./app:/app/app:ro  # Mount source code for development
       - ./plugins.yaml:/app/plugins.yaml:ro  # Mount plugins configuration
-      - /Users/paw/Projects/Puente/puente-workflows:/Users/paw/Projects/Puente/puente-workflows:ro  # Mount PUENTE workflows
+      - ../../puente-workflows:/app/plugins/puente-workflows:ro  # Mount PUENTE workflows
       - upload_data:/app/uploads
     networks:
       - munistream-network

@@ -8,8 +8,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Body
 from pydantic import BaseModel, Field
 
 from ...models.document import DocumentModel, DocumentStatus, VerificationMethod
-from ...models.user import UserModel, Permission
-from ...services.auth_service import get_current_user, require_permission
+from ...auth.provider import get_current_user, require_permission
 
 router = APIRouter()
 
@@ -69,12 +68,12 @@ class AdminStatsResponse(BaseModel):
     total_pending: int
 
 # Admin dependency
-async def get_current_admin(current_user: UserModel = Depends(require_permission(Permission.VIEW_DOCUMENTS))):
+async def get_current_admin(current_user: dict = Depends(require_permission("VIEW_DOCUMENTS"))):
     return current_user
 
 @router.get("/pending-approvals", response_model=List[PendingApprovalResponse])
 async def get_pending_approvals(
-    admin: UserModel = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
     assigned_to: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
@@ -117,7 +116,7 @@ async def get_pending_approvals(
 
 @router.get("/documents", response_model=List[PendingDocumentResponse])
 async def get_all_documents(
-    admin: UserModel = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
     status: Optional[str] = Query(None),
     document_type: Optional[str] = Query(None),
     citizen_name: Optional[str] = Query(None),
@@ -179,7 +178,7 @@ async def get_all_documents(
 
 @router.get("/pending-documents", response_model=List[PendingDocumentResponse])
 async def get_pending_documents(
-    admin: UserModel = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
     document_type: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
@@ -228,7 +227,7 @@ async def get_pending_documents(
 
 @router.get("/pending-signatures", response_model=List[PendingSignatureResponse])
 async def get_pending_signatures(
-    admin: UserModel = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
     assigned_to: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0)
@@ -272,7 +271,7 @@ async def get_pending_signatures(
 
 @router.get("/manual-reviews", response_model=List[ManualReviewResponse])
 async def get_manual_reviews(
-    admin: UserModel = Depends(get_current_admin),
+    admin: dict = Depends(get_current_admin),
     review_type: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
@@ -335,7 +334,7 @@ async def process_approval(
     instance_id: str,
     decision: str = Body(...),
     comments: str = Body(...),
-    admin: UserModel = Depends(get_current_admin)
+    admin: dict = Depends(get_current_admin)
 ):
     """Process a workflow approval decision."""
     try:
@@ -352,7 +351,7 @@ async def process_document_verification(
     document_id: str,
     decision: str = Body(...),
     comments: str = Body(...),
-    admin: UserModel = Depends(get_current_admin)
+    admin: dict = Depends(get_current_admin)
 ):
     """Process document verification decision."""
     try:
@@ -392,7 +391,7 @@ async def resolve_manual_review(
     resolution: str = Body(...),
     resolution_notes: str = Body(...),
     priority: str = Body("normal"),
-    admin: UserModel = Depends(get_current_admin)
+    admin: dict = Depends(get_current_admin)
 ):
     """Resolve a manual review item."""
     try:
@@ -441,7 +440,7 @@ async def sign_document(
     signature_method: str = Body(...),
     signature_data: str = Body(...),
     comments: str = Body(None),
-    admin: UserModel = Depends(get_current_admin)
+    admin: dict = Depends(get_current_admin)
 ):
     """Add administrative signature to a document."""
     try:

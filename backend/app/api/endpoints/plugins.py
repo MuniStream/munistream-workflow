@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, HttpUrl
 
 from ...workflows.plugin_loader import WorkflowPluginManager
-from ...services.auth_service import get_current_user, require_admin
+from ...auth.provider import get_current_user, require_admin
 
 router = APIRouter()
 

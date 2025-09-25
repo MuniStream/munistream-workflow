@@ -1,11 +1,11 @@
 from fastapi import APIRouter
 
-from .endpoints import workflows, instances, documents, admin, auth, public, plugins, categories, teams
+from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams
 from .v1 import performance, entities
 
 api_router = APIRouter()
 
-api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
+api_router.include_router(auth_keycloak.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(public.router, prefix="/public", tags=["public"])
 api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])
 api_router.include_router(instances.router, prefix="/instances", tags=["instances"])
