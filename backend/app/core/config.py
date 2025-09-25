@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     KEYCLOAK_REALM: str = "munistream"
     KEYCLOAK_CLIENT_ID: str = "munistream-backend"
     KEYCLOAK_CLIENT_SECRET: Optional[str] = None
+    # Accept tokens from multiple issuers (for dev environments with Docker)
+    KEYCLOAK_VALID_ISSUERS: List[str] = [
+        "http://localhost:8180/realms/munistream",
+        "http://host.docker.internal:8180/realms/munistream"
+    ]
     
     # Azure
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = None

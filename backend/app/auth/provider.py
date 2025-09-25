@@ -9,6 +9,7 @@ from jose import jwt, JWTError
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +102,35 @@ class KeycloakProvider:
                 audience = [audience]
 
             # Verify with proper audience
-            if "account" in audience or self.client_id in audience:
-                payload = jwt.decode(
-                    token,
-                    rsa_key,
-                    algorithms=["RS256"],
-                    audience=audience[0] if audience else self.client_id,
-                    issuer=self.realm_url
-                )
+            # Accept tokens from both munistream-backend and munistream-admin clients
+            valid_audiences = ["account", self.client_id, "munistream-admin"]
+            if any(aud in audience for aud in valid_audiences):
+                # Try to decode with configured valid issuers
+                valid_issuers = settings.KEYCLOAK_VALID_ISSUERS or [self.realm_url]
+
+                payload = None
+                last_error = None
+
+                for issuer in valid_issuers:
+                    try:
+                        payload = jwt.decode(
+                            token,
+                            rsa_key,
+                            algorithms=["RS256"],
+                            audience=audience[0] if audience else self.client_id,
+                            issuer=issuer
+                        )
+                        logger.debug(f"Token validated with issuer: {issuer}")
+                        break
+                    except JWTError as e:
+                        last_error = e
+                        continue
+
+                if not payload:
+                    token_issuer = unverified_payload.get("iss", "unknown")
+                    raise JWTError(f"Token issuer '{token_issuer}' not in valid issuers: {valid_issuers}. Error: {last_error}")
             else:
-                raise JWTError(f"Invalid audience: {audience}")
+                raise JWTError(f"Invalid audience: {audience}. Expected one of: {valid_audiences}")
 
             return payload
 
