@@ -2,7 +2,7 @@
 Public API endpoints for workflows.
 Simplified and focused on clarity.
 """
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query, Depends
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query, Depends, Header
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
@@ -108,13 +108,13 @@ async def submit_data(
 
 @router.get("/track/{instance_id}")
 async def track_instance(
-    instance_id: str, 
-    current_customer: Customer = Depends(get_current_customer)
+    instance_id: str,
+    authorization: Optional[str] = Header(None)
 ):
     """
     Track workflow instance status.
     Returns current state and any required actions.
-    Requires authentication.
+    Public endpoint - anyone with the instance ID can track.
     """
     # Get database instance
     db_instance = await WorkflowInstance.find_one(
@@ -122,10 +122,6 @@ async def track_instance(
     )
     if not db_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
-    
-    # Verify the instance belongs to the current customer
-    if db_instance.user_id != str(current_customer.id):
-        raise HTTPException(status_code=403, detail="Not authorized to access this instance")
     
     # Get DAG instance for detailed state
     dag_instance = await workflow_service.get_instance(instance_id)

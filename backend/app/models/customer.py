@@ -30,6 +30,7 @@ class Customer(Document):
     full_name: str
     phone: Optional[str] = None
     document_number: Optional[str] = None
+    keycloak_id: Optional[str] = None  # Keycloak user ID for SSO users
     
     # Account Status
     status: CustomerStatus = CustomerStatus.ACTIVE

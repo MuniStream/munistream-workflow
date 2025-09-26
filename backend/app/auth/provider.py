@@ -102,8 +102,8 @@ class KeycloakProvider:
                 audience = [audience]
 
             # Verify with proper audience
-            # Accept tokens from both munistream-backend and munistream-admin clients
-            valid_audiences = ["account", self.client_id, "munistream-admin"]
+            # Accept tokens from munistream-backend, munistream-admin, and munistream-citizen clients
+            valid_audiences = ["account", self.client_id, "munistream-admin", "munistream-citizen"]
             if any(aud in audience for aud in valid_audiences):
                 # Try to decode with configured valid issuers
                 valid_issuers = settings.KEYCLOAK_VALID_ISSUERS or [self.realm_url]

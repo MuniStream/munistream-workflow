@@ -9,9 +9,12 @@ from fastapi import APIRouter, HTTPException, status, Header, Depends
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
+import logging
 
 from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -71,7 +74,7 @@ def create_customer_access_token(data: dict, expires_delta: Optional[timedelta] 
 
 async def get_current_customer(authorization: Optional[str] = Header(None)) -> Customer:
     """
-    Get current authenticated customer from JWT token.
+    Get current authenticated customer from Keycloak token.
     Uses manual header extraction to avoid conflicts with admin OAuth2.
     """
     if not authorization:
@@ -80,7 +83,7 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
             detail="Authorization header missing",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Extract token from "Bearer <token>" format
     try:
         scheme, token = authorization.split()
@@ -96,39 +99,52 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
             detail="Invalid authorization header format",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
+    # Use Keycloak to validate the token
+    from ...auth.provider import keycloak
     try:
-        payload = jwt.decode(token, CUSTOMER_SECRET_KEY, algorithms=[ALGORITHM])
-        
-        # Verify this is a customer token
-        if payload.get("type") != "customer":
-            raise credentials_exception
-        
+        payload = await keycloak.verify_token(token)
+
+        # Get user ID from Keycloak token
         customer_id: str = payload.get("sub")
         if customer_id is None:
             raise credentials_exception
-            
-    except JWTError:
+
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
         raise credentials_exception
-    
-    # Get customer from database
-    customer = await Customer.get(customer_id)
+
+    # Get or create customer from Keycloak user info
+    # Use email as the unique identifier to find existing customers
+    email = payload.get("email", "")
+    if not email:
+        raise credentials_exception
+
+    customer = await Customer.find_one(Customer.email == email)
     if customer is None:
-        raise credentials_exception
-    
-    # Check if customer is active
-    if customer.status != CustomerStatus.ACTIVE:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Customer account is not active"
+        # Create customer from Keycloak token if doesn't exist
+        username = payload.get("preferred_username", email)
+        name = payload.get("name", username)
+
+        customer = Customer(
+            # Don't set id - let MongoDB generate it
+            email=email,
+            full_name=name,
+            phone=payload.get("phone", ""),
+            document_number="",
+            password_hash="",  # No password needed with Keycloak
+            status=CustomerStatus.ACTIVE,
+            email_verified=payload.get("email_verified", False),
+            keycloak_id=customer_id  # Store Keycloak ID separately
         )
-    
+        await customer.save()
+
     return customer
 
 
