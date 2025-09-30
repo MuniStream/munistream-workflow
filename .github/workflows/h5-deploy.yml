@@ -1,0 +1,262 @@
+name: H5 Workflow API Multi-tenant Deployment
+
+on:
+  push:
+    branches: [ develop ]
+    paths:
+      - 'backend/**'
+      - 'docker-compose.h5.yml'
+      - 'deploy-h5.sh'
+      - '.env.h5'
+      - 'requirements.txt'
+  workflow_dispatch:
+    inputs:
+      target_client:
+        description: 'Target client to deploy (all, core, conapesca, tesoreriacdmx)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - core
+        - conapesca
+        - tesoreriacdmx
+      force_rebuild:
+        description: 'Force rebuild all containers'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      core-changed: ${{ steps.changes.outputs.core }}
+      conapesca-changed: ${{ steps.changes.outputs.conapesca }}
+      teso-changed: ${{ steps.changes.outputs.teso }}
+      backend-changed: ${{ steps.changes.outputs.backend }}
+      global-changed: ${{ steps.changes.outputs.global }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            global:
+              - 'docker-compose.h5.yml'
+              - 'deploy-h5.sh'
+              - '.env.h5'
+            backend:
+              - 'backend/**'
+              - 'requirements.txt'
+            core:
+              - 'backend/app/core/**'
+              - 'backend/migrations/core/**'
+            conapesca:
+              - 'backend/app/conapesca/**'
+              - 'backend/migrations/conapesca/**'
+            teso:
+              - 'backend/app/tesoreriacdmx/**'
+              - 'backend/migrations/tesoreriacdmx/**'
+
+  deploy-workflow-api:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.backend-changed == 'true' || needs.detect-changes.outputs.global-changed == 'true' || needs.detect-changes.outputs.core-changed == 'true' || needs.detect-changes.outputs.conapesca-changed == 'true' || needs.detect-changes.outputs.teso-changed == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get Workflow EC2 instance IP
+        id: get-instance
+        run: |
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=munistream-dev-workflow-ec2" \
+                     "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+          echo "instance-ip=$INSTANCE_IP" >> $GITHUB_OUTPUT
+          echo "Workflow EC2 IP: $INSTANCE_IP"
+
+      - name: Get Aurora endpoint from SSM
+        id: get-aurora
+        run: |
+          AURORA_ENDPOINT=$(aws ssm get-parameter \
+            --name "/munistream/dev/aurora/endpoint" \
+            --query 'Parameter.Value' \
+            --output text)
+          echo "aurora-endpoint=$AURORA_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "Aurora endpoint retrieved"
+
+      - name: Get database password from SSM
+        id: get-password
+        run: |
+          DB_PASSWORD=$(aws ssm get-parameter \
+            --name "/munistream/dev/aurora/password" \
+            --with-decryption \
+            --query 'Parameter.Value' \
+            --output text)
+          echo "db-password=$DB_PASSWORD" >> $GITHUB_OUTPUT
+          echo "Database password retrieved"
+
+      - name: Determine deployment target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "target=${{ github.event.inputs.target_client }}" >> $GITHUB_OUTPUT
+            echo "force-rebuild=${{ github.event.inputs.force_rebuild }}" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.detect-changes.outputs.backend-changed }}" = "true" ] || [ "${{ needs.detect-changes.outputs.global-changed }}" = "true" ]; then
+            echo "target=all" >> $GITHUB_OUTPUT
+            echo "force-rebuild=false" >> $GITHUB_OUTPUT
+          else
+            # Smart deployment based on changed client files
+            targets=""
+            if [ "${{ needs.detect-changes.outputs.core-changed }}" = "true" ]; then
+              targets="$targets core"
+            fi
+            if [ "${{ needs.detect-changes.outputs.conapesca-changed }}" = "true" ]; then
+              targets="$targets conapesca"
+            fi
+            if [ "${{ needs.detect-changes.outputs.teso-changed }}" = "true" ]; then
+              targets="$targets teso"
+            fi
+
+            # If multiple clients changed, deploy all
+            word_count=$(echo $targets | wc -w)
+            if [ $word_count -gt 1 ]; then
+              echo "target=all" >> $GITHUB_OUTPUT
+            elif [ -n "$targets" ]; then
+              echo "target=$targets" >> $GITHUB_OUTPUT
+            else
+              echo "target=all" >> $GITHUB_OUTPUT
+            fi
+            echo "force-rebuild=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ steps.get-instance.outputs.instance-ip }} >> ~/.ssh/known_hosts
+
+      - name: Copy files to EC2
+        run: |
+          scp -r . ubuntu@${{ steps.get-instance.outputs.instance-ip }}:/tmp/munistream-workflow/
+
+      - name: Deploy Workflow API on EC2
+        run: |
+          ssh ubuntu@${{ steps.get-instance.outputs.instance-ip }} << 'EOF'
+            set -e
+            cd /tmp/munistream-workflow
+
+            # Export environment variables
+            export AURORA_ENDPOINT="${{ steps.get-aurora.outputs.aurora-endpoint }}"
+            export DB_PASSWORD="${{ steps.get-password.outputs.db-password }}"
+            export DATABASE_URL_CORE="postgresql://postgres:${DB_PASSWORD}@${AURORA_ENDPOINT}:5432/munistream_core"
+            export DATABASE_URL_CONAPESCA="postgresql://postgres:${DB_PASSWORD}@${AURORA_ENDPOINT}:5432/munistream_conapesca"
+            export DATABASE_URL_TESO="postgresql://postgres:${DB_PASSWORD}@${AURORA_ENDPOINT}:5432/munistream_tesoreriacdmx"
+            export SECRET_KEY_CORE="${{ secrets.SECRET_KEY_CORE }}"
+            export SECRET_KEY_CONAPESCA="${{ secrets.SECRET_KEY_CONAPESCA }}"
+            export SECRET_KEY_TESO="${{ secrets.SECRET_KEY_TESO }}"
+            export KEYCLOAK_CLIENT_SECRET_CORE="${{ secrets.KEYCLOAK_CLIENT_SECRET_CORE }}"
+            export KEYCLOAK_CLIENT_SECRET_CONAPESCA="${{ secrets.KEYCLOAK_CLIENT_SECRET_CONAPESCA }}"
+            export KEYCLOAK_CLIENT_SECRET_TESO="${{ secrets.KEYCLOAK_CLIENT_SECRET_TESO }}"
+
+            # Create network if it doesn't exist
+            docker network create munistream-network 2>/dev/null || echo "Network already exists"
+
+            # Run deployment
+            chmod +x deploy-h5.sh
+            ./deploy-h5.sh ${{ steps.target.outputs.force-rebuild }} ${{ steps.target.outputs.target }}
+          EOF
+
+      - name: Verify deployment
+        run: |
+          ssh ubuntu@${{ steps.get-instance.outputs.instance-ip }} << 'EOF'
+            echo "🔍 Verifying Workflow API deployment..."
+            docker-compose -f /tmp/munistream-workflow/docker-compose.h5.yml ps
+
+            echo "🔍 Testing API endpoints..."
+            for port in 8000 8001 8002; do
+              if curl -f http://localhost:$port/health >/dev/null 2>&1; then
+                echo "✅ Workflow API on port $port is healthy"
+              elif curl -f http://localhost:$port >/dev/null 2>&1; then
+                echo "⚠️ Workflow API on port $port is responding but health endpoint not ready"
+              else
+                echo "❌ Workflow API on port $port is not responding"
+              fi
+            done
+
+            echo "🔍 Testing database connections..."
+            # Test database connectivity for each client
+            for client in core conapesca tesoreriacdmx; do
+              db_name="munistream_${client}"
+              if [ "$client" = "tesoreriacdmx" ]; then
+                db_name="munistream_tesoreriacdmx"
+              fi
+
+              if PGPASSWORD="${{ steps.get-password.outputs.db-password }}" psql -h "${{ steps.get-aurora.outputs.aurora-endpoint }}" -U postgres -d "$db_name" -c "SELECT 1;" >/dev/null 2>&1; then
+                echo "✅ Database $db_name is accessible"
+              else
+                echo "⚠️ Database $db_name connectivity issue"
+              fi
+            done
+          EOF
+
+      - name: Run API health tests
+        run: |
+          ssh ubuntu@${{ steps.get-instance.outputs.instance-ip }} << 'EOF'
+            echo "🧪 Running comprehensive API health tests..."
+
+            # Test each API endpoint with retries
+            for port in 8000 8001 8002; do
+              echo "Testing API on port $port..."
+              max_attempts=5
+              attempt=1
+
+              while [ $attempt -le $max_attempts ]; do
+                if curl -f -m 10 http://localhost:$port/health >/dev/null 2>&1; then
+                  echo "✅ API on port $port is healthy (attempt $attempt)"
+                  break
+                elif [ $attempt -eq $max_attempts ]; then
+                  echo "❌ API on port $port failed health check after $max_attempts attempts"
+
+                  # Show container logs for debugging
+                  echo "📋 Recent logs for API on port $port:"
+                  if [ $port -eq 8000 ]; then
+                    docker-compose -f /tmp/munistream-workflow/docker-compose.h5.yml logs --tail=10 api-core
+                  elif [ $port -eq 8001 ]; then
+                    docker-compose -f /tmp/munistream-workflow/docker-compose.h5.yml logs --tail=10 api-conapesca
+                  else
+                    docker-compose -f /tmp/munistream-workflow/docker-compose.h5.yml logs --tail=10 api-teso
+                  fi
+                else
+                  echo "⏳ Attempt $attempt/$max_attempts: API on port $port not ready, waiting..."
+                  sleep 10
+                  ((attempt++))
+                fi
+              done
+            done
+          EOF
+
+      - name: Clean up
+        if: always()
+        run: |
+          ssh ubuntu@${{ steps.get-instance.outputs.instance-ip }} << 'EOF'
+            rm -rf /tmp/munistream-workflow || true
+          EOF
+          rm -f ~/.ssh/id_rsa
