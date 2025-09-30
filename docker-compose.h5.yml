@@ -1,0 +1,184 @@
+# H5 Multi-tenant Docker Compose for MuniStream Workflow API
+# This file defines 3 API containers for each client with proper port mapping
+
+services:
+  # Core Client API - Base ports (8000)
+  api-core:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: api-core
+    ports:
+      - "8000:8000"
+    environment:
+      # Database - Aurora PostgreSQL
+      DATABASE_URL: ${DATABASE_URL_CORE}
+      DB_TYPE: postgresql
+      DB_HOST: ${AURORA_ENDPOINT}
+      DB_PORT: 5432
+      DB_NAME: munistream_core
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+
+      # Client Configuration
+      CLIENT_NAME: core
+      CLIENT_DOMAIN: core-dev.munistream.local
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY_CORE:-munistream-core-secret-key-dev}
+
+      # Keycloak Authentication
+      KEYCLOAK_URL: http://localhost:9000
+      KEYCLOAK_REALM: core
+      KEYCLOAK_CLIENT_ID: munistream-workflow
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET_CORE}
+
+      # Optional services
+      REDIS_URL: redis://localhost:6379
+
+      # Application Settings
+      APP_ENV: development
+      API_PORT: 8000
+      LOG_LEVEL: debug
+    networks:
+      - munistream-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.munistream.client=core"
+      - "com.munistream.service=workflow-api"
+      - "com.munistream.port=8000"
+
+  # Conapesca Client API - +1 port increment (8001)
+  api-conapesca:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: api-conapesca
+    ports:
+      - "8001:8000"
+    environment:
+      # Database - Aurora PostgreSQL
+      DATABASE_URL: ${DATABASE_URL_CONAPESCA}
+      DB_TYPE: postgresql
+      DB_HOST: ${AURORA_ENDPOINT}
+      DB_PORT: 5432
+      DB_NAME: munistream_conapesca
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+
+      # Client Configuration
+      CLIENT_NAME: conapesca
+      CLIENT_DOMAIN: conapesca-dev.munistream.local
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY_CONAPESCA:-munistream-conapesca-secret-key-dev}
+
+      # Keycloak Authentication
+      KEYCLOAK_URL: http://localhost:9001
+      KEYCLOAK_REALM: conapesca
+      KEYCLOAK_CLIENT_ID: munistream-workflow
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET_CONAPESCA}
+
+      # Optional services
+      REDIS_URL: redis://localhost:6379
+
+      # Application Settings
+      APP_ENV: development
+      API_PORT: 8000
+      LOG_LEVEL: debug
+    networks:
+      - munistream-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.munistream.client=conapesca"
+      - "com.munistream.service=workflow-api"
+      - "com.munistream.port=8001"
+
+  # Tesoreriacdmx Client API - +2 port increment (8002)
+  api-teso:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: api-teso
+    ports:
+      - "8002:8000"
+    environment:
+      # Database - Aurora PostgreSQL
+      DATABASE_URL: ${DATABASE_URL_TESO}
+      DB_TYPE: postgresql
+      DB_HOST: ${AURORA_ENDPOINT}
+      DB_PORT: 5432
+      DB_NAME: munistream_tesoreriacdmx
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD}
+
+      # Client Configuration
+      CLIENT_NAME: tesoreriacdmx
+      CLIENT_DOMAIN: tesoreriacdmx-dev.munistream.local
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY_TESO:-munistream-teso-secret-key-dev}
+
+      # Keycloak Authentication
+      KEYCLOAK_URL: http://localhost:9002
+      KEYCLOAK_REALM: tesoreriacdmx
+      KEYCLOAK_CLIENT_ID: munistream-workflow
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET_TESO}
+
+      # Optional services
+      REDIS_URL: redis://localhost:6379
+
+      # Application Settings
+      APP_ENV: development
+      API_PORT: 8000
+      LOG_LEVEL: debug
+    networks:
+      - munistream-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "com.munistream.client=tesoreriacdmx"
+      - "com.munistream.service=workflow-api"
+      - "com.munistream.port=8002"
+
+  # Shared Redis Cache (optional, single instance for all clients)
+  redis-shared:
+    image: redis:7-alpine
+    container_name: munistream-redis-shared
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_h5_data:/data
+    networks:
+      - munistream-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - cache
+
+volumes:
+  redis_h5_data:
+    driver: local
+
+networks:
+  munistream-network:
+    driver: bridge
+    name: munistream-network
