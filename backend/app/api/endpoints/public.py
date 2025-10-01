@@ -631,9 +631,12 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         
         # Get steps from DAG
         for task_id, task in dag.tasks.items():
+            # Use custom name from kwargs if provided, otherwise generate from task_id
+            task_name = task.kwargs.get('name') if hasattr(task, 'kwargs') and 'name' in task.kwargs else task_id.replace("_", " ").title()
+
             step_data = {
                 "id": task_id,
-                "name": task_id.replace("_", " ").title(),
+                "name": task_name,
                 "type": task.__class__.__name__
             }
             # Add description if available

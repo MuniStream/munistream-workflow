@@ -1,4 +1,11 @@
 plugins:
+  - name: trazabilidad-workflows
+    repo_url: /app/plugins/trazabilidad-workflows
+    enabled: true
+    version: 0.1.0
+    workflows:
+      - module: workflows.documents.curp_workflow
+        function: create_curp_workflow
   - name: munistream-ai-services
     repo_url: /app/plugins/munistream-ai-services
     enabled: true

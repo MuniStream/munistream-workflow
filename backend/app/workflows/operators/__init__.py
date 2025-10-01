@@ -10,6 +10,13 @@ from .approval import ApprovalOperator, ConditionalApprovalOperator
 from .external_api import ExternalAPIOperator, HTTPOperator
 from .airflow_operator import AirflowOperator
 from .s3_upload import S3UploadOperator
+from .entity_operators import (
+    EntityCreationOperator,
+    EntityValidationOperator,
+    EntityRequirementOperator,
+    EntityRelationshipOperator
+)
+from .document_operators import DocumentCreationOperator, DocumentRequirementOperator
 
 __all__ = [
     # Base classes
@@ -35,5 +42,15 @@ __all__ = [
     "AirflowOperator",
 
     # Storage operators
-    "S3UploadOperator"
+    "S3UploadOperator",
+
+    # Entity operators
+    "EntityCreationOperator",
+    "EntityValidationOperator",
+    "EntityRequirementOperator",
+    "EntityRelationshipOperator",
+
+    # Document operators
+    "DocumentCreationOperator",
+    "DocumentRequirementOperator"
 ]

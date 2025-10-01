@@ -73,7 +73,7 @@ services:
     volumes:
       - ./app:/app/app:ro  # Mount source code for development
       - ./plugins.yaml:/app/plugins.yaml:ro  # Mount plugins configuration
-      - ../../puente-workflows:/app/plugins/puente-workflows:ro  # Mount PUENTE workflows
+      - ../../Trazabilidad-workflows:/app/plugins/trazabilidad-workflows:ro  # Mount Trazabilidad workflows
       - upload_data:/app/uploads
     networks:
       - munistream-network
