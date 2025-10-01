@@ -90,12 +90,16 @@ async def submit_data(
     # Update BOTH the DAG instance and database with input
     dag_instance.context[f"{waiting_task}_input"] = data
     dag_instance.context[f"{waiting_task}_submitted_at"] = datetime.utcnow().isoformat()
-    
+
+    # Change status from paused to running to avoid delays
+    if db_instance.status == "paused":
+        db_instance.status = "running"
+
     # Save to database
     db_instance.context = dag_instance.context
     db_instance.updated_at = datetime.utcnow()
     await db_instance.save()
-    
+
     # Resume execution - the DAG instance now has the data in context
     workflow_service.executor.resume_instance(instance_id)
     

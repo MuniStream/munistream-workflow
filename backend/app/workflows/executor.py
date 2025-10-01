@@ -360,9 +360,9 @@ class DAGExecutor:
 
                         self.execution_queue.append(instance_id)
                         print(f"♻️ Re-queued instance {instance_id} for continued processing")
-                
-                # Short delay between iterations
-                await asyncio.sleep(1)
+                else:
+                    # Only sleep if queue is empty to avoid CPU spinning
+                    await asyncio.sleep(0.1)
                 
             except asyncio.CancelledError:
                 break
@@ -372,18 +372,36 @@ class DAGExecutor:
     
     def resume_instance(self, instance_id: str):
         """
-        Resume a paused instance - just add it back to the queue.
+        Resume a paused instance - execute immediately and add to queue.
         The fresh context will be loaded from database when executed.
-        
+
         Args:
             instance_id: Instance to resume
         """
         logger.info(f"Resume requested for instance {instance_id}")
+
+        # Execute immediately without waiting for the loop
+        asyncio.create_task(self._execute_immediate(instance_id))
+
+        # Also add to queue for continued processing if needed
         if instance_id not in self.execution_queue:
             self.execution_queue.append(instance_id)
-            logger.info(f"Instance {instance_id} queued for resumption")
+            logger.info(f"Instance {instance_id} executing immediately and queued for continuation")
         else:
-            logger.info(f"Instance {instance_id} already in queue")
+            logger.info(f"Instance {instance_id} executing immediately (already in queue)")
+
+    async def _execute_immediate(self, instance_id: str):
+        """Execute an instance immediately without waiting for the loop"""
+        try:
+            logger.info(f"Executing instance {instance_id} immediately")
+            can_continue = await self.execute_instance(instance_id)
+
+            # If instance needs to continue but isn't in queue, add it
+            if can_continue and instance_id not in self.execution_queue:
+                self.execution_queue.append(instance_id)
+
+        except Exception as e:
+            logger.error(f"Error in immediate execution of {instance_id}: {e}")
     
     def cancel_instance(self, instance_id: str):
         """
