@@ -63,6 +63,11 @@ services:
 
       # Optional services
       REDIS_URL: redis://redis:6379
+
+      # OpenProject Configuration
+      OPENPROJECT_BASE_URL: ${OPENPROJECT_BASE_URL:-http://host.docker.internal:8090}
+      OPENPROJECT_API_KEY: ${OPENPROJECT_API_KEY}
+      OPENPROJECT_PROJECT_KEY: ${OPENPROJECT_PROJECT_KEY:-permisos}
     ports:
       - "8000:8000"
     volumes:

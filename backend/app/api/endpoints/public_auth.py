@@ -283,18 +283,101 @@ async def start_citizen_workflow(
         )
 
 
+@router.get("/track/{instance_id}")
+async def track_instance(
+    instance_id: str,
+    current_customer: Customer = Depends(get_current_customer)
+):
+    """
+    Track workflow instance status.
+    Returns current state and any required actions.
+    Requires authentication - only authenticated users can track instances.
+    """
+    from ...models.workflow import WorkflowInstance
+    from ...services.workflow_service import workflow_service
+
+    # Get database instance
+    db_instance = await WorkflowInstance.find_one(
+        WorkflowInstance.instance_id == instance_id
+    )
+    if not db_instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Get DAG instance for detailed state
+    dag_instance = await workflow_service.get_instance(instance_id)
+
+    # Check if waiting for input
+    requires_input = False
+    input_form = {}
+
+    if dag_instance:
+        for task_id, state in dag_instance.task_states.items():
+            if state.get("status") == "waiting":
+                requires_input = True
+                # Get form config from task
+                task = dag_instance.dag.tasks.get(task_id)
+                if task and hasattr(task, 'form_config'):
+                    input_form = task.form_config
+                break
+
+    # Calculate progress
+    total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
+    completed_steps = 0
+    step_progress = []
+
+    if dag_instance:
+        for task_id, state in dag_instance.task_states.items():
+            status_val = state.get("status", "pending")
+            if status_val == "completed":
+                completed_steps += 1
+
+            step_progress.append({
+                "step_id": task_id,
+                "name": task_id.replace("_", " ").title(),
+                "description": f"Step {task_id}",
+                "status": status_val,
+                "started_at": state.get("started_at"),
+                "completed_at": state.get("completed_at")
+            })
+
+    progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+
+    # Get workflow info
+    workflow = await workflow_service.get_workflow_definition(db_instance.workflow_id)
+    workflow_name = workflow.name if workflow else db_instance.workflow_id
+
+    return {
+        "instance_id": instance_id,
+        "workflow_id": db_instance.workflow_id,
+        "workflow_name": workflow_name,
+        "status": db_instance.status,
+        "progress_percentage": progress_percentage,
+        "current_step": db_instance.current_step,
+        "created_at": db_instance.created_at.isoformat() if db_instance.created_at else None,
+        "updated_at": db_instance.updated_at.isoformat() if db_instance.updated_at else None,
+        "completed_at": db_instance.completed_at.isoformat() if db_instance.completed_at else None,
+        "total_steps": total_steps,
+        "completed_steps": completed_steps,
+        "step_progress": step_progress,
+        "requires_input": requires_input,
+        "input_form": input_form,
+        "estimated_completion": None,  # Could calculate based on average step time
+        "message": f"Workflow {db_instance.status}"
+    }
+
+
 @router.get("/workflows/my-instances")
 async def get_customer_instances(
     current_customer: Customer = Depends(get_current_customer)
 ):
     """Get all workflow instances for the current customer"""
     from ...models.workflow import WorkflowInstance
-    
+
     # Find all instances for this customer
     instances = await WorkflowInstance.find(
         WorkflowInstance.user_id == str(current_customer.id)
     ).sort(-WorkflowInstance.created_at).to_list()
-    
+
     return {
         "instances": [
             {

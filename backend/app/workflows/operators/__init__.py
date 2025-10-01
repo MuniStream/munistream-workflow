@@ -9,6 +9,7 @@ from .user_input import UserInputOperator
 from .approval import ApprovalOperator, ConditionalApprovalOperator
 from .external_api import ExternalAPIOperator, HTTPOperator
 from .airflow_operator import AirflowOperator
+from .s3_upload import S3UploadOperator
 
 __all__ = [
     # Base classes
@@ -31,5 +32,8 @@ __all__ = [
     # External integration operators
     "ExternalAPIOperator",
     "HTTPOperator",
-    "AirflowOperator"
+    "AirflowOperator",
+
+    # Storage operators
+    "S3UploadOperator"
 ]

@@ -43,7 +43,19 @@ class Settings(BaseSettings):
     DOCUMENT_STORAGE_PATH: str = "./storage/documents"
     MAX_DOCUMENT_SIZE_MB: int = 50
     DOCUMENT_BASE_URL: Optional[str] = None  # For serving files
-    
+
+    # AWS S3 Configuration
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_DEFAULT_REGION: str = "us-east-1"
+    S3_BUCKET_NAME: Optional[str] = None
+
+    # OpenProject Configuration
+    OPENPROJECT_BASE_URL: Optional[str] = None
+    OPENPROJECT_API_KEY: Optional[str] = None
+    OPENPROJECT_DEFAULT_PROJECT_ID: Optional[str] = None
+    OPENPROJECT_PROJECT_KEY: Optional[str] = None
+
     class Config:
         env_file = ".env"
         case_sensitive = True

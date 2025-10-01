@@ -6,3 +6,19 @@ plugins:
     workflows:
       - module: workflows.id_verification_dag
         function: create_id_verification_workflow
+  - name: puente-workflows
+    repo_url: /app/plugins/puente-workflows
+    enabled: true
+    version: 1.0.0
+    workflows: []
+  - name: munistream-example-workflows
+    repo_url: https://github.com/MuniStream/munistream-example-workflows.git
+    enabled: true
+    version: 1.0.0
+    workflows:
+      - module: workflows.document_upload_workflow
+        function: create_document_upload_workflow
+      - module: workflows.airflow_integration_workflow
+        function: create_airflow_integration_workflow
+      - module: workflows.openproject_integration_workflow
+        function: create_openproject_integration_workflow
