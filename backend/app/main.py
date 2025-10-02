@@ -1,12 +1,47 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from .core.config import settings
 from .core.database import connect_to_mongo, close_mongo_connection
 from .api.api import api_router
 from .workflows.startup import initialize_workflow_system, shutdown_workflow_system
+
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:3001",  # AI services citizen portal
+    "http://localhost:5173",
+    "http://localhost:5174",  # AI services citizen portal dev
+    "http://localhost:8080",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8000",
+]
+
+
+def load_cors_origins() -> List[str]:
+    """Merge default origins with any configured in the environment."""
+    raw_env = os.getenv("CORS_ORIGINS") or os.getenv("CORS_ORIGIN")
+    if not raw_env:
+        return DEFAULT_CORS_ORIGINS
+
+    env_origins = [origin.strip() for origin in raw_env.split(",") if origin.strip()]
+    if not env_origins:
+        return DEFAULT_CORS_ORIGINS
+
+    merged_origins = DEFAULT_CORS_ORIGINS.copy()
+    for origin in env_origins:
+        if origin not in merged_origins:
+            merged_origins.append(origin)
+    return merged_origins
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -14,23 +49,10 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
-# Set up CORS - development configuration
+# Set up CORS with defaults and optional environment overrides
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",  # AI services citizen portal
-        "http://localhost:5173", 
-        "http://localhost:5174",  # AI services citizen portal dev
-        "http://localhost:8080",
-        "http://localhost:8000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:8000"
-    ],
+    allow_origins=load_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
