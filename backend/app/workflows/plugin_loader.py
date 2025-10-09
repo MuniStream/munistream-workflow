@@ -11,7 +11,10 @@ import importlib
 import importlib.util
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urlunparse, quote
+
 from git import Repo
+from git.exc import GitCommandError
 import yaml
 import json
 
@@ -45,15 +48,44 @@ class WorkflowPlugin:
         
         repo_path = plugin_dir / "repo"
         
+        git_env = self._git_env()
+        token = os.getenv("WORKFLOW_GIT_TOKEN")
+        authenticated_url = self._build_authenticated_url(self.repo_url, token)
+
         if repo_path.exists():
             # Update existing repo
             repo = Repo(repo_path)
             origin = repo.remotes.origin
-            origin.pull()
+            original_url = next(origin.urls, self.repo_url)
+
+            try:
+                origin.pull(env=git_env)
+            except GitCommandError as exc:
+                if token and authenticated_url != self.repo_url and self._is_auth_error(exc):
+                    try:
+                        origin.set_url(authenticated_url)
+                        origin.pull(env=git_env)
+                    except GitCommandError as auth_exc:
+                        self._raise_git_error(auth_exc, "update")
+                    finally:
+                        origin.set_url(original_url)
+                else:
+                    raise
         else:
             # Clone new repo
-            repo = Repo.clone_from(self.repo_url, repo_path)
-        
+            try:
+                repo = Repo.clone_from(self.repo_url, repo_path, env=git_env)
+            except GitCommandError as exc:
+                if token and authenticated_url != self.repo_url and self._is_auth_error(exc):
+                    try:
+                        repo = Repo.clone_from(authenticated_url, repo_path, env=git_env)
+                    except GitCommandError as auth_exc:
+                        self._raise_git_error(auth_exc, "clone")
+                    if authenticated_url != self.repo_url:
+                        repo.remotes.origin.set_url(self.repo_url)
+                else:
+                    raise
+
         self.local_path = str(repo_path)
         return self.local_path
     
@@ -167,6 +199,55 @@ class WorkflowPlugin:
                     
         print(f"Auto-discovered files: {[d['module'] for d in discovered]}")
         return discovered
+
+    @staticmethod
+    def _git_env() -> Dict[str, str]:
+        env = dict(os.environ)
+        env.setdefault("GIT_TERMINAL_PROMPT", "0")
+        return env
+
+    @staticmethod
+    def _build_authenticated_url(repo_url: str, token: Optional[str]) -> str:
+        if not token:
+            return repo_url
+
+        parsed = urlparse(repo_url)
+
+        if parsed.scheme not in {"http", "https"}:
+            return repo_url
+
+        if parsed.username:
+            return repo_url
+
+        hostname = parsed.hostname
+        if not hostname:
+            return repo_url
+
+        netloc = hostname
+        if parsed.port:
+            netloc = f"{hostname}:{parsed.port}"
+
+        safe_token = quote(token, safe="")
+        auth_netloc = f"x-access-token:{safe_token}@{netloc}"
+
+        return urlunparse(parsed._replace(netloc=auth_netloc))
+
+    def _raise_git_error(self, exc: GitCommandError, action: str) -> None:
+        if self._is_auth_error(exc):
+            raise RuntimeError(
+                "Authentication failed while attempting to "
+                f"{action} plugin repository '{self.name}'. Ensure WORKFLOW_GIT_TOKEN has read access."
+            ) from exc
+
+        raise exc
+
+    @staticmethod
+    def _is_auth_error(exc: GitCommandError) -> bool:
+        stderr = (getattr(exc, "stderr", "") or "").lower()
+        stdout = (getattr(exc, "stdout", "") or "").lower()
+        details = f"{stderr} {stdout}"
+        auth_keywords = ("authentication", "authorization", "403", "permission denied", "access denied")
+        return any(keyword in details for keyword in auth_keywords)
 
 
 class WorkflowPluginManager:
