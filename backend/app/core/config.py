@@ -25,11 +25,28 @@ class Settings(BaseSettings):
     KEYCLOAK_REALM: str = "munistream"
     KEYCLOAK_CLIENT_ID: str = "munistream-backend"
     KEYCLOAK_CLIENT_SECRET: Optional[str] = None
-    # Accept tokens from multiple issuers (for dev environments with Docker)
-    KEYCLOAK_VALID_ISSUERS: List[str] = [
-        "http://localhost:8180/realms/munistream",
-        "http://host.docker.internal:8180/realms/munistream"
-    ]
+    # Accept tokens from multiple issuers (constructed dynamically from environment)
+    # This allows the same code to work in standalone mode and in client deployments
+    KEYCLOAK_VALID_ISSUERS: Optional[List[str]] = None
+
+    @validator('KEYCLOAK_VALID_ISSUERS', pre=True, always=True)
+    def build_valid_issuers(cls, v, values):
+        """Build list of valid issuers from KEYCLOAK_URL and KEYCLOAK_REALM"""
+        if v is not None:
+            return v
+
+        keycloak_url = values.get('KEYCLOAK_URL', 'http://localhost:8180')
+        keycloak_realm = values.get('KEYCLOAK_REALM', 'munistream')
+
+        # Build issuer URL from Keycloak settings
+        issuer = f"{keycloak_url}/realms/{keycloak_realm}"
+
+        # For local development, also accept docker internal hostname
+        valid_issuers = [issuer]
+        if 'localhost' in keycloak_url:
+            valid_issuers.append(f"http://host.docker.internal:8180/realms/{keycloak_realm}")
+
+        return valid_issuers
     
     # Azure
     AZURE_STORAGE_CONNECTION_STRING: Optional[str] = None
