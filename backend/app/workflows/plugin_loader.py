@@ -59,32 +59,24 @@ class WorkflowPlugin:
             original_url = next(origin.urls, self.repo_url)
 
             try:
+                if authenticated_url != self.repo_url:
+                    origin.set_url(authenticated_url)
                 origin.pull(env=git_env)
             except GitCommandError as exc:
-                if token and authenticated_url != self.repo_url and self._is_auth_error(exc):
-                    try:
-                        origin.set_url(authenticated_url)
-                        origin.pull(env=git_env)
-                    except GitCommandError as auth_exc:
-                        self._raise_git_error(auth_exc, "update")
-                    finally:
-                        origin.set_url(original_url)
-                else:
-                    raise
+                self._raise_git_error(exc, "update")
+            finally:
+                if authenticated_url != self.repo_url:
+                    origin.set_url(original_url)
         else:
             # Clone new repo
+            clone_source = authenticated_url if authenticated_url != self.repo_url else self.repo_url
             try:
-                repo = Repo.clone_from(self.repo_url, repo_path, env=git_env)
+                repo = Repo.clone_from(clone_source, repo_path, env=git_env)
             except GitCommandError as exc:
-                if token and authenticated_url != self.repo_url and self._is_auth_error(exc):
-                    try:
-                        repo = Repo.clone_from(authenticated_url, repo_path, env=git_env)
-                    except GitCommandError as auth_exc:
-                        self._raise_git_error(auth_exc, "clone")
-                    if authenticated_url != self.repo_url:
-                        repo.remotes.origin.set_url(self.repo_url)
-                else:
-                    raise
+                self._raise_git_error(exc, "clone")
+
+            if authenticated_url != self.repo_url:
+                repo.remotes.origin.set_url(self.repo_url)
 
         self.local_path = str(repo_path)
         return self.local_path
@@ -246,7 +238,17 @@ class WorkflowPlugin:
         stderr = (getattr(exc, "stderr", "") or "").lower()
         stdout = (getattr(exc, "stdout", "") or "").lower()
         details = f"{stderr} {stdout}"
-        auth_keywords = ("authentication", "authorization", "403", "permission denied", "access denied")
+        auth_keywords = (
+            "authentication",
+            "authorization",
+            "403",
+            "permission denied",
+            "access denied",
+            "could not read username",
+            "auth fail",
+            "authorization required",
+            "http basic: access denied",
+        )
         return any(keyword in details for keyword in auth_keywords)
 
 
