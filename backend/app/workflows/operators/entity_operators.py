@@ -137,12 +137,16 @@ class EntityCreationOperator(BaseOperator):
                 )
                 
                 # Update the output data
-                self.state.output_data = {
+                output_data = {
                     f"{self.task_id}_entity_id": entity.entity_id,
                     f"{self.task_id}_entity_type": entity.entity_type,
                     f"created_entity_{self.entity_type}": entity.entity_id
                 }
-                return "continue"
+                self.state.output_data = output_data
+                return TaskResult(
+                    status="continue",
+                    data=output_data
+                )
             except Exception as e:
                 print(f"   ❌ Failed to create entity: {e}")
                 
@@ -152,12 +156,16 @@ class EntityCreationOperator(BaseOperator):
                     error=e,
                     details=self._entity_params
                 )
-                
-                self.state.error_message = str(e)
-                return "failed"
+
+                error_msg = str(e)
+                self.state.error_message = error_msg
+                return TaskResult(
+                    status="failed",
+                    error=error_msg
+                )
         
         # If regular execute didn't need async, return its result
-        return result.status
+        return result
 
 
 class EntityValidationOperator(BaseOperator):

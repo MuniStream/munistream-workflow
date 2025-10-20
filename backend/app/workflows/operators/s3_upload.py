@@ -173,6 +173,36 @@ class S3UploadOperator(BaseOperator):
 
         return "/".join(path_parts)
 
+    def _get_files_from_context(self, context: Dict[str, Any], file_source: str) -> List[Dict[str, Any]]:
+        """
+        Get files from context with support for both direct keys and task output data.
+
+        This method handles the common pattern where UserInputOperator stores files
+        in task output data (e.g., collect_document_data) but S3UploadOperator
+        needs to access them by field name.
+        """
+        # First try direct access
+        files_data = context.get(file_source)
+        if files_data:
+            return files_data if isinstance(files_data, list) else [files_data]
+
+        # If not found directly, look in task output data from UserInputOperator
+        # Check all task output data for the file field
+        for key, value in context.items():
+            if key.endswith('_data') and isinstance(value, dict):
+                if file_source in value:
+                    file_data = value[file_source]
+                    return file_data if isinstance(file_data, list) else [file_data]
+
+        # Debug: print available context keys to help diagnose issues
+        print(f"🔍 S3UploadOperator: No files found for '{file_source}'")
+        print(f"   Available context keys: {list(context.keys())}")
+        for key, value in context.items():
+            if isinstance(value, dict) and any(k for k in value.keys() if 'file' in k.lower()):
+                print(f"   Nested data in '{key}': {list(value.keys())}")
+
+        return []
+
     def _upload_file_to_s3(
         self,
         file_content: bytes,
@@ -192,6 +222,9 @@ class S3UploadOperator(BaseOperator):
         Returns:
             Upload result dictionary
         """
+        print(f"      Starting S3 upload to bucket: {self.bucket_name}")
+        print(f"      S3 key: {s3_key}")
+        print(f"      Content size: {len(file_content)} bytes")
         try:
             # Prepare upload parameters
             put_params = {
@@ -201,12 +234,18 @@ class S3UploadOperator(BaseOperator):
                 'ContentType': content_type,
                 'Metadata': metadata,
                 'StorageClass': self.storage_class,
-                'ServerSideEncryption': self.server_side_encryption,
                 'ACL': self.acl
             }
 
+            # Only add ServerSideEncryption for real AWS S3 (not MinIO)
+            endpoint_url = os.getenv("S3_ENDPOINT_URL")
+            if not endpoint_url or "amazonaws.com" in endpoint_url:
+                put_params['ServerSideEncryption'] = self.server_side_encryption
+
             # Upload to S3
+            print(f"      Calling S3 put_object...")
             response = self.s3_client.put_object(**put_params)
+            print(f"      S3 upload successful! ETag: {response.get('ETag', 'unknown')}")
 
             # Generate URL
             if self.make_public:
@@ -230,6 +269,9 @@ class S3UploadOperator(BaseOperator):
             }
 
         except Exception as e:
+            print(f"      ❌ S3 upload failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
@@ -252,24 +294,35 @@ class S3UploadOperator(BaseOperator):
             Upload result
         """
         filename = file_data.get("filename", "unknown")
+        print(f"🔍 Processing file: {filename}")
+        print(f"   File data keys: {list(file_data.keys())}")
+        print(f"   File size: {file_data.get('size', 'unknown')}")
+        print(f"   Content type: {file_data.get('content_type', 'unknown')}")
 
         # Validate file
         error = self._validate_file(file_data)
         if error:
+            print(f"❌ File validation failed: {error}")
             return {
                 "filename": filename,
                 "success": False,
                 "error": error
             }
 
-        # Get file content
-        file_content = file_data.get("content")
+        # Get file content - check both 'content' and 'base64' keys
+        file_content = file_data.get("content") or file_data.get("base64")
+        print(f"   Content type: {type(file_content)}")
+        print(f"   Content length: {len(file_content) if file_content else 'None'}")
+
         if isinstance(file_content, str):
             # Base64 encoded content
+            print(f"   Decoding base64 content...")
             import base64
             try:
                 file_content = base64.b64decode(file_content)
+                print(f"   Decoded to {len(file_content)} bytes")
             except Exception as e:
+                print(f"❌ Base64 decode failed: {e}")
                 return {
                     "filename": filename,
                     "success": False,
@@ -278,10 +331,14 @@ class S3UploadOperator(BaseOperator):
         elif not isinstance(file_content, bytes):
             # Try to read from file path
             file_path = file_data.get("path")
+            print(f"   Trying to read from file path: {file_path}")
             if file_path and os.path.exists(file_path):
                 async with aiofiles.open(file_path, 'rb') as f:
                     file_content = await f.read()
+                print(f"   Read {len(file_content)} bytes from file")
             else:
+                print(f"❌ No valid file content or path provided")
+                print(f"   Available file_data keys: {list(file_data.keys())}")
                 return {
                     "filename": filename,
                     "success": False,
@@ -311,6 +368,11 @@ class S3UploadOperator(BaseOperator):
         metadata = {k: v for k, v in metadata.items() if v}
 
         # Upload to S3 in thread pool to avoid blocking
+        print(f"   Uploading to S3: {s3_key}")
+        print(f"   Content size: {len(file_content)} bytes")
+        print(f"   Content type: {content_type}")
+        print(f"   Metadata: {metadata}")
+
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             self.executor,
@@ -321,43 +383,46 @@ class S3UploadOperator(BaseOperator):
             metadata
         )
 
+        print(f"   S3 upload result: {result}")
         result["filename"] = filename
         return result
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
-        """Execute the S3 upload operation"""
+        """Execute method required by BaseOperator - delegates to execute_async"""
+        return TaskResult(
+            status="pending_async",
+            data={}
+        )
+
+    async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
+        """Async execution method for S3 file uploads"""
         try:
             print(f"☁️ S3UploadOperator: Starting file upload to {self.bucket_name}")
 
             # Initialize S3 client
             self.s3_client = self._init_s3_client()
 
-            # Get files from context
-            files_data = context.get(self.file_source, [])
+            # Get files from context - support nested keys for task output data
+            files_data = self._get_files_from_context(context, self.file_source)
             if not isinstance(files_data, list):
                 files_data = [files_data]
 
             if not files_data:
+                error_msg = f"No files found in context key '{self.file_source}'. Expected files for upload but none were provided."
+                print(f"❌ S3UploadOperator: {error_msg}")
                 return TaskResult(
-                    status="skip",
-                    data={"message": f"No files found in context key '{self.file_source}'"}
+                    status="failed",
+                    error=error_msg
                 )
 
-            # Process uploads asynchronously
-            async def upload_all():
-                tasks = [
-                    self._process_file_upload(file_data, context)
-                    for file_data in files_data
-                ]
-                return await asyncio.gather(*tasks)
+            print(f"☁️ S3UploadOperator: Processing {len(files_data)} file(s) asynchronously")
 
-            # Run async upload
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                results = loop.run_until_complete(upload_all())
-            finally:
-                loop.close()
+            # Process uploads asynchronously
+            tasks = [
+                self._process_file_upload(file_data, context)
+                for file_data in files_data
+            ]
+            results = await asyncio.gather(*tasks)
 
             # Process results
             successful_uploads = [r for r in results if r.get("success")]
@@ -382,7 +447,7 @@ class S3UploadOperator(BaseOperator):
             # Log results
             print(f"✅ S3UploadOperator: Uploaded {len(successful_uploads)}/{len(results)} files")
             if failed_uploads:
-                print(f"⚠️ S3UploadOperator: Failed uploads: {[f['filename'] for f in failed_uploads]}")
+                print(f"⚠️ S3UploadOperator: Failed uploads: {[f.get('filename', 'unknown') for f in failed_uploads]}")
 
             # Determine status based on results
             if not successful_uploads:
@@ -404,8 +469,12 @@ class S3UploadOperator(BaseOperator):
                 )
 
         except Exception as e:
+            import traceback
             error_msg = f"S3 upload failed: {str(e)}"
             print(f"❌ S3UploadOperator: {error_msg}")
+            print(f"   Full traceback:")
+            traceback.print_exc()
+            print(f"   Error occurred at line: {traceback.extract_tb(e.__traceback__)[-1].lineno}")
             return TaskResult(
                 status="failed",
                 error=error_msg

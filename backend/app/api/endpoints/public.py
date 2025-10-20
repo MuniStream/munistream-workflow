@@ -130,7 +130,7 @@ async def list_public_workflows():
     List available workflows for public use.
     No authentication required - citizens can browse available services.
     """
-    workflows = await workflow_service.list_workflow_definitions(status="active")
+    workflows = await workflow_service.list_workflow_definitions(status="active", limit=100)
     
     result = []
     for w in workflows:
