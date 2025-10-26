@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     OPENPROJECT_DEFAULT_PROJECT_ID: Optional[str] = None
     OPENPROJECT_PROJECT_KEY: Optional[str] = None
 
+    # AI/LLM Configuration
+    OPENAI_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+    AI_MODEL_PROVIDER: str = "openai"  # "openai" or "anthropic"
+    AI_MODEL_NAME: str = "gpt-4"  # Default model
+    AI_MAX_TOKENS: int = 4000
+    AI_TEMPERATURE: float = 0.3
+    AI_REQUEST_TIMEOUT: int = 60  # seconds
+
+    # OCR Configuration
+    TESSERACT_CMD: Optional[str] = None  # Path to tesseract executable
+    OCR_LANGUAGES: str = "eng+spa"  # English and Spanish
+
     class Config:
         env_file = ".env"
         case_sensitive = True

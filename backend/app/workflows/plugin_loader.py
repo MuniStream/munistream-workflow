@@ -20,6 +20,7 @@ import json
 
 from ..services.workflow_service import workflow_service
 from .dag import DAG
+from ..themes.theme_loader import theme_manager
 
 
 class WorkflowPlugin:
@@ -101,18 +102,27 @@ class WorkflowPlugin:
                 self.workflows = discovered
                 print(f"Auto-discovered {len(discovered)} workflow entries for {self.name}")
             
+            print(f"🔍 DEBUG: Processing {len(self.workflows)} workflows for plugin {self.name}")
+            print(f"🔍 DEBUG: Workflows list: {self.workflows}")
+
             for workflow_info in self.workflows:
                 module_path = workflow_info.get("module")
                 function_name = workflow_info.get("function")
-                
+
+                print(f"🔍 DEBUG: Processing workflow_info: {workflow_info}")
+                print(f"🔍 DEBUG: module_path={module_path}, function_name={function_name}")
+
                 if not module_path or not function_name:
                     print(f"⚠️ Skipping workflow with missing module/function: {workflow_info}")
                     continue
                 
                 try:
-                    print(f"Loading {module_path}.{function_name}...")
+                    print(f"🔍 DEBUG: Attempting to load {module_path}.{function_name}...")
+                    print(f"🔍 DEBUG: Current sys.path includes: {self.local_path}")
+                    print(f"🔍 DEBUG: Local path exists: {os.path.exists(self.local_path)}")
                     # Import the module
                     module = importlib.import_module(module_path)
+                    print(f"🔍 DEBUG: Successfully imported module {module_path}")
                     
                     # Get the DAG creation function (try get_dag first, then fallback)
                     dag_func = None
@@ -167,7 +177,8 @@ class WorkflowPlugin:
             "**/puente/*_dag.py",
             "**/workflows/*_dag.py",
             "**/*_workflow.py",
-            "**/dags/*.py"
+            "**/dags/*.py",
+            "**/workflows/documents/*.py"
         ]
         
         from pathlib import Path
@@ -264,13 +275,14 @@ class WorkflowPluginManager:
         """Load plugin configuration from file"""
         if not os.path.exists(self.config_file):
             return
-        
+
         with open(self.config_file, 'r') as f:
             if self.config_file.endswith('.yaml') or self.config_file.endswith('.yml'):
                 config = yaml.safe_load(f)
             else:
                 config = json.load(f)
-        
+
+        # Load workflow plugins
         for plugin_config in config.get("plugins", []):
             if plugin_config.get("enabled", True):
                 plugin = WorkflowPlugin(
@@ -278,6 +290,9 @@ class WorkflowPluginManager:
                     config=plugin_config
                 )
                 self.plugins.append(plugin)
+
+        # Load theme plugins
+        self._load_themes(config)
     
     def discover_and_load_workflows(self) -> int:
         """Discover and load all workflows from configured plugins"""
@@ -370,6 +385,19 @@ class WorkflowPluginManager:
             }
             for plugin in self.plugins
         ]
+
+    def _load_themes(self, config: Dict[str, Any]):
+        """Load theme configurations from plugin config"""
+        # Use PLUGIN_DIR environment variable which points to the plugin directory
+        base_path = os.getenv("PLUGIN_DIR", "/app/plugins")
+
+        print(f"   Loading themes from base path: {base_path}")
+
+        # Load themes using theme manager
+        theme_count = theme_manager.load_plugin_themes(config, base_path)
+
+        if theme_count > 0:
+            print(f"   ✅ Loaded {theme_count} theme(s)")
 
 
 # Example plugin configuration file (plugins.yaml):
