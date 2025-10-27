@@ -32,7 +32,8 @@ class ThemePlugin:
         self.name = name
         self.config = config
         self.base_path = Path(base_path)
-        self.theme_path = self.base_path / config.get("path", "themes/default")
+        theme_path_str = config.get("path", "themes/default")
+        self.theme_path = self.base_path / theme_path_str
         self.enabled = config.get("enabled", True)
 
     def load_theme(self) -> Optional[Theme]:
@@ -43,9 +44,14 @@ class ThemePlugin:
         print(f"🔍 Loading theme from: {self.theme_path}")
         print(f"   Base path: {self.base_path}")
         print(f"   Theme path exists: {self.theme_path.exists()}")
+        print(f"   Theme path is directory: {self.theme_path.is_dir()}")
 
         if not self.theme_path.exists():
             print(f"⚠️ Theme path does not exist: {self.theme_path}")
+            return None
+
+        if not self.theme_path.is_dir():
+            print(f"⚠️ Theme path is not a directory: {self.theme_path}")
             return None
 
         try:
