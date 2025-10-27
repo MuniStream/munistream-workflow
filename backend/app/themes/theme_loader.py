@@ -119,7 +119,6 @@ class ThemePlugin:
         if "metadata" not in config_data:
             config_data["metadata"] = {
                 "name": self.name,
-                "tenant_id": self.tenant_id,
                 "version": "1.0.0"
             }
 
@@ -179,7 +178,7 @@ class ThemePlugin:
                     asset_path = assets_dir / value
                     if asset_path.exists():
                         # Store as relative path for serving
-                        resolved[key] = f"/themes/{self.tenant_id}/{self.name}/assets/{value}"
+                        resolved[key] = f"/themes/{self.name}/assets/{value}"
                     else:
                         resolved[key] = value
                 else:
