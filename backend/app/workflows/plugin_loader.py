@@ -270,6 +270,7 @@ class WorkflowPluginManager:
         self.plugins: List[WorkflowPlugin] = []
         self.config_file = config_file or os.getenv("CIVICSTREAM_PLUGINS_CONFIG", "plugins.yaml")
         self.base_path = os.getenv("CIVICSTREAM_PLUGINS_PATH", "/tmp/civicstream_plugins")
+        self._stored_config = {}
         
     def load_config(self):
         """Load plugin configuration from file"""
@@ -291,8 +292,8 @@ class WorkflowPluginManager:
                 )
                 self.plugins.append(plugin)
 
-        # Load theme plugins
-        self._load_themes(config)
+        # Store config for later theme loading (after repositories are cloned)
+        self._stored_config = config
     
     def discover_and_load_workflows(self) -> int:
         """Discover and load all workflows from configured plugins"""
@@ -339,8 +340,13 @@ class WorkflowPluginManager:
         print(f"Workflow discovery complete")
         print(f"Total workflows loaded: {total_loaded}")
         print(f"Unique workflow IDs: {len(workflow_ids_loaded)}")
+        print(f"{'='*60}")
+
+        # Now that all repositories are cloned, load themes from both local config and plugin repos
+        print(f"\n📦 Loading themes...")
+        self._load_themes(self._stored_config)
         print(f"{'='*60}\n")
-        
+
         return total_loaded
     
     def add_plugin_from_url(self, repo_url: str, name: str) -> bool:
@@ -390,14 +396,36 @@ class WorkflowPluginManager:
         """Load theme configurations from plugin config"""
         # Use PLUGIN_DIR environment variable which points to the plugin directory
         base_path = os.getenv("PLUGIN_DIR", "/app/plugins")
+        total_theme_count = 0
 
         print(f"   Loading themes from base path: {base_path}")
 
-        # Load themes using theme manager
+        # Load themes from local config first
         theme_count = theme_manager.load_plugin_themes(config, base_path)
+        total_theme_count += theme_count
 
-        if theme_count > 0:
-            print(f"   ✅ Loaded {theme_count} theme(s)")
+        # Also load themes from each GitHub repository plugin
+        print(f"   Loading themes from {len(self.plugins)} GitHub repository plugins...")
+        for plugin in self.plugins:
+            if plugin.local_path:
+                plugin_config_path = os.path.join(plugin.local_path, "plugin.yaml")
+                if os.path.exists(plugin_config_path):
+                    try:
+                        import yaml
+                        with open(plugin_config_path, 'r') as f:
+                            plugin_config = yaml.safe_load(f)
+
+                        if plugin_config and "themes" in plugin_config:
+                            print(f"   📦 Loading themes from plugin: {plugin.name}")
+                            plugin_theme_count = theme_manager.load_plugin_themes(plugin_config, plugin.local_path)
+                            total_theme_count += plugin_theme_count
+                            if plugin_theme_count > 0:
+                                print(f"      ✅ Loaded {plugin_theme_count} theme(s) from {plugin.name}")
+                    except Exception as e:
+                        print(f"      ⚠️ Error loading themes from {plugin.name}: {e}")
+
+        if total_theme_count > 0:
+            print(f"   ✅ Total themes loaded: {total_theme_count}")
 
 
 # Example plugin configuration file (plugins.yaml):
