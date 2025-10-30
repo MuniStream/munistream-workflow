@@ -123,6 +123,7 @@ class WorkflowService:
         self,
         status: Optional[str] = None,
         category: Optional[str] = None,
+        workflow_type: Optional[str] = None,
         skip: int = 0,
         limit: int = 20
     ) -> List[WorkflowDefinition]:
@@ -148,6 +149,8 @@ class WorkflowService:
             if status and workflow_def.status != status:
                 continue
             if category and workflow_def.category != category:
+                continue
+            if workflow_type and dag.workflow_type.value != workflow_type:
                 continue
                 
             all_workflows.append(workflow_def)

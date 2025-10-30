@@ -113,8 +113,20 @@ class EntityService:
                 else:
                     # Other field query
                     query[key] = value
-        
-        return await LegalEntity.find(query).skip(skip).limit(limit).to_list()
+
+        print(f"🔍 EntityService.find_entities DEBUG:")
+        print(f"   Query: {query}")
+        print(f"   Owner user ID: {owner_user_id}")
+        print(f"   Entity type: {entity_type}")
+        print(f"   Filters: {filters}")
+
+        results = await LegalEntity.find(query).skip(skip).limit(limit).to_list()
+        print(f"   Found {len(results)} entities")
+        if results:
+            for i, entity in enumerate(results):
+                print(f"   Result {i}: ID={entity.entity_id}, type={entity.entity_type}, owner={entity.owner_user_id}")
+
+        return results
     
     @staticmethod
     async def update_entity(

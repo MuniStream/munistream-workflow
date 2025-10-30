@@ -27,6 +27,107 @@ class AssignmentType(str, Enum):
     REASSIGNED = "reassigned"
 
 
+class WorkflowType(str, Enum):
+    """Type of workflow defining its behavior and execution pattern"""
+    DOCUMENT_PROCESSING = "document_processing"  # Automated document analysis and entity creation
+    PROCESS = "process"                          # User-guided processes with approvals
+    ADMIN = "admin"                             # Event-driven administrative tasks
+    INTEGRATION = "integration"                 # External system synchronization
+    MONITORING = "monitoring"                   # System monitoring and alerting
+    VALIDATION = "validation"                   # Data validation and verification
+
+
+class HookTriggerType(str, Enum):
+    """Type of hook trigger condition"""
+    ALWAYS = "always"                           # Always trigger when event matches
+    CONDITIONAL = "conditional"                 # Trigger based on conditions
+    ENTITY_BASED = "entity_based"              # Trigger based on entity requirements
+    USER_BASED = "user_based"                  # Trigger based on user attributes
+
+
+class EventType(str, Enum):
+    """Type of workflow event"""
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PAUSED = "paused"
+    RESUMED = "resumed"
+    ENTITY_CREATED = "entity_created"
+    APPROVAL_REQUESTED = "approval_requested"
+    APPROVAL_COMPLETED = "approval_completed"
+
+
+class WorkflowHook(Document):
+    """Workflow hook for event-driven workflow triggering"""
+    hook_id: str = Field(..., description="Unique hook identifier")
+    listener_workflow_id: str = Field(..., description="Workflow that will be triggered")
+    event_pattern: str = Field(..., description="Event pattern to listen for (supports wildcards)")
+
+    # Hook configuration
+    trigger_type: HookTriggerType = Field(default=HookTriggerType.ALWAYS, description="Type of trigger condition")
+    priority: int = Field(default=0, description="Execution priority (higher = first)")
+    enabled: bool = Field(default=True, description="Whether this hook is active")
+
+    # Trigger conditions
+    conditions: Dict[str, Any] = Field(default_factory=dict, description="Conditions for triggering")
+    required_entities: List[str] = Field(default_factory=list, description="Required entity types in event")
+    user_filters: Dict[str, Any] = Field(default_factory=dict, description="User-based filters")
+
+    # Context passing
+    pass_event_context: bool = Field(default=True, description="Whether to pass event context to triggered workflow")
+    context_mapping: Dict[str, str] = Field(default_factory=dict, description="Map event context to workflow inputs")
+
+    # Metadata
+    name: Optional[str] = Field(None, description="Human-readable hook name")
+    description: Optional[str] = Field(None, description="Hook description")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[str] = Field(None, description="User who created this hook")
+
+    class Settings:
+        name = "workflow_hooks"
+        indexes = [
+            IndexModel([("hook_id", 1)], unique=True),
+            IndexModel([("listener_workflow_id", 1)]),
+            IndexModel([("event_pattern", 1)]),
+            IndexModel([("enabled", 1)]),
+            IndexModel([("priority", -1)]),  # Descending for priority ordering
+            IndexModel([("event_pattern", 1), ("enabled", 1)]),
+        ]
+
+
+class WorkflowEvent(Document):
+    """Workflow execution event"""
+    event_id: str = Field(..., description="Unique event identifier")
+    workflow_id: str = Field(..., description="Workflow that generated the event")
+    instance_id: Optional[str] = Field(None, description="Instance that generated the event")
+    event_type: EventType = Field(..., description="Type of event")
+
+    # Event data
+    event_data: Dict[str, Any] = Field(default_factory=dict, description="Event-specific data")
+    user_id: Optional[str] = Field(None, description="User associated with the event")
+
+    # Triggered workflows
+    triggered_admin_workflows: List[str] = Field(default_factory=list, description="Admin workflows triggered by this event")
+
+    # Context
+    context: Dict[str, Any] = Field(default_factory=dict, description="Event context data")
+
+    # Timing
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    processed_at: Optional[datetime] = Field(None, description="When event was processed")
+
+    class Settings:
+        name = "workflow_events"
+        indexes = [
+            IndexModel([("workflow_id", 1)]),
+            IndexModel([("instance_id", 1)]),
+            IndexModel([("event_type", 1)]),
+            IndexModel([("timestamp", -1)]),
+            IndexModel([("workflow_id", 1), ("event_type", 1)]),
+        ]
+
+
 class WorkflowStep(Document):
     """Individual step definition within a workflow"""
     step_id: str = Field(..., description="Unique identifier for the step")
@@ -68,7 +169,18 @@ class WorkflowDefinition(Document):
     version: str = Field(default="1.0.0", description="Workflow version")
     status: str = Field(default="draft", description="Workflow status")
     start_step_id: Optional[str] = Field(None, description="ID of the starting step")
-    
+
+    # Workflow type and behavior
+    workflow_type: WorkflowType = Field(default=WorkflowType.PROCESS, description="Type of workflow")
+    entity_outputs: List[str] = Field(default_factory=list, description="Types of entities this workflow produces")
+    emit_events: bool = Field(default=True, description="Whether this workflow emits events")
+    listens_to_events: bool = Field(default=False, description="Whether this workflow can be triggered by events")
+
+    # Execution configuration
+    max_parallel_instances: int = Field(default=1, description="Maximum parallel instances per user")
+    timeout_hours: Optional[int] = Field(None, description="Workflow timeout in hours")
+    retry_on_failure: bool = Field(default=False, description="Whether to retry failed workflows")
+
     # Metadata
     category: Optional[str] = Field(None, description="Workflow category")
     tags: List[str] = Field(default_factory=list, description="Workflow tags")
@@ -93,7 +205,9 @@ class WorkflowDefinition(Document):
             IndexModel([("status", 1)]),
             IndexModel([("category", 1)]),
             IndexModel([("tags", 1)]),
+            IndexModel([("workflow_type", 1)]),
             IndexModel([("created_at", -1)]),
+            IndexModel([("workflow_type", 1), ("status", 1)]),
         ]
 
 
