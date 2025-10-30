@@ -201,75 +201,107 @@ class EntityValidationOperator(BaseOperator):
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Validate the entity"""
-        try:
-            # Get entity ID from context
-            entity_id = context.get(self.entity_id_field)
-            if not entity_id:
-                return TaskResult(
-                    status="failed",
-                    error=f"No entity ID found in context field '{self.entity_id_field}'"
-                )
-            
-            # Get user ID
-            user_id = context.get("user_id")
-            if not user_id:
-                return TaskResult(
-                    status="failed",
-                    error="No user_id in context"
-                )
-            
-            # Fetch and validate entity
-            import asyncio
-            
-            async def validate():
-                entity = await EntityService.get_entity(entity_id, user_id)
-                if not entity:
-                    return False, "Entity not found or not owned by user"
-                
-                # Check verification if required
-                if self.require_verified and not entity.verified:
-                    return False, "Entity is not verified"
-                
-                # Check required fields in data
-                for field in self.require_fields:
-                    if field not in entity.data or entity.data[field] is None:
-                        return False, f"Entity missing required field: {field}"
-                
-                # Check required relationships
-                for rel_type in self.require_relationships:
-                    rels = entity.get_relationships(rel_type)
-                    if not rels:
-                        return False, f"Entity missing required relationship: {rel_type}"
-                
-                return True, None
-            
-            # Run async operation
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            is_valid, error = loop.run_until_complete(validate())
-            
-            if is_valid:
-                return TaskResult(
-                    status="continue",
-                    data={
-                        f"{self.task_id}_validated": True,
-                        f"{self.task_id}_entity_id": entity_id
-                    }
-                )
-            else:
-                return TaskResult(
-                    status="failed",
-                    error=error or "Entity validation failed"
-                )
-            
-        except Exception as e:
+        # Get entity ID from context
+        entity_id = context.get(self.entity_id_field)
+        if not entity_id:
             return TaskResult(
                 status="failed",
-                error=f"Validation error: {str(e)}"
+                error=f"No entity ID found in context field '{self.entity_id_field}'"
+            )
+
+        # Get user ID
+        user_id = context.get("user_id")
+        if not user_id:
+            return TaskResult(
+                status="failed",
+                error="No user_id in context"
+            )
+
+        # Store parameters for async execution
+        self._validation_params = {
+            "entity_id": entity_id,
+            "user_id": user_id,
+            "require_verified": self.require_verified,
+            "require_fields": self.require_fields,
+            "require_relationships": self.require_relationships
+        }
+
+        # Return pending_async status - will be handled by execute_async
+        return TaskResult(
+            status="pending_async",
+            data={}
+        )
+
+    async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
+        """Async execution method for entity validation"""
+        try:
+            # First run the regular execute to prepare parameters
+            result = self.execute(context)
+
+            # If we have validation params, do the async operation
+            if hasattr(self, '_validation_params') and self._validation_params:
+                params = self._validation_params
+
+                entity = await EntityService.get_entity(params["entity_id"], params["user_id"])
+                if not entity:
+                    error_msg = "Entity not found or not owned by user"
+                    self.state.error_message = error_msg
+                    return TaskResult(
+                        status="failed",
+                        error=error_msg
+                    )
+
+                # Check verification if required
+                if params["require_verified"] and not entity.verified:
+                    error_msg = "Entity is not verified"
+                    self.state.error_message = error_msg
+                    return TaskResult(
+                        status="failed",
+                        error=error_msg
+                    )
+
+                # Check required fields in data
+                for field in params["require_fields"]:
+                    if field not in entity.data or entity.data[field] is None:
+                        error_msg = f"Entity missing required field: {field}"
+                        self.state.error_message = error_msg
+                        return TaskResult(
+                            status="failed",
+                            error=error_msg
+                        )
+
+                # Check required relationships
+                for rel_type in params["require_relationships"]:
+                    rels = entity.get_relationships(rel_type)
+                    if not rels:
+                        error_msg = f"Entity missing required relationship: {rel_type}"
+                        self.state.error_message = error_msg
+                        return TaskResult(
+                            status="failed",
+                            error=error_msg
+                        )
+
+                # All validations passed
+                output_data = {
+                    f"{self.task_id}_validated": True,
+                    f"{self.task_id}_entity_id": params["entity_id"]
+                }
+                self.state.output_data = output_data
+
+                return TaskResult(
+                    status="continue",
+                    data=output_data
+                )
+
+            # If regular execute didn't need async, return its result
+            return result
+
+        except Exception as e:
+            error_msg = f"Validation error: {str(e)}"
+            self.state.error_message = error_msg
+            return TaskResult(
+                status="failed",
+                error=error_msg
             )
 
 
@@ -306,58 +338,120 @@ class EntityRequirementOperator(BaseOperator):
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Check for required entities"""
+        user_id = context.get("user_id")
+        print(f"🔍 EntityRequirementOperator DEBUG:")
+        print(f"   Task ID: {self.task_id}")
+        print(f"   Entity type: {self.entity_type}")
+        print(f"   Filters: {self.filters}")
+        print(f"   Context user_id: {user_id}")
+        print(f"   Context keys: {list(context.keys())}")
+
+        if not user_id:
+            return TaskResult(
+                status="failed",
+                error="No user_id in context"
+            )
+
+        # Store parameters for async execution
+        self._check_params = {
+            "user_id": user_id,
+            "entity_type": self.entity_type,
+            "filters": self.filters,
+            "min_count": self.min_count,
+            "store_as": self.store_as
+        }
+
+        # Return pending_async status - will be handled by execute_async
+        return TaskResult(
+            status="pending_async",
+            data={}
+        )
+
+    async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
+        """Async execution method for entity requirement checking"""
         try:
-            user_id = context.get("user_id")
-            if not user_id:
-                return TaskResult(
-                    status="failed",
-                    error="No user_id in context"
-                )
-            
-            # Check for entities
-            import asyncio
-            
-            async def check_entities():
+            # First run the regular execute to prepare parameters
+            result = self.execute(context)
+
+            # If we have check params, do the async operation
+            if hasattr(self, '_check_params') and self._check_params:
+                params = self._check_params
+
+                print(f"🔍 EntityRequirementOperator ASYNC DEBUG:")
+                print(f"   Checking entities for user: {params['user_id']}")
+                print(f"   Entity type: {params['entity_type']}")
+                print(f"   Filters: {params['filters']}")
+
                 # Find user's entities of this type
                 entities = await EntityService.find_entities(
-                    owner_user_id=user_id,
-                    entity_type=self.entity_type,
-                    filters=self.filters
+                    owner_user_id=params["user_id"],
+                    entity_type=params["entity_type"],
+                    filters=params["filters"]
                 )
-                
-                return entities
-            
-            # Run async operation
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            entities = loop.run_until_complete(check_entities())
-            
-            if len(entities) >= self.min_count:
-                # Requirements met - store entity IDs in context
-                entity_ids = [e.entity_id for e in entities]
-                return TaskResult(
-                    status="continue",
-                    data={
-                        self.store_as: entity_ids,
+
+                print(f"   Found {len(entities)} entities")
+                if entities:
+                    for entity in entities:
+                        print(f"   - {entity.entity_id}: {entity.name}")
+
+                if len(entities) >= params["min_count"]:
+                    # Requirements met - store entity IDs in context
+                    entity_ids = [e.entity_id for e in entities]
+
+                    # Log success
+                    await self.log_info(
+                        f"Found {len(entities)} required {params['entity_type']} entities",
+                        details={
+                            "entity_ids": entity_ids,
+                            "filters": params["filters"]
+                        }
+                    )
+
+                    output_data = {
+                        params["store_as"]: entity_ids,
                         f"{self.task_id}_count": len(entity_ids),
                         f"{self.task_id}_first": entity_ids[0] if entity_ids else None
                     }
-                )
-            else:
-                # Not enough entities
-                return TaskResult(
-                    status="failed",
-                    error=f"Requires at least {self.min_count} {self.entity_type} entities, found {len(entities)}"
-                )
-            
+                    self.state.output_data = output_data
+
+                    return TaskResult(
+                        status="continue",
+                        data=output_data
+                    )
+                else:
+                    # Not enough entities
+                    error_msg = f"Requires at least {params['min_count']} {params['entity_type']} entities, found {len(entities)}"
+
+                    # Log error
+                    await self.log_error(
+                        f"Entity requirement not met for {params['entity_type']}",
+                        error=error_msg,
+                        details=params
+                    )
+
+                    self.state.error_message = error_msg
+                    return TaskResult(
+                        status="failed",
+                        error=error_msg
+                    )
+
+            # If regular execute didn't need async, return its result
+            return result
+
         except Exception as e:
+            error_msg = f"Entity requirement check failed: {str(e)}"
+
+            # Log error
+            await self.log_error(
+                "Entity requirement check failed",
+                error=e,
+                details=getattr(self, '_check_params', {})
+            )
+
+            self.state.error_message = error_msg
             return TaskResult(
                 status="failed",
-                error=f"Entity requirement check failed: {str(e)}"
+                error=error_msg
             )
 
 
