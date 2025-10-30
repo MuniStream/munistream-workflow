@@ -9,6 +9,7 @@ import networkx as nx
 import uuid
 
 from .operators.base import BaseOperator
+from ..models.workflow import WorkflowType
 
 
 class DAGStatus(str, Enum):
@@ -45,6 +46,15 @@ class DAG:
         start_date: Optional[datetime] = None,
         default_args: Optional[Dict[str, Any]] = None,
         tags: Optional[List[str]] = None,
+        workflow_type: WorkflowType = WorkflowType.PROCESS,
+        entity_outputs: Optional[List[str]] = None,
+        emit_events: bool = True,
+        listens_to_events: bool = False,
+        max_parallel_instances: int = 1,
+        timeout_hours: Optional[int] = None,
+        retry_on_failure: bool = False,
+        name_translations: Optional[Dict[str, str]] = None,
+        description_translations: Optional[Dict[str, str]] = None,
         **kwargs
     ):
         """
@@ -70,6 +80,21 @@ class DAG:
         self.default_args = default_args or {}
         self.tags = tags or []
         self.metadata = kwargs
+
+        # Workflow type and behavior
+        self.workflow_type = workflow_type
+        self.entity_outputs = entity_outputs or []
+        self.emit_events = emit_events
+        self.listens_to_events = listens_to_events
+
+        # Execution configuration
+        self.max_parallel_instances = max_parallel_instances
+        self.timeout_hours = timeout_hours
+        self.retry_on_failure = retry_on_failure
+
+        # Internationalization
+        self.name_translations = name_translations or {}
+        self.description_translations = description_translations or {}
         
         # DAG structure (template)
         self.tasks: Dict[str, BaseOperator] = {}

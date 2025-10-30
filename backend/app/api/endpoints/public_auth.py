@@ -256,6 +256,7 @@ async def start_citizen_workflow(
     initial_context["customer_id"] = str(current_customer.id)
     initial_context["customer_email"] = current_customer.email
     initial_context["customer_name"] = current_customer.full_name
+    initial_context["user_id"] = str(current_customer.id)  # Add user_id for EntityRequirementOperator
     
     try:
         # Create DAG instance with customer as user

@@ -46,7 +46,8 @@ def load_cors_origins() -> List[str]:
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json"
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    redirect_slashes=False
 )
 
 # Set up CORS with defaults and optional environment overrides

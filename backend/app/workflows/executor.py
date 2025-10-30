@@ -10,7 +10,8 @@ from enum import Enum
 
 from .dag import InstanceStatus
 from ..models.instance_log import InstanceLog, LogLevel, LogType
-from ..models.workflow import WorkflowInstance
+from ..models.workflow import WorkflowInstance, EventType
+from .event_manager import WorkflowEventManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,15 @@ class DAGExecutor:
     def __init__(self, workflow_service=None):
         """
         Initialize executor.
-        
+
         Args:
             workflow_service: Reference to workflow service for database access
         """
         self.workflow_service = workflow_service
+        # Initialize event manager with hook engine that references this workflow service
+        from .hook_engine import WorkflowHookEngine
+        hook_engine = WorkflowHookEngine(workflow_service=workflow_service)
+        self.event_manager = WorkflowEventManager(hook_engine=hook_engine)
         self.status = ExecutorStatus.IDLE
         self.execution_queue: list[str] = []  # Queue of instance IDs to process
         self._execution_task: Optional[asyncio.Task] = None
@@ -160,6 +165,20 @@ class DAGExecutor:
             message=f"Starting execution cycle",
             details={"status": dag_instance.status.value if hasattr(dag_instance.status, 'value') else str(dag_instance.status)}
         )
+
+        # Publish workflow started event if this is the first execution
+        if not dag_instance.started_at:
+            dag_instance.started_at = datetime.utcnow()
+            try:
+                await self.event_manager.publish_workflow_started(
+                    workflow_id=dag_instance.dag.dag_id,
+                    instance_id=instance_id,
+                    user_id=dag_instance.user_id,
+                    initial_context=dag_instance.context
+                )
+            except Exception as e:
+                # Log error but don't fail workflow execution due to event publishing issues
+                logger.warning(f"Failed to publish workflow started event for {instance_id}: {str(e)}")
         
         # Process executable tasks
         executable_tasks = dag_instance.get_executable_tasks()
@@ -267,12 +286,44 @@ class DAGExecutor:
                 dag_instance.update_task_status(task_id, "completed")
         
         # Determine instance status based on task states
+        old_instance_status = dag_instance.status
         if dag_instance.is_completed():
             dag_instance.status = InstanceStatus.COMPLETED
             dag_instance.completed_at = datetime.utcnow()
+
+            # Publish workflow completed event
+            if old_instance_status != InstanceStatus.COMPLETED:
+                try:
+                    await self.event_manager.publish_workflow_completed(
+                        workflow_id=dag_instance.dag.dag_id,
+                        instance_id=instance_id,
+                        user_id=dag_instance.user_id,
+                        final_context=dag_instance.context
+                    )
+                except Exception as e:
+                    # Log error but don't fail workflow completion due to event publishing issues
+                    logger.warning(f"Failed to publish workflow completed event for {instance_id}: {str(e)}")
+
         elif dag_instance.has_failed():
             dag_instance.status = InstanceStatus.FAILED
             dag_instance.completed_at = datetime.utcnow()
+
+            # Publish workflow failed event
+            if old_instance_status != InstanceStatus.FAILED:
+                failed_task = next(iter(dag_instance.failed_tasks), None)
+                try:
+                    await self.event_manager.publish_workflow_failed(
+                        workflow_id=dag_instance.dag.dag_id,
+                        instance_id=instance_id,
+                        user_id=dag_instance.user_id,
+                        error_message="Workflow failed during execution",
+                        failed_step=failed_task,
+                        context=dag_instance.context
+                    )
+                except Exception as e:
+                    # Log error but don't fail workflow processing due to event publishing issues
+                    logger.warning(f"Failed to publish workflow failed event for {instance_id}: {str(e)}")
+
         elif self._has_waiting_tasks(dag_instance):
             dag_instance.status = InstanceStatus.PAUSED
         else:

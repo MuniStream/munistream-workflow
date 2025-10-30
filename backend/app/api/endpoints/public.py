@@ -125,20 +125,51 @@ async def start_workflow(request: Dict[str, Any]):
 
 
 @router.get("/workflows")
-async def list_public_workflows():
+async def list_public_workflows(
+    workflow_type: str = Query("process", description="Filter by workflow type (process, document_processing, admin, etc.)")
+):
     """
     List available workflows for public use.
+    Defaults to showing only PROCESS type workflows (user-facing processes).
     No authentication required - citizens can browse available services.
     """
-    workflows = await workflow_service.list_workflow_definitions(status="active", limit=100)
-    
+    workflows = await workflow_service.list_workflow_definitions(
+        status="active",
+        workflow_type=workflow_type,
+        limit=100
+    )
+
     result = []
     for w in workflows:
         dag = workflow_service.dag_bag.get_dag(w.workflow_id)
         workflow_data = await _get_workflow_data(w, dag, "es")
         result.append(workflow_data)
-    
+
     return {"workflows": result}
+
+
+@router.get("/workflows/documents")
+async def list_document_processing_workflows(
+    locale: str = Query("es", description="Language locale (es/en)")
+):
+    """
+    List available document processing workflows.
+    These are workflows that citizens use to upload and process documents.
+    No authentication required - citizens can browse available document services.
+    """
+    workflows = await workflow_service.list_workflow_definitions(
+        status="active",
+        workflow_type="document_processing",
+        limit=100
+    )
+
+    result = []
+    for w in workflows:
+        dag = workflow_service.dag_bag.get_dag(w.workflow_id)
+        workflow_data = await _get_workflow_data(w, dag, locale)
+        result.append(workflow_data)
+
+    return {"documents": result}
 
 
 @router.get("/workflows/featured")
