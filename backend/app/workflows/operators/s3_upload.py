@@ -83,7 +83,8 @@ class S3UploadOperator(BaseOperator):
 
         # S3 client will be initialized during execution
         self.s3_client = None
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        # Executor will be created during execution to avoid reuse issues
+        self.executor = None
 
     def _init_s3_client(self) -> boto3.client:
         """Initialize S3 client with credentials from environment variables"""
@@ -402,6 +403,9 @@ class S3UploadOperator(BaseOperator):
             # Initialize S3 client
             self.s3_client = self._init_s3_client()
 
+            # Create a new executor for this execution
+            self.executor = ThreadPoolExecutor(max_workers=5)
+
             # Get files from context - support nested keys for task output data
             files_data = self._get_files_from_context(context, self.file_source)
             if not isinstance(files_data, list):
@@ -482,5 +486,9 @@ class S3UploadOperator(BaseOperator):
 
         finally:
             # Cleanup
-            if hasattr(self, 'executor'):
-                self.executor.shutdown(wait=False)
+            if hasattr(self, 'executor') and self.executor:
+                try:
+                    self.executor.shutdown(wait=False)
+                    self.executor = None
+                except Exception:
+                    pass  # Executor may already be shutdown
