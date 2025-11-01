@@ -201,7 +201,17 @@ class DAGExecutor:
             task = dag_instance.dag.tasks.get(task_id)
             if not task:
                 continue
-            
+
+            # Check if this task has a retry delay that hasn't expired yet
+            if hasattr(task, '_retry_after') and task._retry_after:
+                if datetime.utcnow() < task._retry_after:
+                    time_remaining = (task._retry_after - datetime.utcnow()).total_seconds()
+                    print(f"⏱️ Task {task_id} waiting {time_remaining:.1f}s before retry")
+                    continue  # Skip this task for now
+                else:
+                    # Clear the retry timestamp, we can proceed
+                    task._retry_after = None
+
             # Execute task with current context
             dag_instance.update_task_status(task_id, "executing")
             
@@ -226,6 +236,8 @@ class DAGExecutor:
                 if hasattr(task, 'execute_async'):
                     # Task can handle async operations
                     task_result = await task.execute_async(dag_instance.context)
+                    # Store the result on the task for retry delay access
+                    task._last_result = task_result
                     # Extract status string and update task's output data
                     result = task_result.status
                     if task_result.data:
@@ -233,6 +245,7 @@ class DAGExecutor:
                 else:
                     # Regular synchronous execution
                     result = task.run(dag_instance.context)
+                    # Note: for sync tasks, _last_result is already set in the run() method
 
                 print(f"📊 Task {task_id} returned: {result}")
                 
@@ -282,6 +295,25 @@ class DAGExecutor:
             elif result == "failed":
                 dag_instance.update_task_status(task_id, "failed")
                 break  # Stop processing, task failed
+            elif result == "retry":
+                # Don't mark as completed, keep it ready for retry
+                print(f"🔁 Task {task_id} requesting retry - keeping as pending")
+                dag_instance.update_task_status(task_id, "pending")
+                # Clear from completed tasks if it was there
+                if task_id in dag_instance.completed_tasks:
+                    dag_instance.completed_tasks.remove(task_id)
+
+                # Get retry delay from task result if available
+                retry_delay = 5  # Default delay (seconds)
+                if hasattr(task, '_last_result') and task._last_result:
+                    if hasattr(task._last_result, 'retry_delay') and task._last_result.retry_delay:
+                        retry_delay = task._last_result.retry_delay
+
+                # Set the retry timestamp on the task
+                from datetime import timedelta
+                task._retry_after = datetime.utcnow() + timedelta(seconds=retry_delay)
+                print(f"⏱️ Task {task_id} will retry after {retry_delay} seconds")
+                # Don't break - instance will continue to be re-queued and checked
             else:
                 dag_instance.update_task_status(task_id, "completed")
         

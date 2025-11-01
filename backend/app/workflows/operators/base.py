@@ -84,6 +84,7 @@ class TaskResult(BaseModel):
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     next_task: Optional[str] = None  # For branching operations
+    retry_delay: Optional[int] = None  # Seconds to wait before retry
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -150,7 +151,10 @@ class BaseOperator(ABC):
             
             # Execute the operator
             result = self.execute(context)
-            
+
+            # Store the result for potential access by executor
+            self._last_result = result
+
             # Update state based on result
             if result.status == "continue":
                 self.state.status = TaskStatus.CONTINUE

@@ -310,7 +310,7 @@ class EntityRequirementOperator(BaseOperator):
     Operator that checks if user has required entities before proceeding.
     Completely agnostic - just checks for entity types and optional filters.
     """
-    
+
     def __init__(
         self,
         task_id: str,
@@ -318,23 +318,28 @@ class EntityRequirementOperator(BaseOperator):
         min_count: int = 1,
         filters: Optional[Dict[str, Any]] = None,  # Optional filters on entity data
         store_as: Optional[str] = None,  # Store found entity IDs in context with this key
+        on_missing: str = "failed",  # What to return when requirements not met: "failed" or "retry"
+        retry_delay: int = 5,  # Seconds to wait before retry (default 5 seconds)
         **kwargs
     ):
         """
         Initialize entity requirement operator.
-        
+
         Args:
             task_id: Unique task identifier
             entity_type: Type of entity required (e.g., "person", "property")
             min_count: Minimum number of entities required
             filters: Optional filters to apply to entity data
             store_as: Key to store found entity IDs in context
+            on_missing: What to return when requirements not met: "failed" or "retry"
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
         self.min_count = min_count
         self.filters = filters or {}
         self.store_as = store_as or f"{task_id}_entities"
+        self.on_missing = on_missing
+        self.retry_delay = retry_delay
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Check for required entities"""
@@ -422,17 +427,24 @@ class EntityRequirementOperator(BaseOperator):
                     # Not enough entities
                     error_msg = f"Requires at least {params['min_count']} {params['entity_type']} entities, found {len(entities)}"
 
-                    # Log error
-                    await self.log_error(
-                        f"Entity requirement not met for {params['entity_type']}",
-                        error=error_msg,
-                        details=params
-                    )
+                    # Log warning or error based on on_missing setting
+                    if self.on_missing == "retry":
+                        await self.log_warning(
+                            f"Entity requirement not met for {params['entity_type']}, will retry",
+                            details={**params, "found": len(entities)}
+                        )
+                    else:
+                        await self.log_error(
+                            f"Entity requirement not met for {params['entity_type']}",
+                            error=error_msg,
+                            details=params
+                        )
 
                     self.state.error_message = error_msg
                     return TaskResult(
-                        status="failed",
-                        error=error_msg
+                        status=self.on_missing,  # Will be "failed" or "retry"
+                        error=error_msg,
+                        retry_delay=self.retry_delay if self.on_missing == "retry" else None
                     )
 
             # If regular execute didn't need async, return its result
@@ -559,5 +571,199 @@ class EntityRelationshipOperator(BaseOperator):
             except Exception as e:
                 self.state.error_message = str(e)
                 return "failed"
-        
+
         return result.status
+
+
+class MultiEntityRequirementOperator(BaseOperator):
+    """
+    Operator that checks if user has multiple types of required entities.
+    Validates all entity requirements simultaneously before proceeding.
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        requirements: List[Dict[str, Any]],  # List of entity requirements
+        on_missing: str = "failed",  # What to return when ANY requirement is not met
+        retry_delay: int = 5,  # Seconds to wait before retry (default 5 seconds)
+        **kwargs
+    ):
+        """
+        Initialize multi-entity requirement operator.
+
+        Args:
+            task_id: Unique task identifier
+            requirements: List of entity requirements, each containing:
+                - entity_type: Type of entity required
+                - min_count: Minimum number required (default 1)
+                - filters: Optional filters to apply
+                - store_as: Key to store found entity IDs
+            on_missing: What to return when requirements not met: "failed" or "retry"
+
+        Example:
+            requirements=[
+                {"entity_type": "person", "min_count": 1, "store_as": "person_ids"},
+                {"entity_type": "property", "min_count": 2, "filters": {"verified": True}}
+            ]
+        """
+        super().__init__(task_id, **kwargs)
+        self.requirements = requirements
+        self.on_missing = on_missing
+        self.retry_delay = retry_delay
+
+    def execute(self, context: Dict[str, Any]) -> TaskResult:
+        """Check for all required entities"""
+        user_id = context.get("user_id")
+
+        if not user_id:
+            return TaskResult(
+                status="failed",
+                error="No user_id in context"
+            )
+
+        # Store parameters for async execution
+        self._check_params = {
+            "user_id": user_id,
+            "requirements": self.requirements,
+            "on_missing": self.on_missing
+        }
+
+        return TaskResult(
+            status="pending_async",
+            data={}
+        )
+
+    async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
+        """Async execution method for multi-entity requirement checking"""
+        try:
+            # First run the regular execute to prepare parameters
+            result = self.execute(context)
+
+            if hasattr(self, '_check_params') and self._check_params:
+                params = self._check_params
+
+                # Track results for all requirements
+                all_met = True
+                missing_requirements = []
+                output_data = {}
+
+                # Check each requirement
+                for req in params["requirements"]:
+                    entity_type = req["entity_type"]
+                    min_count = req.get("min_count", 1)
+                    filters = req.get("filters", {})
+                    store_as = req.get("store_as", f"{entity_type}_entities")
+
+                    # Log checking requirement
+                    await self.log_info(
+                        f"Checking requirement for {entity_type}",
+                        details={
+                            "entity_type": entity_type,
+                            "min_count": min_count,
+                            "filters": filters
+                        }
+                    )
+
+                    # Find entities matching this requirement
+                    entities = await EntityService.find_entities(
+                        owner_user_id=params["user_id"],
+                        entity_type=entity_type,
+                        filters=filters
+                    )
+
+                    entity_ids = [e.entity_id for e in entities]
+
+                    # Store results for this entity type
+                    output_data[store_as] = entity_ids
+                    output_data[f"{entity_type}_count"] = len(entity_ids)
+                    if entity_ids:
+                        output_data[f"{entity_type}_first"] = entity_ids[0]
+
+                    # Check if requirement is met
+                    if len(entities) < min_count:
+                        all_met = False
+                        missing_requirements.append({
+                            "entity_type": entity_type,
+                            "required": min_count,
+                            "found": len(entities),
+                            "filters": filters
+                        })
+
+                        await self.log_warning(
+                            f"Requirement not met for {entity_type}",
+                            details={
+                                "required": min_count,
+                                "found": len(entities),
+                                "filters": filters
+                            }
+                        )
+                    else:
+                        await self.log_info(
+                            f"Requirement met for {entity_type}",
+                            details={
+                                "found": len(entities),
+                                "entity_ids": entity_ids[:5]  # Show first 5 IDs
+                            }
+                        )
+
+                # Store output data even if not all requirements met
+                # This allows workflows to see partial results
+                self.state.output_data = output_data
+
+                if all_met:
+                    # All requirements satisfied
+                    await self.log_info(
+                        f"All {len(params['requirements'])} entity requirements met",
+                        details={"entity_counts": {
+                            req["entity_type"]: output_data.get(f"{req['entity_type']}_count", 0)
+                            for req in params["requirements"]
+                        }}
+                    )
+
+                    return TaskResult(
+                        status="continue",
+                        data=output_data
+                    )
+                else:
+                    # Some requirements not met
+                    error_msg = f"Missing entity requirements: {', '.join([r['entity_type'] for r in missing_requirements])}"
+
+                    # Log based on on_missing setting
+                    if params["on_missing"] == "retry":
+                        await self.log_warning(
+                            f"Not all entity requirements met, will retry",
+                            details={"missing": missing_requirements}
+                        )
+                    else:
+                        await self.log_error(
+                            f"Entity requirements not satisfied",
+                            error=error_msg,
+                            details={"missing": missing_requirements}
+                        )
+
+                    self.state.error_message = error_msg
+                    return TaskResult(
+                        status=params["on_missing"],  # Will be "failed" or "retry"
+                        error=error_msg,
+                        data=output_data,  # Include partial results
+                        retry_delay=self.retry_delay if params["on_missing"] == "retry" else None
+                    )
+
+            # If regular execute didn't need async, return its result
+            return result
+
+        except Exception as e:
+            error_msg = f"Multi-entity requirement check failed: {str(e)}"
+
+            await self.log_error(
+                "Multi-entity requirement check failed",
+                error=e,
+                details=getattr(self, '_check_params', {})
+            )
+
+            self.state.error_message = error_msg
+            return TaskResult(
+                status="failed",
+                error=error_msg
+            )
