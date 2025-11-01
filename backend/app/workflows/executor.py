@@ -51,13 +51,45 @@ class DAGExecutor:
         if self.status == ExecutorStatus.RUNNING:
             print("⚠️ Executor already running")
             return
-        
+
         self.status = ExecutorStatus.RUNNING
         self._should_stop = False
+
+        # Load incomplete instances from database
+        resumed_count = await self.load_incomplete_instances()
+        if resumed_count > 0:
+            print(f"📥 Loaded {resumed_count} incomplete instances for processing")
+            logger.info(f"Loaded {resumed_count} incomplete instances for processing")
+
         self._execution_task = asyncio.create_task(self._execution_loop())
         print("✅ DAG Executor started - background loop running")
         logger.info("DAG Executor started")
     
+    async def load_incomplete_instances(self):
+        """Load incomplete instances from database and queue them for processing"""
+        from ..models.workflow import WorkflowInstance
+        from beanie.operators import In
+
+        try:
+            # Find all instances that are not completed, failed, or cancelled
+            incomplete_instances = await WorkflowInstance.find(
+                In(WorkflowInstance.status, ["pending", "running", "paused"])
+            ).to_list()
+
+            queued_count = 0
+            for instance in incomplete_instances:
+                if instance.instance_id not in self.execution_queue:
+                    self.execution_queue.append(instance.instance_id)
+                    queued_count += 1
+                    print(f"  📌 Queued instance {instance.instance_id} (status: {instance.status})")
+
+            return queued_count
+
+        except Exception as e:
+            logger.error(f"Error loading incomplete instances: {e}")
+            print(f"❌ Error loading incomplete instances: {e}")
+            return 0
+
     async def stop(self):
         """Stop the executor"""
         self._should_stop = True
