@@ -1,0 +1,88 @@
+# Archivos de configuración con datos sensibles
+.env
+*.env
+!.env.example
+
+# Reportes (pueden contener información sensible)
+reports/
+*.json
+*.html
+*.txt
+*.log
+*.xml
+
+# Repositorios clonados temporalmente
+temp_repos/
+cloned_repos/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+output.log
+
+# Credenciales y secretos
+*.key
+*.pem
+*.crt
+*.p12
+credentials.json
+secrets.yaml
+
+# Cache
+.cache/
+*.cache
+.semgrep_cache/
+trivy-cache/
+
+# Backups
+*.bak
+*.backup
+*.old
+
+# Temporal
+tmp/
+temp/
+*.tmp
+
+# Resultados de herramientas específicas
+.semgrep/
+.trivy/
+zap/
+nikto/
+
+# Sistema operativo
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Archivos comprimidos (pueden contener reportes)
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z

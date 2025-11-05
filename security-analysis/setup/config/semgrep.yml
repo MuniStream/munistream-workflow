@@ -1,0 +1,67 @@
+# Configuración personalizada de Semgrep para PEMC 2025
+# PAW AI S.A.S. DE C.V.
+
+rules:
+  # Regla custom: Detectar secretos hardcodeados
+  - id: hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $VAR = "..."
+          - pattern: |
+              const $VAR = "..."
+          - pattern: |
+              let $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: .*(password|secret|key|token|api_key|apikey|access_key|private_key).*
+      - pattern-not: $VAR = ""
+      - pattern-not: $VAR = "TODO"
+      - pattern-not: $VAR = "CHANGEME"
+    message: Posible secreto hardcodeado. Usa variables de entorno o gestores de secretos.
+    languages: [javascript, typescript, python, java]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  # Regla custom: SQL Injection
+  - id: sql-injection-risk
+    patterns:
+      - pattern-either:
+          - pattern: |
+              db.query($SQL + ...)
+          - pattern: |
+              db.execute(`...${$VAR}...`)
+          - pattern: |
+              connection.query("..." + $VAR + "...")
+    message: Posible SQL Injection. Usa prepared statements o ORMs.
+    languages: [javascript, typescript]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-89: SQL Injection"
+
+  # Regla custom: Uso de eval() inseguro
+  - id: dangerous-eval
+    pattern: eval(...)
+    message: Uso de eval() es peligroso. Evítalo siempre que sea posible.
+    languages: [javascript, typescript]
+    severity: WARNING
+    metadata:
+      category: security
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  # Regla custom: Validación de JWT débil
+  - id: weak-jwt-validation
+    patterns:
+      - pattern: jwt.verify($TOKEN, ..., {verify: false})
+    message: Validación de JWT deshabilitada. Siempre verifica la firma del token.
+    languages: [javascript, typescript]
+    severity: ERROR
+    metadata:
+      category: security
+      owasp: "A07:2021 - Identification and Authentication Failures"

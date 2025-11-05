@@ -1,0 +1,105 @@
+# Configuración de Trivy para PEMC 2025
+# PAW AI S.A.S. DE C.V.
+
+# Tipos de vulnerabilidades a escanear
+scan:
+  security-checks:
+    - vuln        # Vulnerabilidades conocidas (CVEs)
+    - config      # Misconfigurations
+    - secret      # Secretos expuestos
+
+# Severidades a reportar
+severity:
+  - CRITICAL
+  - HIGH
+  - MEDIUM
+  - LOW
+
+# Formatos de salida
+format: json
+
+# Ignorar archivos y directorios
+skip-dirs:
+  - node_modules
+  - dist
+  - build
+  - .git
+  - .cache
+  - coverage
+  - test
+  - tests
+  - __tests__
+  - .next
+  - out
+
+skip-files:
+  - "*.test.js"
+  - "*.test.ts"
+  - "*.spec.js"
+  - "*.spec.ts"
+  - "*.test.jsx"
+  - "*.test.tsx"
+
+# Configuración de cache
+cache:
+  backend: fs
+  ttl: 24h
+
+# Timeouts
+timeout: 10m
+
+# Configuración de base de datos de vulnerabilidades
+db:
+  repository: ghcr.io/aquasecurity/trivy-db
+  skip-update: false
+
+# Políticas personalizadas
+vulnerability:
+  # Ignorar CVEs específicos (falsos positivos)
+  ignore-unfixed: false  # Reportar todas, incluso sin fix disponible
+
+# Output personalizado
+output:
+  # Template para reportes personalizados (opcional)
+  # template: "@contrib/html.tpl"
+
+# Configuración específica para lenguajes
+java:
+  enabled: true
+
+nodejs:
+  enabled: true
+
+python:
+  enabled: true
+
+golang:
+  enabled: true
+
+# Configuración de secretos
+secret:
+  config: |
+    rules:
+      - id: aws-access-key
+        description: AWS Access Key ID
+        pattern: (A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}
+
+      - id: aws-secret-key
+        description: AWS Secret Access Key
+        pattern: (?i)aws(.{0,20})?['\"][0-9a-zA-Z\/+]{40}['\"]
+
+      - id: github-token
+        description: GitHub Personal Access Token
+        pattern: ghp_[0-9a-zA-Z]{36}
+
+      - id: slack-token
+        description: Slack Token
+        pattern: xox[baprs]-([0-9a-zA-Z]{10,48})
+
+      - id: jwt-token
+        description: JWT Token
+        pattern: eyJ[A-Za-z0-9-_=]+\.eyJ[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*
+
+      - id: private-key
+        description: Private Key
+        pattern: -----BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY-----
