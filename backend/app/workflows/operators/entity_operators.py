@@ -24,23 +24,33 @@ class EntityCreationOperator(BaseOperator):
         name_source: str = "name",  # Where to get the entity name from context
         data_mapping: Optional[Dict[str, str]] = None,  # Map context fields to entity data
         static_data: Optional[Dict[str, Any]] = None,  # Static data to include
+        visualization_config: Optional[Dict[str, Any]] = None,  # Field-level visualization hints
+        entity_display_config: Optional[Dict[str, Any]] = None,  # Entity-level display config
         **kwargs
     ):
         """
         Initialize entity creation operator.
-        
+
         Args:
             task_id: Unique task identifier
             entity_type: Type of entity to create (just a string like "person", "property")
             name_source: Context field or static string for entity name
             data_mapping: Map context keys to entity data fields
             static_data: Static data to always include
+            visualization_config: Field-level visualization hints (e.g., {"field": {"type": "qr_code"}})
+            entity_display_config: Entity-level display configuration (e.g., {"default_view": "pdf_report"})
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
         self.name_source = name_source
         self.data_mapping = data_mapping or {}
         self.static_data = static_data or {}
+        self.visualization_config = visualization_config or {}
+        self.entity_display_config = entity_display_config or {
+            "default_view": "card",  # card | pdf_report | table
+            "pdf_template": None,     # Template name for PDF generation
+            "preview_fields": [],     # Fields to show in preview
+        }
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Create the entity based on workflow context"""
@@ -90,7 +100,9 @@ class EntityCreationOperator(BaseOperator):
                 "owner_user_id": user_id,
                 "name": entity_name,
                 "data": entity_data,
-                "created_by_workflow": context.get("instance_id")
+                "created_by_workflow": context.get("instance_id"),
+                "visualization_config": self.visualization_config,
+                "entity_display_config": self.entity_display_config
             }
             
             # Return pending status - will be handled by execute_async
@@ -599,12 +611,37 @@ class MultiEntityRequirementOperator(BaseOperator):
                 - min_count: Minimum number required (default 1)
                 - filters: Optional filters to apply
                 - store_as: Key to store found entity IDs
+                - info: Optional display information for citizen portal
+                  - instructions: User-friendly explanation of requirement
+                  - workflow_id: ID of workflow that helps obtain this entity
+                  - display_name: Display name for this requirement
+                  - description: Additional description text
             on_missing: What to return when requirements not met: "failed" or "retry"
 
         Example:
             requirements=[
-                {"entity_type": "person", "min_count": 1, "store_as": "person_ids"},
-                {"entity_type": "property", "min_count": 2, "filters": {"verified": True}}
+                {
+                    "entity_type": "person",
+                    "min_count": 1,
+                    "store_as": "person_ids",
+                    "info": {
+                        "instructions": "You need to register as a verified citizen",
+                        "workflow_id": "citizen_registration",
+                        "display_name": "Citizen Registration",
+                        "description": "Complete citizen registration with verified identity"
+                    }
+                },
+                {
+                    "entity_type": "property",
+                    "min_count": 2,
+                    "filters": {"verified": True},
+                    "info": {
+                        "instructions": "You need verified property ownership documents",
+                        "workflow_id": "property_verification",
+                        "display_name": "Property Documents",
+                        "description": "Official property ownership documentation"
+                    }
+                }
             ]
         """
         super().__init__(task_id, **kwargs)
@@ -767,3 +804,5 @@ class MultiEntityRequirementOperator(BaseOperator):
                 status="failed",
                 error=error_msg
             )
+
+

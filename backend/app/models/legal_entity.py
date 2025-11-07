@@ -76,7 +76,11 @@ class LegalEntity(Document):
     # Tracking
     created_by_workflow: Optional[str] = None  # Workflow instance that created this
     used_in_workflows: List[str] = Field(default_factory=list)  # Workflow instances that used this
-    
+
+    # Visualization Configuration
+    visualization_config: Optional[Dict[str, Any]] = None  # Field-level visualization hints
+    entity_display_config: Optional[Dict[str, Any]] = None  # Entity-level display configuration
+
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

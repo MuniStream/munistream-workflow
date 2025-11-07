@@ -17,6 +17,7 @@ from .entity_operators import (
     EntityRelationshipOperator,
     MultiEntityRequirementOperator
 )
+from .entity_picker_operator import EntityPickerOperator
 from .document_operators import DocumentCreationOperator, DocumentRequirementOperator
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "EntityRequirementOperator",
     "EntityRelationshipOperator",
     "MultiEntityRequirementOperator",
+    "EntityPickerOperator",
 
     # Document operators
     "DocumentCreationOperator",

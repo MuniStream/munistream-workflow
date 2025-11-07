@@ -7,13 +7,20 @@ feedback and assistance to users.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import importlib
 import logging
+import boto3
+import os
+from urllib.parse import urlparse
+import io
 
 from app.services.auth_service import get_current_user_optional
 from app.models.user import UserModel as User
+from app.services.entity_service import EntityService
+from app.services.pdf_generation import EntityReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -279,4 +286,122 @@ async def get_entity_rules(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get entity rules: {str(e)}"
+        )
+
+
+@router.get("/{entity_id}/files/fetch")
+async def fetch_entity_file(
+    entity_id: str,
+    file_url: str,
+    current_user: Optional[User] = Depends(get_current_user_optional)
+):
+    """
+    Fetch a specific file from an entity and serve it directly to the browser.
+
+    This endpoint securely fetches files by:
+    1. Looking up the entity by ID
+    2. Verifying the requested file_url exists in the entity's data
+    3. Downloading from S3/MinIO and serving with proper content type
+
+    Args:
+        entity_id: The entity ID to fetch files from
+        file_url: The exact file URL that must exist in the entity's data
+
+    Returns:
+        StreamingResponse with the file content
+    """
+    try:
+        # Import here to avoid circular imports
+        from app.services.entity_service import EntityService
+
+        # Fetch the entity from database using the same method as other endpoints
+        entity = await EntityService.get_entity(entity_id, current_user.id if current_user else None)
+        if not entity:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Entity {entity_id} not found"
+            )
+
+        # Extract all file URLs from entity data to verify the requested URL is valid
+        entity_data = entity.data if hasattr(entity, 'data') else {}
+        valid_urls = []
+
+        # Collect all file URLs from the entity
+        for field_name, field_value in entity_data.items():
+            if 'file' in field_name.lower() or 'url' in field_name.lower():
+                if isinstance(field_value, list):
+                    valid_urls.extend(field_value)
+                elif isinstance(field_value, str):
+                    valid_urls.append(field_value)
+
+        # Verify the requested file_url exists in the entity
+        if file_url not in valid_urls:
+            raise HTTPException(
+                status_code=403,
+                detail=f"File URL not found in entity {entity_id}"
+            )
+
+        # Parse the URL to extract bucket and key
+        from urllib.parse import urlparse
+        parsed_url = urlparse(file_url)
+
+        # Extract bucket and key from path
+        path_parts = parsed_url.path.strip('/').split('/', 1)
+        if len(path_parts) != 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid S3 URL format in entity data"
+            )
+
+        bucket_name = path_parts[0]
+        s3_key = path_parts[1]
+
+        # Initialize S3 client with environment configuration
+        s3_client = boto3.client(
+            's3',
+            region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+            endpoint_url=os.getenv("S3_ENDPOINT_URL"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+        )
+
+        # Download file from S3
+        try:
+            response = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+            file_content = response['Body'].read()
+            content_type = response.get('ContentType', 'application/octet-stream')
+            content_length = response.get('ContentLength', len(file_content))
+
+            # Extract filename from S3 key
+            filename = os.path.basename(s3_key)
+
+            # Create headers for proper browser handling
+            headers = {
+                'Content-Type': content_type,
+                'Content-Length': str(content_length),
+                'Content-Disposition': f'inline; filename="{filename}"'
+            }
+
+            # Return file as streaming response
+            return StreamingResponse(
+                io.BytesIO(file_content),
+                media_type=content_type,
+                headers=headers
+            )
+
+        except Exception as s3_error:
+            logger.error(f"S3 download error for entity {entity_id}: {str(s3_error)}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"File not found or inaccessible"
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"File fetch error for entity {entity_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch file: {str(e)}"
         )

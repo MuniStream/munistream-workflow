@@ -4,8 +4,10 @@ Simplified Entity Service - Agnostic to entity structure.
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import uuid
+import logging
 
 from ..models.legal_entity import EntityType, LegalEntity, EntityRelationship
+from ..core.logging_config import set_workflow_context, get_workflow_context
 
 
 class EntityService:
@@ -47,6 +49,8 @@ class EntityService:
         owner_user_id: str,
         name: str,
         data: Dict[str, Any] = None,
+        visualization_config: Optional[Dict[str, Any]] = None,
+        entity_display_config: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> LegalEntity:
         """
@@ -63,6 +67,8 @@ class EntityService:
             owner_user_id=owner_user_id,
             name=name,
             data=data or {},
+            visualization_config=visualization_config,
+            entity_display_config=entity_display_config,
             **kwargs
         )
         
@@ -215,3 +221,125 @@ class EntityService:
             filters={unique_field: unique_value}
         )
         return len(existing) > 0
+
+    @staticmethod
+    async def delete_entity(entity_id: str, owner_user_id: str) -> bool:
+        """Delete an entity and all its relationships"""
+        logger = logging.getLogger(__name__)
+
+        # Set workflow context for structured logging
+        set_workflow_context(
+            user_id=owner_user_id,
+            tenant=None  # Will be set by caller if available
+        )
+
+        logger.info("🗑️ Starting entity deletion", extra={
+            "entity_id": entity_id,
+            "owner_user_id": owner_user_id,
+            "action": "entity_deletion_start"
+        })
+
+        try:
+            # First verify ownership
+            entity = await EntityService.get_entity(entity_id, owner_user_id)
+            if not entity:
+                logger.warning("Entity not found or access denied", extra={
+                    "entity_id": entity_id,
+                    "owner_user_id": owner_user_id,
+                    "action": "entity_not_found"
+                })
+                return False
+
+            logger.debug("Entity found, checking for active workflows", extra={
+                "entity_id": entity_id,
+                "entity_type": entity.entity_type,
+                "action": "entity_found"
+            })
+
+            # Check for active workflows before deletion
+            from ..models.workflow import WorkflowInstance
+            try:
+                # Debug the query construction
+                query = {"context.entity_id": entity_id, "status": {"$in": ["running", "pending", "paused"]}}
+                logger.debug("Checking for active workflows with query", extra={
+                    "entity_id": entity_id,
+                    "query": str(query),
+                    "action": "workflow_check_query"
+                })
+
+                active_workflows = await WorkflowInstance.find(query).to_list()
+
+                logger.debug("Active workflow check completed", extra={
+                    "entity_id": entity_id,
+                    "active_workflows_count": len(active_workflows),
+                    "action": "workflow_check_result"
+                })
+
+                if active_workflows:
+                    logger.warning("Cannot delete entity with active workflows", extra={
+                        "entity_id": entity_id,
+                        "active_workflows_count": len(active_workflows),
+                        "workflow_ids": [w.instance_id for w in active_workflows],
+                        "action": "deletion_blocked_active_workflows"
+                    })
+                    raise ValueError("Cannot delete entity with active workflows")
+
+            except Exception as workflow_check_error:
+                logger.error("Error checking for active workflows: %s", str(workflow_check_error), extra={
+                    "entity_id": entity_id,
+                    "error_message": str(workflow_check_error),
+                    "error_type": type(workflow_check_error).__name__,
+                    "action": "workflow_check_error"
+                }, exc_info=True)
+                raise
+
+            # Find and clean up relationships where this entity is referenced
+            logger.debug("Cleaning up entity relationships", extra={
+                "entity_id": entity_id,
+                "action": "relationships_cleanup_start"
+            })
+
+            # Find entities that have relationships pointing TO this entity
+            entities_with_relationships = await LegalEntity.find(
+                {"relationships.to_entity_id": entity_id}
+            ).to_list()
+
+            relationships_cleaned = 0
+            for other_entity in entities_with_relationships:
+                # Remove relationships pointing to the entity being deleted
+                original_count = len(other_entity.relationships)
+                other_entity.relationships = [
+                    rel for rel in other_entity.relationships
+                    if rel.to_entity_id != entity_id
+                ]
+                relationships_cleaned += original_count - len(other_entity.relationships)
+                other_entity.updated_at = datetime.utcnow()
+                await other_entity.save()
+
+            logger.debug("Entity relationships cleaned up", extra={
+                "entity_id": entity_id,
+                "entities_updated": len(entities_with_relationships),
+                "relationships_cleaned": relationships_cleaned,
+                "action": "relationships_cleaned"
+            })
+
+            # Delete the entity itself
+            await entity.delete()
+
+            logger.info("✅ Entity deleted successfully", extra={
+                "entity_id": entity_id,
+                "owner_user_id": owner_user_id,
+                "action": "entity_deletion_success"
+            })
+
+            return True
+
+        except Exception as e:
+            logger.error("❌ Failed to delete entity: %s", str(e), extra={
+                "entity_id": entity_id,
+                "owner_user_id": owner_user_id,
+                "error_message": str(e),
+                "error_type": type(e).__name__,
+                "action": "entity_deletion_error"
+            }, exc_info=True)
+            raise
