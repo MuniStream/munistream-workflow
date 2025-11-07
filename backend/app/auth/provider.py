@@ -64,6 +64,11 @@ class KeycloakProvider:
     async def verify_token(self, token: str) -> Dict[str, Any]:
         """Verify and decode a JWT token"""
         try:
+            # Debug: Log token info
+            logger.info(f"Token length: {len(token)}")
+            logger.info(f"Token first 50 chars: {token[:50]}...")
+            logger.info(f"Token last 10 chars: ...{token[-10:]}")
+
             # Get JWKS for verification
             jwks = await self.get_jwks()
 
@@ -136,6 +141,9 @@ class KeycloakProvider:
 
         except JWTError as e:
             logger.error(f"JWT verification failed: {e}")
+            logger.error(f"Full exception details: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication token",
@@ -195,12 +203,18 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme)
 ) -> dict:
     """FastAPI dependency to get current authenticated user"""
+    logger.info(f"get_current_user called with credentials: {credentials}")
+
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization header missing",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    logger.info(f"Token from credentials: length={len(credentials.credentials)}")
+    logger.info(f"Token scheme: {credentials.scheme}")
+    logger.info(f"Token first 50: {credentials.credentials[:50]}...")
 
     try:
         user_info = await keycloak.get_user_info(credentials.credentials)
@@ -232,6 +246,23 @@ def require_roles(required_roles: List[str]):
     return role_checker
 
 
+# Specific admin dependency
+async def get_current_admin(
+    current_user: dict = Depends(get_current_user)
+) -> dict:
+    """FastAPI dependency to get current authenticated admin user"""
+    user_roles = current_user.get("roles", [])
+    admin_roles = ["admin", "manager", "approver", "reviewer"]
+
+    if not any(role in user_roles for role in admin_roles):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required. Insufficient permissions."
+        )
+
+    return current_user
+
+
 # Common permission helpers
 require_admin = require_roles(["admin"])
 require_manager = require_roles(["manager"])
@@ -246,6 +277,7 @@ def require_permission(permission: str):
         "MANAGE_WORKFLOWS": ["manager", "admin"],
         "APPROVE_STEPS": ["approver", "manager", "admin"],
         "REVIEW_DOCUMENTS": ["reviewer", "manager", "admin"],
+        "VIEW_DOCUMENTS": ["reviewer", "manager", "admin", "viewer", "approver"],
         "VIEW_ONLY": ["viewer", "reviewer", "approver", "manager", "admin"]
     }
 
