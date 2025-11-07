@@ -307,19 +307,48 @@ async def track_instance(
     # Get DAG instance for detailed state
     dag_instance = await workflow_service.get_instance(instance_id)
 
-    # Check if waiting for input
+    # Check if waiting for input - Universal form concatenation approach
     requires_input = False
     input_form = {}
+    waiting_tasks = []
 
     if dag_instance:
         for task_id, state in dag_instance.task_states.items():
             if state.get("status") == "waiting":
                 requires_input = True
-                # Get form config from task
+                waiting_tasks.append(task_id)
+
                 task = dag_instance.dag.tasks.get(task_id)
+                task_form = {}
+
+                # Merge from ANY source - output_data first (async operators like EntityPickerOperator)
+                if state.get("output_data", {}).get("form_config"):
+                    task_form.update(state["output_data"]["form_config"])
+                else:
+                    # Try to get form_config from global context as fallback
+                    if dag_instance.context.get("form_config"):
+                        task_form.update(dag_instance.context["form_config"])
+
+                # Then merge from task.form_config (sync operators like UserInputOperator)
                 if task and hasattr(task, 'form_config'):
-                    input_form = task.form_config
-                break
+                    task_form.update(task.form_config)
+
+                # Add task-specific metadata
+                if task_form:  # Only add metadata if we found a form
+                    task_form["current_step_id"] = task_id
+                    if state.get("output_data", {}).get("waiting_for"):
+                        task_form["waiting_for"] = state["output_data"]["waiting_for"]
+
+                    # Merge into global input_form
+                    input_form.update(task_form)
+
+        # Handle multiple waiting tasks
+        if len(waiting_tasks) > 1:
+            input_form["multiple_tasks"] = waiting_tasks
+        elif len(waiting_tasks) == 1:
+            # For single task, ensure current_step_id is set
+            if "current_step_id" not in input_form:
+                input_form["current_step_id"] = waiting_tasks[0]
 
     # Calculate progress
     total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
@@ -379,18 +408,54 @@ async def get_customer_instances(
         WorkflowInstance.user_id == str(current_customer.id)
     ).sort(-WorkflowInstance.created_at).to_list()
 
+    # Get workflow definitions for names
+    from ...services.workflow_service import workflow_service
+
     return {
         "instances": [
             {
                 "instance_id": inst.instance_id,
                 "workflow_id": inst.workflow_id,
+                "workflow_name": getattr(await workflow_service.get_workflow_definition(inst.workflow_id), 'name', inst.workflow_id) if inst.workflow_id else inst.workflow_id,
                 "status": inst.status,
                 "current_step": inst.current_step,
                 "created_at": inst.created_at,
                 "updated_at": inst.updated_at,
-                "context": inst.context
+                "completed_at": inst.completed_at,
+                # Only include essential context data, not the full context object
+                "progress_percentage": _calculate_progress_percentage(inst)
             }
             for inst in instances
         ],
         "total": len(instances)
     }
+
+
+def _calculate_progress_percentage(instance) -> float:
+    """Calculate progress percentage for an instance"""
+    try:
+        if instance.status == "completed":
+            return 100.0
+        elif instance.status in ["failed", "cancelled"]:
+            return 0.0
+
+        # Try to get progress from context if available
+        if hasattr(instance, 'context') and instance.context:
+            if 'progress_percentage' in instance.context:
+                return float(instance.context.get('progress_percentage', 0))
+
+            # Calculate based on completed steps if available
+            total_steps = instance.context.get('total_steps', 0)
+            completed_steps = instance.context.get('completed_steps', 0)
+            if total_steps > 0:
+                return (completed_steps / total_steps) * 100.0
+
+        # Default fallback based on status
+        if instance.status in ["running", "in_progress"]:
+            return 50.0
+        elif instance.status in ["waiting", "paused"]:
+            return 25.0
+
+        return 0.0
+    except:
+        return 0.0

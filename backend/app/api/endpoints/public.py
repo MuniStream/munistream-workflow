@@ -6,6 +6,9 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query, D
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
+import base64
+import logging
+from pydantic import BaseModel
 
 from ...services.workflow_service import workflow_service
 from ...models.workflow import WorkflowInstance, WorkflowDefinition
@@ -14,6 +17,7 @@ from ...models.legal_entity import LegalEntity, EntityType
 from ...services.entity_service import EntityService
 from ...workflows.dag import DAG
 from .public_auth import router as auth_router, get_current_customer
+from ...core.logging_config import set_workflow_context
 # Removed localization imports - keeping it simple
 
 router = APIRouter()
@@ -464,7 +468,8 @@ async def list_user_entities(
 @router.get("/entities/{entity_id}")
 async def get_entity_details(
     entity_id: str,
-    current_customer: Customer = Depends(get_current_customer)
+    current_customer: Customer = Depends(get_current_customer),
+    include_visualization: bool = Query(False, description="Include visualization config")
 ):
     """
     Get detailed information about a specific entity.
@@ -494,8 +499,18 @@ async def get_entity_details(
                     "estimatedDuration": w.metadata.get("estimated_duration", "10-20 min")
                 })
     
+    # Prepare entity data
+    entity_dict = entity.to_display_dict()
+
+    # Add visualization config if requested
+    if include_visualization:
+        entity_dict.update({
+            "visualization_config": entity.visualization_config or {},
+            "entity_display_config": entity.entity_display_config or {},
+        })
+
     return {
-        "entity": entity.to_display_dict(),
+        "entity": entity_dict,
         "available_workflows": available_workflows,
         "recent_instances": [
             {
@@ -570,6 +585,101 @@ async def start_entity_workflow(
         "tracking_url": f"/track/{dag_instance.instance_id}",
         "message": f"Workflow {workflow.name} started for {entity.name}"
     }
+
+
+@router.delete("/entities/{entity_id}")
+async def delete_entity(
+    entity_id: str,
+    current_customer: Customer = Depends(get_current_customer)
+):
+    """
+    Delete an entity owned by the current user.
+    This will also delete all relationships and associated data.
+    """
+    logger = logging.getLogger(__name__)
+
+    # Set workflow context for structured logging
+    set_workflow_context(
+        user_id=str(current_customer.id),
+        tenant=getattr(current_customer, 'tenant', None)
+    )
+
+    logger.info("🔐 Entity deletion request received", extra={
+        "entity_id": entity_id,
+        "user_id": str(current_customer.id),
+        "action": "delete_entity_request"
+    })
+
+    try:
+        # Verify entity ownership
+        entity = await EntityService.get_entity(entity_id, str(current_customer.id))
+        if not entity:
+            logger.warning("Entity not found or access denied", extra={
+                "entity_id": entity_id,
+                "user_id": str(current_customer.id),
+                "action": "entity_not_found"
+            })
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        logger.debug("Entity found, proceeding with deletion", extra={
+            "entity_id": entity_id,
+            "entity_type": entity.entity_type,
+            "entity_name": entity.name,
+            "action": "entity_found"
+        })
+
+        # Set tenant context in EntityService if available
+        if hasattr(current_customer, 'tenant'):
+            set_workflow_context(
+                user_id=str(current_customer.id),
+                tenant=current_customer.tenant
+            )
+
+        # Delete the entity (this will handle workflow checks and relationships internally)
+        success = await EntityService.delete_entity(entity_id, str(current_customer.id))
+
+        if not success:
+            logger.error("EntityService returned false for deletion", extra={
+                "entity_id": entity_id,
+                "user_id": str(current_customer.id),
+                "action": "deletion_service_failed"
+            })
+            raise HTTPException(status_code=500, detail="Failed to delete entity")
+
+        logger.info("✅ Entity deletion API completed successfully", extra={
+            "entity_id": entity_id,
+            "entity_name": entity.name,
+            "user_id": str(current_customer.id),
+            "action": "delete_entity_success"
+        })
+
+        return {
+            "success": True,
+            "message": f"Entity '{entity.name}' deleted successfully",
+            "deleted_entity_id": entity_id
+        }
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except ValueError as ve:
+        # Handle business logic errors (like active workflows)
+        logger.warning("Entity deletion blocked by business rules", extra={
+            "entity_id": entity_id,
+            "user_id": str(current_customer.id),
+            "error_message": str(ve),
+            "action": "deletion_blocked"
+        })
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error("❌ Unexpected error during entity deletion: %s", str(e), extra={
+            "entity_id": entity_id,
+            "user_id": str(current_customer.id),
+            "error_message": str(e),
+            "error_type": type(e).__name__,
+            "action": "delete_entity_error"
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to delete entity")
 
 
 @router.get("/entities/{entity_id}/documents")
@@ -651,6 +761,27 @@ async def get_entity_types():
     }
 
 
+def _extract_entity_requirements(dag: DAG) -> List[Dict[str, Any]]:
+    """
+    Extract entity requirements from DAG tasks that have entity operators.
+    Returns list of entity requirement info for display.
+    """
+    entity_requirements = []
+
+    if not dag or not dag.tasks:
+        return entity_requirements
+
+    for task_id, task in dag.tasks.items():
+        # Check for EntityPickerOperator and MultiEntityRequirementOperator
+        if hasattr(task, 'requirements') and task.requirements:
+            for req in task.requirements:
+                # Only include requirements that have info for display
+                if isinstance(req, dict) and req.get('info'):
+                    entity_requirements.append(req['info'])
+
+    return entity_requirements
+
+
 async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], locale: str) -> Dict[str, Any]:
     """Extract all workflow data from definition and DAG."""
     steps = []
@@ -687,7 +818,11 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
                 # Check for specific kwargs that should be exposed
                 if 'form_config' in task.kwargs:
                     step_data["form_config"] = task.kwargs['form_config']
-            
+
+            # Add requirements for this step if it has them
+            if hasattr(task, 'requirements') and task.requirements:
+                step_data["requirements"] = task.requirements
+
             steps.append(step_data)
     else:
         # Fall back to database data if no DAG
@@ -739,6 +874,7 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         "estimatedDuration": metadata.get("estimatedTime") or metadata.get("estimated_duration") or _calculate_duration(len(steps)),
         "steps": steps,
         "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, locale),
+        "entity_requirements": _extract_entity_requirements(dag) if dag else [],
         "available": metadata.get("available", True) if "available" in metadata else workflow.status == "active",
         "tags": tags,
         "popularity": metadata.get("popularity", 0),

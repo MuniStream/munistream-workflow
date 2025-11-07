@@ -9,6 +9,7 @@ from .core.config import settings
 from .core.database import connect_to_mongo, close_mongo_connection
 from .api.api import api_router
 from .workflows.startup import initialize_workflow_system, shutdown_workflow_system
+from .core.logging_config import setup_gelf_logging
 
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
@@ -133,8 +134,18 @@ plugin_manager = None
 # Database events
 @app.on_event("startup")
 async def startup_event():
+    # Setup structured GELF logging with environment configuration
+    container_name = os.getenv("CONTAINER_NAME")
+    graylog_host = os.getenv("GRAYLOG_HOST", "graylog")
+    graylog_port = int(os.getenv("GRAYLOG_PORT", "12201"))
+    setup_gelf_logging(graylog_host=graylog_host, graylog_port=graylog_port, container_name=container_name)
+
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"📊 GELF structured logging enabled for container: {container_name}")
+
     await connect_to_mongo()
-    
+
     # Load plugins before syncing workflows
     global plugin_manager
     try:
