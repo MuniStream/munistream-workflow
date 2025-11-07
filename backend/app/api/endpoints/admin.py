@@ -5,67 +5,27 @@ Admin API endpoints for managing approvals, document verification, and manual re
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, Query, Body
-from pydantic import BaseModel, Field
+from collections import defaultdict
+import statistics
 
 from ...models.document import DocumentModel, DocumentStatus, VerificationMethod
+from ...models.workflow import WorkflowInstance, StepExecution, WorkflowDefinition, AssignmentStatus
 from ...auth.provider import get_current_user, require_permission
+from ...schemas.admin import (
+    PendingApprovalResponse,
+    PendingDocumentResponse,
+    PendingSignatureResponse,
+    ManualReviewResponse,
+    AdminStatsResponse,
+    DashboardResponse,
+    SystemMetrics,
+    PendingItemsBreakdown,
+    WorkflowMetrics,
+    PerformanceMetrics,
+    TimeSeriesMetric
+)
 
 router = APIRouter()
-
-# Request/Response Models
-class PendingApprovalResponse(BaseModel):
-    instance_id: str
-    workflow_name: str
-    citizen_name: str
-    citizen_id: str
-    step_name: str
-    submitted_at: datetime
-    priority: str = "medium"
-    approval_type: str
-    context: Dict[str, Any]
-    assigned_to: Optional[str] = None
-
-class PendingDocumentResponse(BaseModel):
-    document_id: str
-    title: str
-    document_type: str
-    citizen_name: str
-    citizen_id: str
-    uploaded_at: datetime
-    file_size: int
-    mime_type: str
-    status: str = "pending_verification"
-    verification_priority: str = "normal"
-    previous_attempts: int = 0
-
-class PendingSignatureResponse(BaseModel):
-    document_id: str
-    title: str
-    document_type: str
-    citizen_name: str
-    citizen_id: str
-    workflow_name: str
-    signature_type: str
-    requires_signature_at: datetime
-    deadline: Optional[datetime] = None
-
-class ManualReviewResponse(BaseModel):
-    review_id: str
-    type: str
-    citizen_name: str
-    citizen_id: str
-    workflow_name: str
-    issue_description: str
-    severity: str
-    created_at: datetime
-    context: Dict[str, Any]
-
-class AdminStatsResponse(BaseModel):
-    pending_approvals: int
-    pending_documents: int
-    pending_signatures: int
-    manual_reviews: int
-    total_pending: int
 
 # Admin dependency
 async def get_current_admin(current_user: dict = Depends(require_permission("VIEW_DOCUMENTS"))):
@@ -411,18 +371,18 @@ async def get_admin_stats(admin: dict = Depends(get_current_admin)):
         pending_documents = await DocumentModel.find({
             "status": DocumentStatus.PENDING
         }).count()
-        
+
         # Count documents needing signatures (real data)
         pending_signatures = await DocumentModel.find({
             "document_type": {"$in": ["permit", "certificate", "approval_letter"]},
             "status": DocumentStatus.VERIFIED,
             "signatures": {"$size": 0}
         }).count()
-        
+
         # Mock data for workflow approvals and manual reviews
         pending_approvals = 2  # From mock data above
         manual_reviews = 1    # From mock data above
-        
+
         return AdminStatsResponse(
             pending_approvals=pending_approvals,
             pending_documents=pending_documents,
@@ -430,9 +390,216 @@ async def get_admin_stats(admin: dict = Depends(get_current_admin)):
             manual_reviews=manual_reviews,
             total_pending=pending_approvals + pending_documents + pending_signatures + manual_reviews
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get admin stats: {str(e)}")
+
+
+@router.get("/dashboard", response_model=DashboardResponse)
+async def get_dashboard(admin: dict = Depends(get_current_admin)):
+    """Get comprehensive dashboard data for admin interface."""
+    try:
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - timedelta(days=today_start.weekday())
+
+        # Get all workflow instances for metrics
+        all_instances = await WorkflowInstance.find().to_list()
+
+        # Get unique citizens (users who have created instances)
+        unique_citizens = set()
+        for instance in all_instances:
+            unique_citizens.add(instance.user_id)
+
+        # Calculate instances created today and this week
+        instances_today = [i for i in all_instances if i.created_at >= today_start]
+        instances_week = [i for i in all_instances if i.created_at >= week_start]
+        completed_today = [i for i in all_instances if i.completed_at and i.completed_at >= today_start]
+        completed_week = [i for i in all_instances if i.completed_at and i.completed_at >= week_start]
+
+        # System metrics
+        system_metrics = SystemMetrics(
+            total_active_citizens=len(unique_citizens),
+            total_workflow_instances=len(all_instances),
+            instances_created_today=len(instances_today),
+            instances_completed_today=len(completed_today),
+            instances_created_this_week=len(instances_week),
+            instances_completed_this_week=len(completed_week)
+        )
+
+        # Get pending items breakdown
+        pending_documents = await DocumentModel.find({
+            "status": DocumentStatus.PENDING
+        }).count()
+
+        pending_signatures = await DocumentModel.find({
+            "document_type": {"$in": ["permit", "certificate", "approval_letter"]},
+            "status": DocumentStatus.VERIFIED,
+            "signatures": {"$size": 0}
+        }).count()
+
+        # Count instances with pending approvals
+        pending_approval_instances = [
+            i for i in all_instances
+            if i.assignment_status in [AssignmentStatus.PENDING_REVIEW, AssignmentStatus.UNDER_REVIEW]
+        ]
+
+        # Count manual reviews (documents with low confidence)
+        manual_review_docs = await DocumentModel.find({
+            "metadata.confidence_score": {"$lt": 0.7},
+            "status": DocumentStatus.PENDING
+        }).count()
+
+        # Priority breakdown
+        priority_breakdown = defaultdict(int)
+        for instance in pending_approval_instances:
+            priority = instance.priority
+            if priority <= 3:
+                priority_breakdown["high"] += 1
+            elif priority <= 7:
+                priority_breakdown["medium"] += 1
+            else:
+                priority_breakdown["low"] += 1
+
+        pending_items = PendingItemsBreakdown(
+            pending_approvals=len(pending_approval_instances),
+            pending_documents=pending_documents,
+            pending_signatures=pending_signatures,
+            manual_reviews=manual_review_docs,
+            total_pending=len(pending_approval_instances) + pending_documents + pending_signatures + manual_review_docs,
+            pending_by_priority=dict(priority_breakdown)
+        )
+
+        # Calculate workflow-specific metrics
+        workflow_metrics_dict = defaultdict(lambda: {
+            "total": 0, "active": 0, "completed": 0, "failed": 0,
+            "processing_times": [], "pending_approvals": 0
+        })
+
+        for instance in all_instances:
+            wf_id = instance.workflow_id
+            workflow_metrics_dict[wf_id]["total"] += 1
+
+            if instance.status in ["running", "awaiting_input"]:
+                workflow_metrics_dict[wf_id]["active"] += 1
+            elif instance.status == "completed":
+                workflow_metrics_dict[wf_id]["completed"] += 1
+                if instance.duration_seconds:
+                    workflow_metrics_dict[wf_id]["processing_times"].append(instance.duration_seconds / 3600)
+            elif instance.status == "failed":
+                workflow_metrics_dict[wf_id]["failed"] += 1
+
+            if instance.assignment_status in [AssignmentStatus.PENDING_REVIEW, AssignmentStatus.UNDER_REVIEW]:
+                workflow_metrics_dict[wf_id]["pending_approvals"] += 1
+
+        # Get workflow definitions for names
+        workflow_defs = await WorkflowDefinition.find().to_list()
+        workflow_names = {wd.workflow_id: wd.name for wd in workflow_defs}
+
+        workflow_metrics = []
+        for wf_id, metrics in workflow_metrics_dict.items():
+            avg_time = statistics.mean(metrics["processing_times"]) if metrics["processing_times"] else 0
+            success_rate = (metrics["completed"] / metrics["total"] * 100) if metrics["total"] > 0 else 0
+
+            workflow_metrics.append(WorkflowMetrics(
+                workflow_id=wf_id,
+                workflow_name=workflow_names.get(wf_id, wf_id),
+                total_instances=metrics["total"],
+                active_instances=metrics["active"],
+                completed_instances=metrics["completed"],
+                failed_instances=metrics["failed"],
+                average_processing_time_hours=round(avg_time, 2),
+                success_rate=round(success_rate, 2),
+                pending_approvals=metrics["pending_approvals"]
+            ))
+
+        # Sort by total instances for top workflows
+        workflow_metrics.sort(key=lambda x: x.total_instances, reverse=True)
+
+        # Calculate overall performance metrics
+        all_processing_times = []
+        completed_count = 0
+        failed_count = 0
+        abandoned_count = 0
+
+        for instance in all_instances:
+            if instance.status == "completed":
+                completed_count += 1
+                if instance.duration_seconds:
+                    all_processing_times.append(instance.duration_seconds / 3600)
+            elif instance.status == "failed":
+                failed_count += 1
+            elif instance.status == "abandoned":
+                abandoned_count += 1
+
+        total_finished = completed_count + failed_count + abandoned_count
+
+        performance_metrics = PerformanceMetrics(
+            average_processing_time_hours=round(statistics.mean(all_processing_times), 2) if all_processing_times else 0,
+            median_processing_time_hours=round(statistics.median(all_processing_times), 2) if all_processing_times else 0,
+            success_rate=round((completed_count / total_finished * 100), 2) if total_finished > 0 else 0,
+            failure_rate=round((failed_count / total_finished * 100), 2) if total_finished > 0 else 0,
+            abandonment_rate=round((abandoned_count / total_finished * 100), 2) if total_finished > 0 else 0,
+            bottleneck_steps=[]  # Would need step execution analysis
+        )
+
+        # Generate recent activity time series (last 7 days)
+        recent_activity = []
+        for i in range(7):
+            day_start = today_start - timedelta(days=i)
+            day_end = day_start + timedelta(days=1)
+            day_instances = [
+                inst for inst in all_instances
+                if day_start <= inst.created_at < day_end
+            ]
+            recent_activity.append(TimeSeriesMetric(
+                timestamp=day_start,
+                value=len(day_instances),
+                label=day_start.strftime("%a")
+            ))
+        recent_activity.reverse()  # Show chronologically
+
+        # Top workflows
+        top_workflows = [
+            {
+                "workflow_id": wm.workflow_id,
+                "name": wm.workflow_name,
+                "instances": wm.total_instances,
+                "success_rate": wm.success_rate
+            }
+            for wm in workflow_metrics[:5]
+        ]
+
+        # Staff workload (based on assigned instances)
+        staff_workload = defaultdict(int)
+        for instance in all_instances:
+            if instance.assigned_user_id:
+                staff_workload[instance.assigned_user_id] += 1
+
+        # System health check
+        system_health = {
+            "status": "healthy",
+            "database": "connected",
+            "pending_items_backlog": pending_items.total_pending > 100,
+            "high_priority_items": priority_breakdown.get("high", 0),
+            "average_response_time_ms": 150,  # Would need actual monitoring
+            "last_check": now.isoformat()
+        }
+
+        return DashboardResponse(
+            system_metrics=system_metrics,
+            pending_items=pending_items,
+            workflow_metrics=workflow_metrics,
+            performance_metrics=performance_metrics,
+            recent_activity=recent_activity,
+            top_workflows=top_workflows,
+            staff_workload=dict(staff_workload),
+            system_health=system_health,
+            last_updated=now
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get dashboard data: {str(e)}")
 
 @router.post("/documents/{document_id}/sign")
 async def sign_document(
