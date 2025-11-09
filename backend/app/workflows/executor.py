@@ -29,7 +29,7 @@ class DAGExecutor:
     Simple executor that always fetches fresh instances from database.
     No caching, no sync issues - database is the single source of truth.
     """
-    
+
     def __init__(self, workflow_service=None):
         """
         Initialize executor.
@@ -46,6 +46,18 @@ class DAGExecutor:
         self.execution_queue: list[str] = []  # Queue of instance IDs to process
         self._execution_task: Optional[asyncio.Task] = None
         self._should_stop = False
+        # Event-driven optimization: notify when work is available
+        self._work_available = asyncio.Event()
+        # Separate queues for different states
+        self.active_queue: list[str] = []  # Ready to execute
+        self.waiting_queue: dict[str, float] = {}  # Instance ID -> next check time
+        # Throttling: prevent continuous execution without delays
+        self.throttled_queue: dict[str, float] = {}  # Instance ID -> next allowed execution time
+        self._instance_next_execution_time: dict[str, float] = {}  # Track next allowed execution per instance
+        self.THROTTLE_DELAY_SECONDS = 3.0  # Minimum seconds between executions per instance
+        # Performance metrics
+        self._task_execution_times: dict[str, list[float]] = {}
+        self._last_execution_time: dict[str, datetime] = {}
     
     async def start(self):
         """Start the executor"""
@@ -71,12 +83,17 @@ class DAGExecutor:
 
         try:
             # Find all instances that are not completed, failed, or cancelled
+            # Exclude pending_assignment and waiting_for_start (these require manual intervention)
             incomplete_instances = await WorkflowInstance.find(
                 In(WorkflowInstance.status, ["pending", "running", "paused"])
             ).to_list()
 
             queued_count = 0
             for instance in incomplete_instances:
+                # Skip instances that need assignment or manual start
+                if instance.status in ["pending_assignment", "waiting_for_start"]:
+                    continue
+
                 if instance.instance_id not in self.execution_queue:
                     self.execution_queue.append(instance.instance_id)
                     queued_count += 1
@@ -104,13 +121,18 @@ class DAGExecutor:
         """
         Submit an instance for execution by its ID.
         We'll fetch the actual instance from database when processing.
-        
+
         Args:
             instance_id: ID of instance to execute
         """
-        if instance_id not in self.execution_queue:
-            self.execution_queue.append(instance_id)
-            logger.info(f"Instance {instance_id} queued for execution")
+        if instance_id not in self.execution_queue and instance_id not in self.active_queue:
+            self.active_queue.append(instance_id)
+            # Legacy support - also add to old queue
+            if instance_id not in self.execution_queue:
+                self.execution_queue.append(instance_id)
+            # Signal that work is available (wake up the executor loop)
+            self._work_available.set()
+            logger.info(f"Instance {instance_id} queued for execution (active queue)")
     
     async def execute_instance(self, instance_id: str) -> bool:
         """
@@ -138,11 +160,24 @@ class DAGExecutor:
             tenant=getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
         )
 
+        # Check for special statuses that should not be executed
+        if db_instance.status == "pending_assignment":
+            logger.info("Instance is pending assignment, skipping execution",
+                       instance_id=instance_id,
+                       workflow_type=db_instance.workflow_type.value if db_instance.workflow_type else None)
+            return False  # Don't execute until assigned
+
+        if db_instance.status == "waiting_for_start":
+            logger.info("Instance is waiting for manual start by assigned user",
+                       instance_id=instance_id,
+                       assigned_to=db_instance.assigned_user_id or db_instance.assigned_team_id)
+            return False  # Don't execute until manually started
+
         logger.info("🚀 Starting workflow instance execution", extra={
             "workflow_status": db_instance.status,
             "workflow_progress": getattr(db_instance, 'progress', 0)
         })
-        
+
         # Get DAG instance from bag, or recreate it from database
         dag_instance = self.workflow_service.dag_bag.get_instance(instance_id)
         if not dag_instance:
@@ -428,8 +463,9 @@ class DAGExecutor:
         old_status = db_instance.status
         new_status = self._map_status(dag_instance.status)
 
-        # Ensure instance_id is always saved in context
+        # Ensure instance_id and workflow_id are always saved in context
         dag_instance.context["instance_id"] = instance_id
+        dag_instance.context["workflow_id"] = dag_instance.dag.dag_id
 
         db_instance.status = new_status
         db_instance.context = dag_instance.context
@@ -484,36 +520,167 @@ class DAGExecutor:
     
     async def _execution_loop(self):
         """Background execution loop - process queue continuously"""
-        logger.info("🔄 Execution loop started")
+        logger.info("🔄 Execution loop started (optimized with event-driven approach)")
+        import time
+        import random
+
         while not self._should_stop:
             try:
-                # Process queue
-                if self.execution_queue:
-                    instance_id = self.execution_queue.pop(0)
-                    
+                current_time = time.time()
+
+                # First, check throttled queue for instances that can now execute
+                if self.throttled_queue:
+                    ready_from_throttle = [
+                        inst_id for inst_id, next_time in self.throttled_queue.items()
+                        if next_time <= current_time
+                    ]
+                    for instance_id in ready_from_throttle:
+                        del self.throttled_queue[instance_id]
+                        # Add to front of active queue for immediate processing
+                        self.active_queue.insert(0, instance_id)
+                        logger.debug(f"Instance {instance_id} ready after throttle delay")
+
+                # Check active queue for work
+                if self.active_queue:
+                    instance_id = self.active_queue.pop(0)
+
+                    # Check if this instance is throttled (needs to wait before next execution)
+                    if instance_id in self._instance_next_execution_time:
+                        next_allowed_time = self._instance_next_execution_time[instance_id]
+                        if current_time < next_allowed_time:
+                            # Not ready yet, add to throttled queue
+                            self.throttled_queue[instance_id] = next_allowed_time
+                            time_to_wait = next_allowed_time - current_time
+                            logger.info(f"⏳ Throttling {instance_id}, wait {time_to_wait:.1f}s more")
+                            continue  # Skip this instance for now
+                    else:
+                        logger.debug(f"First execution of {instance_id}, no throttling yet")
+
+                    # Remove from legacy queue too
+                    if instance_id in self.execution_queue:
+                        self.execution_queue.remove(instance_id)
+
+                    # Track execution time for metrics
+                    start_time = time.time()
+
                     # Execute instance
                     can_continue = await self.execute_instance(instance_id)
 
+                    # Log execution time
+                    execution_time = time.time() - start_time
+                    if instance_id not in self._task_execution_times:
+                        self._task_execution_times[instance_id] = []
+                    self._task_execution_times[instance_id].append(execution_time)
+                    self._last_execution_time[instance_id] = datetime.utcnow()
+
+                    # Set next allowed execution time with random delay (2-5 seconds)
+                    random_delay = random.uniform(2.0, 5.0)
+                    self._instance_next_execution_time[instance_id] = time.time() + random_delay
+                    logger.debug(f"Instance {instance_id} throttled for {random_delay:.1f}s")
+
+                    if execution_time > 1.0:  # Log slow executions
+                        logger.warning(f"⚠️ Slow execution detected for {instance_id}: {execution_time:.2f}s")
+
                     # Re-queue if still running or waiting
                     if can_continue:
-                        # Check if instance is paused (waiting for external system)
-                        db_instance = await WorkflowInstance.find_one(
-                            WorkflowInstance.instance_id == instance_id
-                        )
-                        if db_instance and db_instance.status == "paused":
-                            # Add delay for polling external systems
-                            await asyncio.sleep(5)
+                        # ALL instances get throttled the same way - 3 seconds minimum between executions
+                        next_exec_time = self._instance_next_execution_time[instance_id]
+                        self.throttled_queue[instance_id] = next_exec_time
+                        wait_time = next_exec_time - current_time
+                        logger.debug(f"⏰ Instance {instance_id} will execute again in {wait_time:.1f}s")
 
-                        self.execution_queue.append(instance_id)
+                # Check waiting queue for instances ready to retry
+                elif self.waiting_queue:
+                    ready_instances = [
+                        inst_id for inst_id, check_time in self.waiting_queue.items()
+                        if check_time <= current_time
+                    ]
+
+                    if ready_instances:
+                        # Move ready instances to throttled or active queue based on their throttle status
+                        for instance_id in ready_instances:
+                            del self.waiting_queue[instance_id]
+
+                            # Check if instance is still throttled
+                            if instance_id in self._instance_next_execution_time:
+                                next_allowed = self._instance_next_execution_time[instance_id]
+                                if current_time < next_allowed:
+                                    # Still throttled, add to throttled queue
+                                    self.throttled_queue[instance_id] = next_allowed
+                                    logger.debug(f"Moving {instance_id} from waiting to throttled queue")
+                                    continue
+
+                            # Not throttled, can execute immediately
+                            self.active_queue.append(instance_id)
+                            self.execution_queue.append(instance_id)
+                            logger.debug(f"Moving {instance_id} from waiting to active queue")
+                        # Signal work available if we added to active queue
+                        if self.active_queue:
+                            self._work_available.set()
+
+                # Fallback to legacy queue processing
+                elif self.execution_queue:
+                    instance_id = self.execution_queue.pop(0)
+
+                    # Check throttling for legacy queue too
+                    if instance_id in self._instance_next_execution_time:
+                        next_allowed_time = self._instance_next_execution_time[instance_id]
+                        if current_time < next_allowed_time:
+                            # Not ready yet, add to throttled queue
+                            self.throttled_queue[instance_id] = next_allowed_time
+                            time_to_wait = next_allowed_time - current_time
+                            logger.info(f"⏳ Throttling {instance_id} from legacy queue, wait {time_to_wait:.1f}s more")
+                            continue  # Skip this instance for now
+
+                    # Execute
+                    start_time = time.time()
+                    can_continue = await self.execute_instance(instance_id)
+                    execution_time = time.time() - start_time
+
+                    # Apply random throttling for next execution (2-5 seconds)
+                    random_delay = random.uniform(2.0, 5.0)
+                    self._instance_next_execution_time[instance_id] = time.time() + random_delay
+                    logger.debug(f"Legacy instance {instance_id} throttled for {random_delay:.1f}s")
+
+                    if can_continue:
+                        # Re-queue with throttling
+                        next_exec_time = self._instance_next_execution_time[instance_id]
+                        self.throttled_queue[instance_id] = next_exec_time
+                        logger.debug(f"⏰ Legacy instance {instance_id} throttled for next execution")
+
+                # Check if there are throttled instances waiting
+                elif self.throttled_queue:
+                    # No sleep - just wait for event with timeout
+                    try:
+                        await asyncio.wait_for(
+                            self._work_available.wait(),
+                            timeout=0.05  # 50ms timeout while throttled instances are waiting
+                        )
+                        # Clear the event for next wait
+                        self._work_available.clear()
+                    except asyncio.TimeoutError:
+                        # Normal - continue to check throttled queue
+                        pass
+
                 else:
-                    # Only sleep if queue is empty to avoid CPU spinning
-                    await asyncio.sleep(0.1)
-                
+                    # No work available - wait for signal or check periodically
+                    try:
+                        await asyncio.wait_for(
+                            self._work_available.wait(),
+                            timeout=0.1  # 100ms timeout when truly idle
+                        )
+                        # Clear the event for next wait
+                        self._work_available.clear()
+                    except asyncio.TimeoutError:
+                        # Normal - just continue checking
+                        pass
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Execution loop error: {str(e)}")
-                await asyncio.sleep(1)
+                # On error, add small delay but don't block for long
+                await asyncio.sleep(0.1)
     
     def resume_instance(self, instance_id: str):
         """
@@ -525,13 +692,24 @@ class DAGExecutor:
         """
         logger.info(f"Resume requested for instance {instance_id}")
 
+        # Remove from waiting queue if present
+        if instance_id in self.waiting_queue:
+            del self.waiting_queue[instance_id]
+            logger.debug(f"Removed {instance_id} from waiting queue")
+
         # Execute immediately without waiting for the loop
         asyncio.create_task(self._execute_immediate(instance_id))
 
-        # Also add to queue for continued processing if needed
-        if instance_id not in self.execution_queue:
-            self.execution_queue.append(instance_id)
-            logger.info(f"Instance {instance_id} executing immediately and queued for continuation")
+        # Add to active queue for high priority processing
+        if instance_id not in self.active_queue:
+            # Insert at beginning for priority processing
+            self.active_queue.insert(0, instance_id)
+            # Legacy support
+            if instance_id not in self.execution_queue:
+                self.execution_queue.insert(0, instance_id)
+            # Signal work available immediately
+            self._work_available.set()
+            logger.info(f"Instance {instance_id} executing immediately and prioritized in active queue")
         else:
             logger.info(f"Instance {instance_id} executing immediately (already in queue)")
 
@@ -575,9 +753,55 @@ class DAGExecutor:
             await db_instance.save()
     
     def get_stats(self):
-        """Get executor statistics"""
+        """Get executor statistics with performance metrics"""
+        import statistics
+
+        # Calculate average execution times
+        avg_times = {}
+        for instance_id, times in self._task_execution_times.items():
+            if times:
+                avg_times[instance_id] = {
+                    "avg": statistics.mean(times),
+                    "max": max(times),
+                    "min": min(times),
+                    "count": len(times)
+                }
+
+        # Sort by average time (slowest first)
+        slow_instances = sorted(
+            avg_times.items(),
+            key=lambda x: x[1]["avg"],
+            reverse=True
+        )[:5]  # Top 5 slowest
+
+        # Calculate throttled instances and their wait times
+        import time
+        current_time = time.time()
+        throttled_info = {}
+        for instance_id, next_time in self.throttled_queue.items():
+            wait_time = max(0, next_time - current_time)
+            throttled_info[instance_id] = f"{wait_time:.1f}s"
+
         return {
             "status": self.status.value,
             "queued_instances": len(self.execution_queue),
-            "queue": self.execution_queue[:10]  # Show first 10 in queue
+            "active_queue_size": len(self.active_queue),
+            "waiting_queue_size": len(self.waiting_queue),
+            "throttled_queue_size": len(self.throttled_queue),
+            "queue": self.execution_queue[:10],  # Show first 10 in queue
+            "active_queue": self.active_queue[:10],
+            "waiting_instances": list(self.waiting_queue.keys())[:10],
+            "throttled_instances": throttled_info,
+            "throttle_delay": "2-5s (random)",
+            "performance_metrics": {
+                "slow_instances": dict(slow_instances),
+                "total_instances_tracked": len(self._task_execution_times)
+            },
+            "optimizations": {
+                "event_driven": True,
+                "separate_queues": True,
+                "throttling_enabled": True,
+                "throttle_delay": "2-5s random per instance",
+                "non_blocking": "No sleeps, timestamp-based checks"
+            }
         }

@@ -253,7 +253,14 @@ class WorkflowInstance(Document):
     instance_id: str = Field(..., description="Unique instance identifier")
     workflow_id: str = Field(..., description="Parent workflow ID")
     workflow_version: str = Field(default="1.0.0", description="Workflow version used")
-    
+
+    # Parent workflow reference (for child workflows initiated by WorkflowStartOperator)
+    parent_instance_id: Optional[str] = Field(None, description="Parent workflow instance ID if this is a child workflow")
+    parent_workflow_id: Optional[str] = Field(None, description="Parent workflow ID if this is a child workflow")
+
+    # Workflow type for filtering
+    workflow_type: Optional[WorkflowType] = Field(None, description="Type of workflow (ADMIN, PROCESS, etc.)")
+
     # User context
     user_id: str = Field(..., description="User who initiated the instance")
     user_data: Dict[str, Any] = Field(default_factory=dict, description="User-specific data")
@@ -267,6 +274,7 @@ class WorkflowInstance(Document):
     completed_steps: List[str] = Field(default_factory=list, description="List of completed step IDs")
     failed_steps: List[str] = Field(default_factory=list, description="List of failed step IDs")
     pending_approvals: List[str] = Field(default_factory=list, description="Steps waiting for approval")
+    task_states: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Individual task state data including output_data")
     
     # Timing
     started_at: datetime = Field(default_factory=datetime.utcnow)
@@ -325,9 +333,18 @@ class WorkflowInstance(Document):
             IndexModel([("assigned_team_id", 1)]),
             IndexModel([("assignment_status", 1)]),
             IndexModel([("assigned_at", -1)]),
+            # Parent workflow indexes
+            IndexModel([("parent_instance_id", 1)]),
+            IndexModel([("parent_workflow_id", 1)]),
+            IndexModel([("workflow_type", 1)]),
             # Compound indexes for efficient filtering
             IndexModel([("assigned_user_id", 1), ("assignment_status", 1)]),
             IndexModel([("assigned_team_id", 1), ("assignment_status", 1)]),
+            IndexModel([("workflow_type", 1), ("status", 1)]),
+            IndexModel([("workflow_type", 1), ("assignment_status", 1)]),
+            # Performance optimization indexes for executor queries
+            IndexModel([("status", 1), ("updated_at", -1)]),  # For finding active instances
+            IndexModel([("status", 1), ("priority", -1), ("started_at", 1)]),  # Priority-based execution
         ]
     
     # Assignment management methods
