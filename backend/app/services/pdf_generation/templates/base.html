@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Entity Report{% endblock %}</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 20mm;
+        }
+        body {
+            font-family: 'Helvetica', 'Arial', sans-serif;
+            line-height: 1.6;
+            color: #333;
+        }
+        .header {
+            background: #f0f0f0;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 30px;
+            position: relative;
+        }
+        .qr-code {
+            width: 100px;
+            height: 100px;
+            float: right;
+        }
+        h1 {
+            color: #2c3e50;
+            margin: 0;
+        }
+        h2 {
+            color: #34495e;
+            border-bottom: 2px solid #ecf0f1;
+            padding-bottom: 10px;
+        }
+        .info-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        .info-table td {
+            padding: 8px;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        .info-table td:first-child {
+            font-weight: bold;
+            color: #7f8c8d;
+            width: 30%;
+            text-align: right;
+            padding-right: 15px;
+        }
+        .section {
+            margin: 30px 0;
+        }
+        .signature-block {
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 10px 0;
+            background: #fafafa;
+        }
+        .signature-qr {
+            width: 80px;
+            height: 80px;
+            float: left;
+            margin-right: 15px;
+        }
+        .footer {
+            margin-top: 50px;
+            padding-top: 20px;
+            border-top: 1px solid #ecf0f1;
+            text-align: center;
+            font-size: 0.9em;
+            color: #7f8c8d;
+        }
+        {% block styles %}{% endblock %}
+    </style>
+</head>
+<body>
+    {% block content %}{% endblock %}
+</body>
+</html>

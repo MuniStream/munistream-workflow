@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}Property Registration - {{ entity.name }}{% endblock %}
+
+{% block content %}
+<div class="header" style="background: #e8f5e9;">
+    {% if qr_code_data_url %}
+    <img src="{{ qr_code_data_url }}" class="qr-code" alt="QR Code">
+    {% endif %}
+    <h1>🏠 {{ entity.name }}</h1>
+    <p><strong>Property ID:</strong> {{ entity.data.get('predial_id', entity.entity_id) }}</p>
+    <p><strong>Type:</strong> {{ entity.data.get('property_type', 'Property')|title }}</p>
+    <p><strong>Status:</strong> {{ entity.status }}</p>
+</div>
+
+<div class="section">
+    <h2>Property Information</h2>
+    <table class="info-table">
+        {% if entity.data.get('predial_id') %}
+        <tr>
+            <td>Cadastral ID</td>
+            <td>
+                {% if field_qr_codes and 'predial_id' in field_qr_codes %}
+                    <img src="{{ field_qr_codes['predial_id'] }}" style="width: 100px; height: 100px;">
+                {% else %}
+                    {{ entity.data.predial_id }}
+                {% endif %}
+            </td>
+        </tr>
+        {% endif %}
+        {% if entity.data.get('property_type') %}
+        <tr>
+            <td>Property Type</td>
+            <td>{{ entity.data.property_type|title }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.get('use_type') %}
+        <tr>
+            <td>Land Use</td>
+            <td>{{ entity.data.use_type|title }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.get('surface_area') %}
+        <tr>
+            <td>Surface Area</td>
+            <td>{{ entity.data.surface_area }} m²</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.get('construction_area') %}
+        <tr>
+            <td>Construction Area</td>
+            <td>{{ entity.data.construction_area }} m²</td>
+        </tr>
+        {% endif %}
+    </table>
+</div>
+
+{% if entity.data.get('address') %}
+<div class="section">
+    <h2>Location</h2>
+    <table class="info-table">
+        {% if entity.data.address.get('street') %}
+        <tr>
+            <td>Street</td>
+            <td>{{ entity.data.address.street }} {{ entity.data.address.get('number', '') }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.address.get('colony') %}
+        <tr>
+            <td>Colony</td>
+            <td>{{ entity.data.address.colony }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.address.get('city') %}
+        <tr>
+            <td>City</td>
+            <td>{{ entity.data.address.city }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.address.get('state') %}
+        <tr>
+            <td>State</td>
+            <td>{{ entity.data.address.state }}</td>
+        </tr>
+        {% endif %}
+        {% if entity.data.address.get('zip_code') %}
+        <tr>
+            <td>ZIP Code</td>
+            <td>{{ entity.data.address.zip_code }}</td>
+        </tr>
+        {% endif %}
+    </table>
+</div>
+{% endif %}
+
+{% if entity.relationships %}
+<div class="section">
+    <h2>Ownership</h2>
+    <table class="info-table">
+        {% for rel in entity.relationships %}
+        {% if rel.relationship_type == 'owns' %}
+        <tr>
+            <td>Owner ID</td>
+            <td>{{ rel.from_entity_id }}</td>
+        </tr>
+        {% if rel.metadata.get('registration_date') %}
+        <tr>
+            <td>Registration Date</td>
+            <td>{{ rel.metadata.registration_date|format_date }}</td>
+        </tr>
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if signatures %}
+<div class="section">
+    <h2>Digital Signatures</h2>
+    {% for sig in signatures %}
+    <div class="signature-block">
+        {% if sig.qr_code %}
+        <img src="{{ sig.qr_code }}" class="signature-qr" alt="Signature QR">
+        {% endif %}
+        <div>
+            <strong>{{ sig.signer_name }}</strong> ({{ sig.role }})<br>
+            Signed: {{ sig.signed_at|format_date }}
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="footer">
+    <p>Generated on {{ generated_at|format_date }}</p>
+    <p>Property Registration Certificate - MuniStream Platform</p>
+</div>
+{% endblock %}

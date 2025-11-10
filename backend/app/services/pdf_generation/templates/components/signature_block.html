@@ -1,0 +1,33 @@
+<!-- Digital Signature Block Component -->
+<div class="signature-block" style="border: 1px solid #ddd; padding: 15px; margin: 10px 0; background: #fafafa;">
+    {% if signature.qr_code %}
+    <div style="float: left; margin-right: 15px;">
+        <img src="{{ signature.qr_code }}"
+             alt="Signature QR Code"
+             style="width: 80px; height: 80px;">
+    </div>
+    {% endif %}
+
+    <div>
+        <strong>{{ signature.signer_name }}</strong>
+        {% if signature.role %}
+        <span style="color: #666;">({{ signature.role }})</span>
+        {% endif %}
+        <br>
+
+        {% if signature.signed_at %}
+        <span style="font-size: 0.9em; color: #666;">
+            Signed: {{ signature.signed_at|format_date }}
+        </span>
+        <br>
+        {% endif %}
+
+        {% if signature.certificate_id %}
+        <span style="font-size: 0.8em; color: #999;">
+            Certificate: {{ signature.certificate_id }}
+        </span>
+        {% endif %}
+    </div>
+
+    <div style="clear: both;"></div>
+</div>

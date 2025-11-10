@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Person Entity - {{ entity.name }}{% endblock %}
+
+{% block content %}
+<div class="header" style="background: #e3f2fd;">
+    {% if qr_code_data_url %}
+    <img src="{{ qr_code_data_url }}" class="qr-code" alt="QR Code">
+    {% endif %}
+    <h1>👤 {{ entity.name }}</h1>
+    <p><strong>Entity ID:</strong> {{ entity.entity_id }}</p>
+    <p><strong>Status:</strong> {{ entity.status }}</p>
+    {% if entity.verified %}
+    <p style="color: green;">✅ Verified</p>
+    {% endif %}
+</div>
+
+<div class="section">
+    <h2>Personal Information</h2>
+    <table class="info-table">
+        {% for field_name, field_value in entity.data.items() %}
+        {% if field_name not in ['documents', 'signatures'] %}
+        <tr>
+            <td>{{ field_name|format_field }}</td>
+            <td>
+                {% if field_qr_codes and field_name in field_qr_codes %}
+                    <img src="{{ field_qr_codes[field_name] }}" style="width: 100px; height: 100px;">
+                {% else %}
+                    {{ field_value|format_value }}
+                {% endif %}
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </table>
+</div>
+
+{% if entity.relationships %}
+<div class="section">
+    <h2>Relationships</h2>
+    <table class="info-table">
+        {% for rel in entity.relationships %}
+        <tr>
+            <td>{{ rel.relationship_type|title }}</td>
+            <td>{{ rel.to_entity_id }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endif %}
+
+{% if signatures %}
+<div class="section">
+    <h2>Digital Signatures</h2>
+    {% for sig in signatures %}
+    <div class="signature-block">
+        {% if sig.qr_code %}
+        <img src="{{ sig.qr_code }}" class="signature-qr" alt="Signature QR">
+        {% endif %}
+        <div>
+            <strong>{{ sig.signer_name }}</strong> ({{ sig.role }})<br>
+            Signed: {{ sig.signed_at|format_date }}
+        </div>
+        <div style="clear: both;"></div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="footer">
+    <p>Generated on {{ generated_at|format_date }}</p>
+    <p>Person Entity Certificate - MuniStream Platform</p>
+</div>
+{% endblock %}

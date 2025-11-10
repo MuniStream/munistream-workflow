@@ -1,0 +1,11 @@
+<!-- QR Code Block Component -->
+<div class="qr-block" style="text-align: center; margin: 20px 0;">
+    {% if qr_code_url %}
+    <img src="{{ qr_code_url }}"
+         alt="QR Code for {{ label or 'Verification' }}"
+         style="width: {{ size or '150px' }}; height: {{ size or '150px' }}; border: 1px solid #ddd; padding: 10px;">
+    {% endif %}
+    {% if label %}
+    <p style="margin-top: 10px; font-size: 0.9em; color: #666;">{{ label }}</p>
+    {% endif %}
+</div>

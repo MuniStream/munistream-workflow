@@ -1,0 +1,19 @@
+<!-- Data Table Component -->
+<table class="data-table" style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+    {% for row in data %}
+    <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #ecf0f1; font-weight: bold; color: #7f8c8d; width: 30%; text-align: right; padding-right: 15px;">
+            {{ row.label }}
+        </td>
+        <td style="padding: 8px; border-bottom: 1px solid #ecf0f1;">
+            {% if row.type == 'qr_code' and row.qr_url %}
+                <img src="{{ row.qr_url }}" style="width: 100px; height: 100px;">
+            {% elif row.type == 'image' and row.image_url %}
+                <img src="{{ row.image_url }}" style="max-width: 200px; max-height: 150px;">
+            {% else %}
+                {{ row.value }}
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
