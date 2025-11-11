@@ -57,7 +57,7 @@ async def convert_team_to_response(team: TeamModel) -> TeamResponse:
 @router.post("/", response_model=TeamResponse)
 async def create_team(
     team_data: TeamCreate,
-    current_user: dict = Depends(require_manager_or_admin)
+    current_user: dict = Depends(get_current_user)
 ):
     """Create a new team"""
     # Check if team_id already exists
@@ -74,7 +74,7 @@ async def create_team(
         max_concurrent_tasks=team_data.max_concurrent_tasks,
         specializations=team_data.specializations,
         working_hours=team_data.working_hours,
-        created_by=str(current_user.id)
+        created_by=str(current_user.get("sub", "unknown"))
     )
     
     await team.create()

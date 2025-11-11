@@ -183,16 +183,19 @@ class KeycloakProvider:
     async def get_user_info(self, access_token: str) -> Dict[str, Any]:
         """Get user information from access token"""
         token_claims = await self.verify_token(access_token)
+        extracted_roles = self.extract_roles(token_claims)
 
-        return {
+        user_info = {
             "sub": token_claims.get("sub"),
             "email": token_claims.get("email"),
             "username": token_claims.get("preferred_username"),
             "name": token_claims.get("name"),
-            "roles": self.extract_roles(token_claims),
+            "roles": extracted_roles,
             "email_verified": token_claims.get("email_verified", False),
             "token_claims": token_claims
         }
+
+        return user_info
 
 
 # Global provider instance
