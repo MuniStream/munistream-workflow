@@ -107,16 +107,12 @@ async def list_assignments(
         elif user_id:
             query["assigned_user_id"] = user_id
         else:
-            # Show only unassigned instances for admins/managers
-            query["$and"] = [
-                {"assigned_user_id": {"$in": [None, ""]}},
-                {"assigned_team_id": {"$in": [None, ""]}}
-            ]
+            # Show all admin instances for admins/managers (both assigned and unassigned)
+            pass  # No additional filtering - show all instances
 
-    # Only show ADMIN workflows and those needing assignment (exclude PROCESS workflows)
-    # Always exclude process workflows unless explicitly requested
-    if workflow_type != WorkflowType.PROCESS:
-        query["workflow_type"] = {"$ne": WorkflowType.PROCESS}
+    # Only show ADMIN workflows by default
+    if not workflow_type:
+        query["workflow_type"] = WorkflowType.ADMIN
 
     try:
         # Debug: Print the query being executed

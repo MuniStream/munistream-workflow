@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
 from datetime import datetime
 import uuid
+import logging
 from beanie import PydanticObjectId
 
 from ...schemas.workflow import (
@@ -33,6 +34,7 @@ from ...services.assignment_service import assignment_service
 from ...models.team import TeamModel
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/", response_model=InstanceResponse)
@@ -79,11 +81,17 @@ async def get_instance(
     current_user: dict = Depends(get_current_user)
 ):
     """Get DAG instance details"""
-    dag_instance = await workflow_service.get_instance(instance_id)
-    
+    try:
+        dag_instance = await workflow_service.get_instance(instance_id)
+    except Exception as e:
+        logger.error(f"Error getting instance {instance_id}: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        logger.error(f"Exception details: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
     if not dag_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
-    
+
     # Check permissions - user can only see their own instances unless admin
     if dag_instance.user_id != str(current_user.get("sub")) and "admin" not in current_user.get("roles", []):
         raise HTTPException(status_code=403, detail="Access denied")
@@ -393,8 +401,9 @@ async def auto_assign_new_instance(instance_id: str, workflow_def: WorkflowDefin
 
 
 @router.get("/", response_model=InstanceListResponse)
+@router.get("", response_model=InstanceListResponse)
 async def list_instances(
-    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
+    current_user: dict = Depends(get_current_user),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     workflow_id: Optional[str] = None,
@@ -717,16 +726,6 @@ async def get_citizen_validations(
         })
     
     return validation_items
-
-
-@router.get("/{instance_id}", response_model=InstanceResponse)
-async def get_instance(instance_id: str):
-    """Get a specific workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
-    return convert_instance_to_response(instance)
 
 
 @router.put("/{instance_id}", response_model=InstanceResponse)
