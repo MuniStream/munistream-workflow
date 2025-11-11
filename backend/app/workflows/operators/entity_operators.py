@@ -26,6 +26,7 @@ class EntityCreationOperator(BaseOperator):
         static_data: Optional[Dict[str, Any]] = None,  # Static data to include
         visualization_config: Optional[Dict[str, Any]] = None,  # Field-level visualization hints
         entity_display_config: Optional[Dict[str, Any]] = None,  # Entity-level display config
+        user_id_source: Optional[str] = None,  # Optional: context field to get user_id from (admin only)
         **kwargs
     ):
         """
@@ -39,6 +40,7 @@ class EntityCreationOperator(BaseOperator):
             static_data: Static data to always include
             visualization_config: Field-level visualization hints (e.g., {"field": {"type": "qr_code"}})
             entity_display_config: Entity-level display configuration (e.g., {"default_view": "pdf_report"})
+            user_id_source: Optional context field to get user_id from (admin workflows only)
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
@@ -46,6 +48,7 @@ class EntityCreationOperator(BaseOperator):
         self.data_mapping = data_mapping or {}
         self.static_data = static_data or {}
         self.visualization_config = visualization_config or {}
+        self.user_id_source = user_id_source
         self.entity_display_config = entity_display_config or {
             "default_view": "card",  # card | pdf_report | table
             "pdf_template": None,     # Template name for PDF generation
@@ -60,13 +63,21 @@ class EntityCreationOperator(BaseOperator):
             print(f"   Entity type: {self.entity_type}")
             print(f"   Name source: {self.name_source}")
             
-            # Get user ID from context - could be user_id or customer_id
-            user_id = context.get("user_id") or context.get("customer_id")
+            # Get user ID from context - prioritize user_id_source if specified (admin workflows)
+            user_id = None
+            if self.user_id_source:
+                user_id = context.get(self.user_id_source)
+                print(f"   Using admin user_id_source '{self.user_id_source}': {user_id}")
+
+            # Fallback to standard user_id or customer_id
             if not user_id:
-                print(f"❌ EntityCreationOperator: No user_id or customer_id in context")
+                user_id = context.get("user_id") or context.get("customer_id")
+
+            if not user_id:
+                print(f"❌ EntityCreationOperator: No user_id, customer_id, or {self.user_id_source or 'user_id_source'} in context")
                 return TaskResult(
                     status="failed",
-                    error="No user_id or customer_id in context"
+                    error="No user_id, customer_id, or user_id_source in context"
                 )
             
             # Get entity name - can be from context or static

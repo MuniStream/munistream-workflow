@@ -256,7 +256,18 @@ class WorkflowStartOperator(BaseOperator):
             # Otherwise, check status (will return WAITING)
             logger.info("Waiting for child workflow completion",
                        child_instance_id=self.child_instance_id)
-            return await self._check_child_status(context)
+            try:
+                print(f"[DEBUG] About to call _check_child_status...")
+                result = await self._check_child_status(context)
+                print(f"[DEBUG] _check_child_status returned: {result}")
+                print(f"[DEBUG] Result status: {result.status}")
+                return result
+            except Exception as e:
+                print(f"[DEBUG] EXCEPTION in _check_child_status: {e}")
+                print(f"[DEBUG] Exception type: {type(e).__name__}")
+                import traceback
+                traceback.print_exc()
+                raise
 
         except Exception as e:
             logger.error("Exception in WorkflowStartOperator.execute",
@@ -605,26 +616,43 @@ class WorkflowStartOperator(BaseOperator):
                 )
 
         # Check if completed
+        print(f"[DEBUG] child.status = '{child.status}'")
         if child.status == "completed":
             # Check terminal status matches requirement
             terminal_status = child.terminal_status or "completed"
+            print(f"[DEBUG] child.terminal_status = '{child.terminal_status}'")
+            print(f"[DEBUG] terminal_status = '{terminal_status}'")
+            print(f"[DEBUG] self.required_status = '{self.required_status}'")
+            print(f"[DEBUG] Checking: terminal_status == self.required_status -> {terminal_status == self.required_status}")
+            print(f"[DEBUG] Checking: self.required_status == 'any' -> {self.required_status == 'any'}")
 
             if terminal_status == self.required_status or self.required_status == "any":
+                print(f"[DEBUG] SUCCESS: Child workflow completion validated")
                 logger.info("Child workflow completed",
                            child_instance_id=self.child_instance_id,
                            terminal_status=terminal_status)
-                return TaskResult(
-                    status=TaskStatus.COMPLETED,
-                    data={
-                        "child_instance_id": self.child_instance_id,  # Add instance_id
-                        "child_workflow_id": self.child_instance_id,  # Keep for backward compatibility
-                        "child_status": terminal_status,
-                        "child_result": child.context.get("result", {}),
-                        "completed_at": child.completed_at.isoformat() if child.completed_at else None,
-                        "message": f"Child workflow completed with status {terminal_status}"
-                    }
-                )
+                try:
+                    print(f"[DEBUG] Creating SUCCESS TaskResult...")
+                    task_result = TaskResult(
+                        status=TaskStatus.CONTINUE,
+                        data={
+                            "child_instance_id": self.child_instance_id,  # Add instance_id
+                            "child_workflow_id": self.child_instance_id,  # Keep for backward compatibility
+                            "child_status": terminal_status,
+                            "child_result": child.context.get("result", {}) if child.context else {},
+                            "completed_at": child.completed_at.isoformat() if child.completed_at else None,
+                            "message": f"Child workflow completed with status {terminal_status}"
+                        }
+                    )
+                    print(f"[DEBUG] SUCCESS TaskResult created successfully")
+                    return task_result
+                except Exception as e:
+                    print(f"[DEBUG] EXCEPTION creating SUCCESS TaskResult: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
             else:
+                print(f"[DEBUG] FAILURE: Terminal status mismatch")
                 logger.warning("Child workflow completed with unexpected status",
                               child_instance_id=self.child_instance_id,
                               actual_status=terminal_status,
