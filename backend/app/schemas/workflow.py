@@ -91,6 +91,8 @@ class InstanceStatus(str, Enum):
     CANCELLED = "cancelled"
     AWAITING_INPUT = "awaiting_input"
     PENDING_VALIDATION = "pending_validation"
+    WAITING_FOR_START = "waiting_for_start"
+    PENDING_ASSIGNMENT = "pending_assignment"
 
 
 class InstanceResponse(BaseModel):

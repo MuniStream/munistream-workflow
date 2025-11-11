@@ -19,6 +19,7 @@ from .entity_operators import (
 )
 from .entity_picker_operator import EntityPickerOperator
 from .document_operators import DocumentCreationOperator, DocumentRequirementOperator
+from .workflow_start_operator import WorkflowStartOperator
 
 __all__ = [
     # Base classes
@@ -56,5 +57,8 @@ __all__ = [
 
     # Document operators
     "DocumentCreationOperator",
-    "DocumentRequirementOperator"
+    "DocumentRequirementOperator",
+
+    # Workflow operators
+    "WorkflowStartOperator"
 ]

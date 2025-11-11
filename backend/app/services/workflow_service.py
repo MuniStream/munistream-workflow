@@ -10,7 +10,8 @@ from ..models.workflow import (
     WorkflowInstance,
     StepExecution,
     ApprovalRequest,
-    WorkflowAuditLog
+    WorkflowAuditLog,
+    WorkflowType
 )
 from ..workflows.dag import DAG, DAGInstance, DAGBag, InstanceStatus
 from ..workflows.executor import DAGExecutor
@@ -113,6 +114,7 @@ class WorkflowService:
             description=dag.description or "",
             category=dag.category if hasattr(dag, 'category') else "general",
             status="active",  # DAGs in DAGBag are always active
+            workflow_type=dag.workflow_type if hasattr(dag, 'workflow_type') else WorkflowType.PROCESS,
             tags=dag.tags if hasattr(dag, 'tags') else [],
             metadata=dag.metadata if hasattr(dag, 'metadata') else {},
             created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
@@ -139,6 +141,7 @@ class WorkflowService:
                 description=dag.description or "",
                 category=dag.category if hasattr(dag, 'category') else "general",
                 status="active",  # DAGs in DAGBag are always active
+                workflow_type=dag.workflow_type if hasattr(dag, 'workflow_type') else WorkflowType.PROCESS,
                 tags=dag.tags if hasattr(dag, 'tags') else [],
                 metadata=dag.metadata if hasattr(dag, 'metadata') else {},
                 created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
@@ -214,6 +217,7 @@ class WorkflowService:
             instance_id=dag_instance.instance_id,
             workflow_id=dag_instance.dag.dag_id,
             workflow_version=dag_instance.dag.version,
+            workflow_type=dag_instance.dag.workflow_type,
             user_id=user_id,
             user_data=initial_data or {},
             status=status_mapping.get(dag_instance.status, "pending"),
