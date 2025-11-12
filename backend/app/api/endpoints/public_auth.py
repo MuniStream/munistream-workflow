@@ -400,12 +400,13 @@ async def track_instance(
 async def get_customer_instances(
     current_customer: Customer = Depends(get_current_customer)
 ):
-    """Get all workflow instances for the current customer"""
-    from ...models.workflow import WorkflowInstance
+    """Get all workflow instances for the current customer (excluding ADMIN workflows)"""
+    from ...models.workflow import WorkflowInstance, WorkflowType
 
-    # Find all instances for this customer
+    # Find all instances for this customer, excluding ADMIN workflows
     instances = await WorkflowInstance.find(
-        WorkflowInstance.user_id == str(current_customer.id)
+        WorkflowInstance.user_id == str(current_customer.id),
+        WorkflowInstance.workflow_type != WorkflowType.ADMIN
     ).sort(-WorkflowInstance.created_at).to_list()
 
     # Get workflow definitions for names
@@ -417,6 +418,7 @@ async def get_customer_instances(
                 "instance_id": inst.instance_id,
                 "workflow_id": inst.workflow_id,
                 "workflow_name": getattr(await workflow_service.get_workflow_definition(inst.workflow_id), 'name', inst.workflow_id) if inst.workflow_id else inst.workflow_id,
+                "workflow_type": inst.workflow_type,
                 "status": inst.status,
                 "current_step": inst.current_step,
                 "created_at": inst.created_at,
