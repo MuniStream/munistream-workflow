@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from ...services.workflow_service import workflow_service
 from ...models.workflow import WorkflowInstance, WorkflowDefinition
 from ...models.customer import Customer
+from .public_auth import get_current_customer_optional
 from ...models.legal_entity import LegalEntity, EntityType
 from ...services.entity_service import EntityService
 from ...workflows.dag import DAG
@@ -351,6 +352,101 @@ async def get_workflow_by_id(
     workflow_data["metadata"] = workflow.metadata or {}
     
     return workflow_data
+
+
+@router.get("/workflows/{workflow_id}/pre-check")
+async def pre_check_workflow(
+    workflow_id: str,
+    current_customer: Optional[Customer] = Depends(get_current_customer_optional)
+):
+    """
+    Pre-check all operator requirements for a workflow.
+    Returns information about what the workflow needs before it can be started.
+
+    This endpoint checks all operators in the workflow and returns:
+    - Overall readiness status
+    - Requirements for each operator
+    - What resources are available
+    - What actions are needed to fulfill missing requirements
+    """
+    # Get workflow definition
+    workflow = await workflow_service.get_workflow_definition(workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # Get the actual DAG
+    dag = workflow_service.dag_bag.get_dag(workflow_id)
+    if not dag:
+        raise HTTPException(status_code=404, detail="Workflow DAG not found")
+
+    # Build context for pre-check
+    context = {
+        "workflow_id": workflow_id,
+        "user_id": str(current_customer.id) if current_customer else None
+    }
+
+    # Pre-check each operator in the DAG
+    operator_checks = []
+    overall_ready = True
+
+    for task_id, task in dag.tasks.items():
+        # Get the operator
+        operator = task
+
+        # Run pre-check for this operator
+        try:
+            check_result = await operator.pre_check(context)
+
+            operator_info = {
+                "task_id": task_id,
+                "task_type": operator.__class__.__name__,
+                "ready": check_result.get("ready", True),
+                "requirements": check_result.get("requirements", []),
+                "message": check_result.get("message", ""),
+                "missing_critical": check_result.get("missing_critical", []),
+                "missing_optional": check_result.get("missing_optional", [])
+            }
+
+            # Update overall readiness
+            if not check_result.get("ready", True):
+                overall_ready = False
+
+            operator_checks.append(operator_info)
+
+        except Exception as e:
+            # If pre-check fails, mark as not ready
+            operator_checks.append({
+                "task_id": task_id,
+                "task_type": operator.__class__.__name__,
+                "ready": False,
+                "requirements": [],
+                "message": f"Error checking requirements: {str(e)}",
+                "missing_critical": [],
+                "missing_optional": []
+            })
+            overall_ready = False
+
+    # Build response
+    response = {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow.name,
+        "overall_ready": overall_ready,
+        "operator_checks": operator_checks,
+        "summary": {
+            "total_operators": len(operator_checks),
+            "ready_operators": sum(1 for op in operator_checks if op["ready"]),
+            "blocked_operators": sum(1 for op in operator_checks if not op["ready"])
+        }
+    }
+
+    # Add user-friendly message
+    if overall_ready:
+        response["message"] = "All requirements fulfilled. Workflow is ready to start."
+    else:
+        blocked_count = response["summary"]["blocked_operators"]
+        response["message"] = f"{blocked_count} operator(s) have missing requirements. Please review and fulfill them before starting."
+
+    return response
 
 
 def _get_workflow_icon(category: Optional[str]) -> str:
