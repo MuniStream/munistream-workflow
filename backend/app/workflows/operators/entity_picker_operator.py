@@ -7,7 +7,7 @@ Extends MultiEntityRequirementOperator to add selection interface for found enti
 from typing import Dict, Any, List
 import logging
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, OperatorRequirement, RequirementStatus
 from .entity_operators import MultiEntityRequirementOperator
 from ...services.entity_service import EntityService
 from ...core.logging_config import get_workflow_logger, set_workflow_context
@@ -92,7 +92,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 req["max_count"] = req.get("min_count", 1)
             if "display_title" not in req:
                 entity_type = req["entity_type"]
-                req["display_title"] = f"Select {entity_type.title()}"
+                req["display_title"] = f"{entity_type.title()}"
             if "display_fields" not in req:
                 # Default display fields based on entity type
                 if req["entity_type"] == "document":
@@ -101,6 +101,139 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                     req["display_fields"] = ["name", "email"]
                 else:
                     req["display_fields"] = ["name"]
+
+    def get_requirements(self) -> List[OperatorRequirement]:
+        """
+        Define entity requirements for this operator.
+        Converts the entity-specific requirements into generic OperatorRequirement objects.
+        """
+        operator_requirements = []
+
+        for req_config in self.requirements:
+            # Extract requirement details
+            entity_type = req_config["entity_type"]
+            min_count = req_config.get("min_count", 1)
+            store_as = req_config.get("store_as", f"{entity_type}_entities")
+            display_title = req_config.get("display_title", f"{entity_type.title()}")
+            info = req_config.get("info", {})
+
+            # Create a generic requirement
+            operator_requirements.append(OperatorRequirement(
+                requirement_id=store_as,
+                type="entity",  # This is an entity requirement
+                name=display_title,
+                description=info.get("instructions", f"At least {min_count} {entity_type} required"),
+                critical=min_count > 0,  # Critical if at least one is required
+                metadata={
+                    "entity_type": entity_type,
+                    "min_count": min_count,
+                    "max_count": req_config.get("max_count", min_count),
+                    "filters": req_config.get("filters", {}),
+                    "workflow_id": info.get("workflow_id"),
+                    "display_name": info.get("display_name"),
+                    "original_config": req_config  # Store full config for reference
+                }
+            ))
+
+        return operator_requirements
+
+    async def check_requirement(self,
+                               requirement: OperatorRequirement,
+                               context: Dict[str, Any]) -> RequirementStatus:
+        """
+        Check if entity requirements are met.
+        Queries the database to see if required entities exist for the user.
+        """
+        if requirement.type != "entity":
+            # This operator only knows how to check entity requirements
+            return await super().check_requirement(requirement, context)
+
+        # Extract metadata
+        metadata = requirement.metadata
+        entity_type = metadata.get("entity_type")
+        min_count = metadata.get("min_count", 1)
+        filters = metadata.get("filters", {})
+        workflow_id = metadata.get("workflow_id")
+
+        # Get user ID from context
+        user_id = context.get("user_id")
+        if not user_id:
+            return RequirementStatus(
+                requirement_id=requirement.requirement_id,
+                fulfilled=False,
+                message="No user context available",
+                details={"error": "missing_user_id"}
+            )
+
+        try:
+            # Query for entities matching the requirement
+            entities = await EntityService.find_entities(
+                owner_user_id=user_id,
+                entity_type=entity_type,
+                filters=filters
+            )
+
+            # Check if requirement is fulfilled
+            fulfilled = len(entities) >= min_count
+
+            # Prepare available resources (first 5 entities for preview)
+            available_resources = [
+                {
+                    "entity_id": entity.entity_id,
+                    "name": entity.name,
+                    "entity_type": entity.entity_type,
+                    "data": entity.data
+                }
+                for entity in entities[:5]  # Limit to 5 for preview
+            ]
+
+            # Generate status message
+            if fulfilled:
+                message = f"Found {len(entities)} {entity_type}(s) available"
+            else:
+                message = f"Found {len(entities)} of {min_count} required {entity_type}(s)"
+
+            # Determine action needed
+            action_needed = None
+            action_url = None
+
+            # For required documents (min_count > 0), only show action if not fulfilled
+            # For optional documents (min_count = 0), always show action to allow uploading
+            if not fulfilled or min_count == 0:
+                if not fulfilled:
+                    action_needed = f"Upload {min_count - len(entities)} more {entity_type}(s)"
+                else:
+                    action_needed = f"Upload {entity_type} (optional)"
+
+                # If a workflow_id is specified, that's the workflow to complete
+                if workflow_id:
+                    action_url = f"/services/{workflow_id}"
+                else:
+                    action_url = "/documents/upload"
+
+            return RequirementStatus(
+                requirement_id=requirement.requirement_id,
+                fulfilled=fulfilled,
+                message=message,
+                details={
+                    "found": len(entities),
+                    "required": min_count,
+                    "entity_type": entity_type,
+                    "filters": filters
+                },
+                action_needed=action_needed,
+                action_url=action_url,
+                available_resources=available_resources
+            )
+
+        except Exception as e:
+            logger.error(f"Error checking entity requirement: {str(e)}")
+            return RequirementStatus(
+                requirement_id=requirement.requirement_id,
+                fulfilled=False,
+                message=f"Error checking requirement: {str(e)}",
+                details={"error": str(e)}
+            )
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Check for user selections or find entities to present for selection"""
@@ -143,20 +276,31 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
     def _should_validate_existing_selections(self, context: Dict[str, Any]) -> bool:
         """Check if user has already made selections that need validation"""
-        selection_key = f"{self.task_id}_selections"
-        has_selections = selection_key in context
+        input_key = f"{self.task_id}_input"
+        has_input = input_key in context
 
-        logger.debug("Checking for existing user selections",
-                    selection_key=selection_key,
+        logger.debug("Checking for existing user input",
+                    input_key=input_key,
                     context_keys=list(context.keys()),
-                    has_selections=has_selections)
+                    has_input=has_input)
 
-        if has_selections:
-            logger.info("Found user selections, proceeding to validation")
-        else:
-            logger.info("No existing selections found, proceeding to entity discovery")
+        if has_input:
+            # Check if the input contains selection data
+            input_data = context.get(input_key, {})
+            selection_key = f"{self.task_id}_selections"
+            has_selections = selection_key in input_data
 
-        return has_selections
+            logger.debug("Checking for selections in input data",
+                        selection_key=selection_key,
+                        input_keys=list(input_data.keys()) if input_data else None,
+                        has_selections=has_selections)
+
+            if has_selections:
+                logger.info("Found user selections in input, proceeding to validation")
+                return True
+
+        logger.info("No existing selections found, proceeding to entity discovery")
+        return False
 
     def _validate_user_selections(self, context: Dict[str, Any]) -> TaskResult:
         """Validate user-submitted selections and return CONTINUE or WAITING"""
@@ -376,19 +520,28 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
     def _validate_selections(self, context: Dict[str, Any]) -> TaskResult:
         """Validate user selections meet requirements"""
         try:
+            # Get selections from input data
+            input_key = f"{self.task_id}_input"
+            input_data = context.get(input_key, {})
             selection_key = f"{self.task_id}_selections"
-            selections = context.get(selection_key, {})
+            selections = input_data.get(selection_key, {})
             instance_id = context.get("instance_id", "unknown")
 
-            logger.debug("Validating user selections",
-                        selection_key=selection_key,
-                        selections_data=selections,
-                        selections_keys=list(selections.keys()) if selections else None,
-                        requirements_count=len(self.requirements))
+            logger.info("Validating user selections")
+            print(f"DEBUG: input_key={input_key}")
+            print(f"DEBUG: selection_key={selection_key}")
+            print(f"DEBUG: input_data={input_data}")
+            print(f"DEBUG: selections={selections}")
+            print(f"DEBUG: selections_keys={list(selections.keys()) if selections else None}")
+            print(f"DEBUG: requirements_count={len(self.requirements)}")
 
             # Validate each requirement
             output_data = {}
             validation_errors = []
+
+            logger.info("Starting validation loop",
+                        requirements_count=len(self.requirements),
+                        selections_structure=selections)
 
             for req in self.requirements:
                 entity_type = req["entity_type"]
@@ -400,24 +553,55 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 store_as = req.get("store_as")
                 selected_ids = selections.get(store_as, [])
 
+                logger.info("Validating requirement")
+                print(f"DEBUG: entity_type={entity_type}")
+                print(f"DEBUG: store_as={store_as}")
+                print(f"DEBUG: min_count={min_count}")
+                print(f"DEBUG: max_count={max_count}")
+                print(f"DEBUG: selected_ids={selected_ids}")
+                print(f"DEBUG: selected_count={len(selected_ids)}")
+                print(f"DEBUG: selection_keys_available={list(selections.keys())}")
+
                 # Validate count
                 if len(selected_ids) < min_count:
-                    validation_errors.append(
-                        f"{req.get('display_title', entity_type)}: Select at least {min_count} item(s)"
-                    )
+                    error_msg = f"{req.get('display_title', entity_type)}: Select at least {min_count} item(s)"
+                    validation_errors.append(error_msg)
+                    logger.warning("Validation error - not enough selections",
+                                 entity_type=entity_type,
+                                 store_as=store_as,
+                                 required=min_count,
+                                 found=len(selected_ids),
+                                 error=error_msg)
                 elif len(selected_ids) > max_count:
-                    validation_errors.append(
-                        f"{req.get('display_title', entity_type)}: Select at most {max_count} item(s)"
-                    )
+                    error_msg = f"{req.get('display_title', entity_type)}: Select at most {max_count} item(s)"
+                    validation_errors.append(error_msg)
+                    logger.warning("Validation error - too many selections",
+                                 entity_type=entity_type,
+                                 store_as=store_as,
+                                 max_allowed=max_count,
+                                 found=len(selected_ids),
+                                 error=error_msg)
                 else:
                     # Store valid selections
                     output_data[store_as] = selected_ids
                     output_data[f"{entity_type}_count"] = len(selected_ids)
                     if selected_ids:
                         output_data[f"{entity_type}_first"] = selected_ids[0]
+                    logger.info("Requirement validation passed",
+                              entity_type=entity_type,
+                              store_as=store_as,
+                              selections_count=len(selected_ids))
+
+            logger.debug("Validation complete",
+                        total_errors=len(validation_errors),
+                        validation_errors=validation_errors,
+                        output_data=output_data)
 
             if validation_errors:
                 # Return to selection with validation errors
+                logger.warning("Validation failed, returning to selection form",
+                             error_count=len(validation_errors),
+                             errors=validation_errors)
                 return TaskResult(
                     status="waiting",
                     data={
@@ -429,6 +613,9 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 )
 
             # All selections valid
+            logger.info("All validations passed, continuing workflow",
+                       output_data_keys=list(output_data.keys()),
+                       output_data=output_data)
             self.state.output_data = output_data
             return TaskResult(
                 status="continue",
@@ -454,6 +641,11 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
             # First run the regular execute to prepare parameters
             result = self.execute(context)
+
+            # If validation passed (status="continue"), return that result immediately
+            if result.status == "continue":
+                logger.info("Validation passed, returning continue result from execute_async")
+                return result
 
             if hasattr(self, '_check_params') and self._check_params:
                 params = self._check_params
@@ -563,12 +755,12 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
         for req in requirements:
             entity_type = req["entity_type"]
-            filters = req.get("filters", {})
-            doc_type = filters.get("document_type", "default")
-            req_key = f"{entity_type}_{doc_type}"
+            # Use store_as as the key, consistent with _discover_available_entities
+            req_key = req.get("store_as", f"{entity_type}_entities")
             entities = requirement_entities.get(req_key, [])
 
-            if not entities:
+            # Only skip if there are no entities AND it's a required field
+            if not entities and min_count > 0:
                 continue
 
             min_count = req.get("min_count", 1)
@@ -624,11 +816,16 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             form_sections.append(form_field)
 
         # Build complete form configuration
+        # Get title and description from kwargs or use defaults
+        title = self.kwargs.get("title", "Seleccionar Documentos Requeridos")
+        description = self.kwargs.get("description", "Elige los documentos específicos necesarios para este trámite")
+        submit_text = self.kwargs.get("submit_button_text", "Continuar con Documentos Seleccionados")
+
         form_config = {
-            "title": "PRUEBA: Seleccionar Documentos Requeridos",
-            "description": "Elige los documentos específicos necesarios para este trámite",
+            "title": title,
+            "description": description,
             "fields": form_sections,
-            "submit_button_text": "Continuar con Documentos Seleccionados"
+            "submit_button_text": submit_text
         }
 
         return form_config
