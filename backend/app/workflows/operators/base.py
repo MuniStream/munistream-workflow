@@ -10,6 +10,33 @@ from pydantic import BaseModel, Field
 import uuid
 
 
+class OperatorRequirement(BaseModel):
+    """
+    Generic requirement that an operator needs to function.
+    This is a base class that can represent any type of requirement.
+    """
+    requirement_id: str
+    type: str  # "resource", "entity", "permission", "data", "service", "configuration", etc.
+    name: str
+    description: str
+    critical: bool = True  # If false, operator can proceed without it
+    metadata: Dict[str, Any] = Field(default_factory=dict)  # Additional requirement-specific data
+
+
+class RequirementStatus(BaseModel):
+    """
+    Status of a requirement check.
+    Contains information about whether the requirement is met and what action is needed.
+    """
+    requirement_id: str
+    fulfilled: bool
+    details: Dict[str, Any] = Field(default_factory=dict)  # Detailed information about the check
+    message: Optional[str] = None  # Human-readable status message
+    action_needed: Optional[str] = None  # What the user needs to do if not fulfilled
+    action_url: Optional[str] = None  # Where the user can go to fulfill the requirement
+    available_resources: List[Dict[str, Any]] = Field(default_factory=list)  # Resources found that might fulfill this requirement
+
+
 class TaskList:
     """Helper class to handle list operations in DAG flow"""
     
@@ -126,14 +153,123 @@ class BaseOperator(ABC):
         """
         Execute the operator's task.
         This method must be implemented by each operator.
-        
+
         Args:
             context: Execution context with data from previous steps
-            
+
         Returns:
             TaskResult with status and output data
         """
         pass
+
+    def get_requirements(self) -> List[OperatorRequirement]:
+        """
+        Define what this operator needs to run.
+        Override this method to specify operator requirements.
+
+        Returns:
+            List of OperatorRequirement objects describing what this operator needs
+        """
+        return []
+
+    async def check_requirement(self,
+                               requirement: OperatorRequirement,
+                               context: Dict[str, Any]) -> RequirementStatus:
+        """
+        Check if a specific requirement is met.
+        Override this method to implement custom requirement checking logic.
+
+        Args:
+            requirement: The requirement to check
+            context: Execution context with data from previous steps
+
+        Returns:
+            RequirementStatus object indicating whether the requirement is fulfilled
+        """
+        # Default implementation - always fulfilled
+        return RequirementStatus(
+            requirement_id=requirement.requirement_id,
+            fulfilled=True,
+            message="Requirement check not implemented - assuming fulfilled"
+        )
+
+    async def pre_check(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generic pre-check that validates all operator requirements.
+        This method uses get_requirements() and check_requirement() to determine
+        if the operator is ready to execute.
+
+        Args:
+            context: Execution context with data from previous steps
+
+        Returns:
+            Dictionary with:
+            - ready: bool indicating if operator can execute
+            - requirements: list of requirement details with their status
+            - message: human-readable summary of readiness
+            - missing_critical: list of critical requirements that are not fulfilled
+            - missing_optional: list of optional requirements that are not fulfilled
+        """
+        requirements = self.get_requirements()
+
+        if not requirements:
+            # No requirements defined, operator is ready
+            return {
+                "ready": True,
+                "requirements": [],
+                "message": "No requirements defined - ready to execute",
+                "missing_critical": [],
+                "missing_optional": []
+            }
+
+        # Check each requirement
+        requirement_results = []
+        missing_critical = []
+        missing_optional = []
+
+        for req in requirements:
+            status = await self.check_requirement(req, context)
+
+            requirement_info = {
+                "id": req.requirement_id,
+                "type": req.type,
+                "name": req.name,
+                "description": req.description,
+                "critical": req.critical,
+                "fulfilled": status.fulfilled,
+                "message": status.message,
+                "details": status.details,
+                "action_needed": status.action_needed,
+                "action_url": status.action_url,
+                "available_resources": status.available_resources
+            }
+            requirement_results.append(requirement_info)
+
+            if not status.fulfilled:
+                if req.critical:
+                    missing_critical.append(req.name)
+                else:
+                    missing_optional.append(req.name)
+
+        # Determine overall readiness (all critical requirements must be fulfilled)
+        ready = len(missing_critical) == 0
+
+        # Generate summary message
+        if ready:
+            if missing_optional:
+                message = f"Ready to execute. Optional requirements missing: {', '.join(missing_optional)}"
+            else:
+                message = "All requirements fulfilled - ready to execute"
+        else:
+            message = f"Cannot execute. Missing critical requirements: {', '.join(missing_critical)}"
+
+        return {
+            "ready": ready,
+            "requirements": requirement_results,
+            "message": message,
+            "missing_critical": missing_critical,
+            "missing_optional": missing_optional
+        }
     
     def run(self, context: Dict[str, Any]) -> str:
         """

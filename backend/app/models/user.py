@@ -35,24 +35,38 @@ class Permission(str, Enum):
     VERIFY_DOCUMENTS = "verify_documents"
     APPROVE_DOCUMENTS = "approve_documents"
     DELETE_DOCUMENTS = "delete_documents"
-    
+
     # Workflow permissions
     VIEW_WORKFLOWS = "view_workflows"
     MANAGE_WORKFLOWS = "manage_workflows"
     EXECUTE_WORKFLOWS = "execute_workflows"
-    
+
     # Admin permissions
     MANAGE_USERS = "manage_users"
     VIEW_ANALYTICS = "view_analytics"
     MANAGE_SYSTEM = "manage_system"
-    
+
     # Instance permissions
     VIEW_INSTANCES = "view_instances"
     MANAGE_INSTANCES = "manage_instances"
 
+    # Team administration permissions
+    CREATE_TEAMS = "create_teams"
+    MANAGE_ALL_TEAMS = "manage_all_teams"
+    ASSIGN_ADMINISTRATORS = "assign_administrators"
+    VIEW_ALL_INSTANCES = "view_all_instances"
+    MANAGE_KEYCLOAK_SYNC = "manage_keycloak_sync"
+    MANAGE_ALL_USERS = "manage_all_users"
+
+    # Team member permissions (for managers)
+    MANAGE_TEAM_MEMBERS = "manage_team_members"
+    VIEW_TEAM_INSTANCES = "view_team_instances"
+    ASSIGN_TEAM_WORK = "assign_team_work"
+
 # Role-based permissions mapping
 ROLE_PERMISSIONS = {
     UserRole.ADMIN: [
+        # All existing permissions
         Permission.VIEW_DOCUMENTS,
         Permission.VERIFY_DOCUMENTS,
         Permission.APPROVE_DOCUMENTS,
@@ -65,8 +79,19 @@ ROLE_PERMISSIONS = {
         Permission.MANAGE_SYSTEM,
         Permission.VIEW_INSTANCES,
         Permission.MANAGE_INSTANCES,
+        # New admin (root) permissions
+        Permission.CREATE_TEAMS,
+        Permission.MANAGE_ALL_TEAMS,
+        Permission.ASSIGN_ADMINISTRATORS,
+        Permission.VIEW_ALL_INSTANCES,
+        Permission.MANAGE_KEYCLOAK_SYNC,
+        Permission.MANAGE_ALL_USERS,
+        Permission.MANAGE_TEAM_MEMBERS,
+        Permission.VIEW_TEAM_INSTANCES,
+        Permission.ASSIGN_TEAM_WORK,
     ],
     UserRole.MANAGER: [
+        # Existing manager permissions
         Permission.VIEW_DOCUMENTS,
         Permission.VERIFY_DOCUMENTS,
         Permission.APPROVE_DOCUMENTS,
@@ -75,6 +100,10 @@ ROLE_PERMISSIONS = {
         Permission.VIEW_ANALYTICS,
         Permission.VIEW_INSTANCES,
         Permission.MANAGE_INSTANCES,
+        # New manager (administrator) permissions - only for their teams
+        Permission.MANAGE_TEAM_MEMBERS,
+        Permission.VIEW_TEAM_INSTANCES,
+        Permission.ASSIGN_TEAM_WORK,
     ],
     UserRole.REVIEWER: [
         Permission.VIEW_DOCUMENTS,
@@ -245,6 +274,49 @@ class UserModel(Document):
     def get_team_count(self) -> int:
         """Get number of teams user belongs to"""
         return len(self.team_ids)
+
+    def can_manage_team(self, team_id: str) -> bool:
+        """Check if user can manage a specific team"""
+        # Admin (root) can manage any team
+        if self.has_permission(Permission.MANAGE_ALL_TEAMS):
+            return True
+
+        # Manager can only manage their assigned teams
+        if self.has_permission(Permission.MANAGE_TEAM_MEMBERS):
+            return team_id in self.team_ids
+
+        return False
+
+    def can_view_team_instances(self, team_id: str) -> bool:
+        """Check if user can view instances of a specific team"""
+        # Admin (root) can view all instances
+        if self.has_permission(Permission.VIEW_ALL_INSTANCES):
+            return True
+
+        # Manager can only view instances of their teams
+        if self.has_permission(Permission.VIEW_TEAM_INSTANCES):
+            return team_id in self.team_ids
+
+        return False
+
+    def is_admin_root(self) -> bool:
+        """Check if user is admin (root) with full system access"""
+        return self.role == UserRole.ADMIN and self.has_permission(Permission.MANAGE_ALL_TEAMS)
+
+    def is_team_administrator(self) -> bool:
+        """Check if user is team administrator (manager)"""
+        return self.role == UserRole.MANAGER and self.has_permission(Permission.MANAGE_TEAM_MEMBERS)
+
+    def get_manageable_teams(self) -> List[str]:
+        """Get list of team IDs this user can manage"""
+        if self.has_permission(Permission.MANAGE_ALL_TEAMS):
+            # Admin can manage all teams - return empty list to indicate "all"
+            return []
+        elif self.has_permission(Permission.MANAGE_TEAM_MEMBERS):
+            # Manager can only manage their assigned teams
+            return self.team_ids
+        else:
+            return []
 
 class RefreshTokenModel(Document):
     """Refresh token model for JWT token management"""

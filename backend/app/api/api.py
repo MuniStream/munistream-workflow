@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, themes, assignments
+from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, themes, assignments, admin_users, admin_teams, admin_sync
 from .v1 import performance, entities
 
 api_router = APIRouter()
@@ -18,3 +18,8 @@ api_router.include_router(themes.router, prefix="/themes", tags=["themes"])
 api_router.include_router(performance.router, prefix="/performance", tags=["performance"])
 api_router.include_router(entities.router, prefix="/entities", tags=["entities"])
 api_router.include_router(assignments.router, prefix="/assignments", tags=["assignments"])
+
+# Administrative endpoints (hidden from schema)
+api_router.include_router(admin_users.router, prefix="/admin", tags=["admin-users"])
+api_router.include_router(admin_teams.router, prefix="/admin", tags=["admin-teams"])
+api_router.include_router(admin_sync.router, prefix="/admin", tags=["admin-sync"])

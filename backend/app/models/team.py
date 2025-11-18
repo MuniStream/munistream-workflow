@@ -129,3 +129,35 @@ class TeamModel(Document):
             self.updated_at = datetime.utcnow()
             return True
         return False
+
+    def add_manager(self, user_id: str) -> bool:
+        """Add a manager to the team"""
+        return self.add_member(user_id, role="manager")
+
+    def remove_manager(self, user_id: str) -> bool:
+        """Remove manager role from user (keeps as member)"""
+        for member in self.members:
+            if member.user_id == user_id and member.role == "manager":
+                member.role = "member"
+                self.updated_at = datetime.utcnow()
+                return True
+        return False
+
+    def get_managers(self) -> List[TeamMember]:
+        """Get team managers"""
+        return [m for m in self.members if m.role == "manager" and m.is_active]
+
+    def is_manager(self, user_id: str) -> bool:
+        """Check if user is a manager of this team"""
+        for member in self.members:
+            if member.user_id == user_id and member.role == "manager" and member.is_active:
+                return True
+        return False
+
+    def can_user_manage(self, user_id: str) -> bool:
+        """Check if user can manage this team (is manager of this team)"""
+        return self.is_manager(user_id)
+
+    def get_manager_count(self) -> int:
+        """Get count of active managers"""
+        return len(self.get_managers())

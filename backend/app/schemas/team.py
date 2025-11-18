@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class TeamMemberSchema(BaseModel):
     """Team member schema"""
     user_id: str
-    role: str = "member"  # member, leader, coordinator
+    role: str = "member"  # member, manager, reviewer, approver
     joined_at: datetime
     is_active: bool = True
 
@@ -18,12 +18,12 @@ class TeamMemberSchema(BaseModel):
 class TeamMemberCreate(BaseModel):
     """Schema for adding a member to a team"""
     user_id: str
-    role: str = Field(default="member", pattern="^(member|leader|coordinator)$")
+    role: str = Field(default="member", pattern="^(member|manager|reviewer|approver)$")
 
 
 class TeamMemberUpdate(BaseModel):
     """Schema for updating a team member"""
-    role: Optional[str] = Field(None, pattern="^(member|leader|coordinator)$")
+    role: Optional[str] = Field(None, pattern="^(member|manager|reviewer|approver)$")
     is_active: Optional[bool] = None
 
 
@@ -64,10 +64,10 @@ class TeamResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     created_by: Optional[str]
-    
+
     # Computed fields
-    active_member_count: int
-    leader_count: int
+    member_count: int
+    manager_count: int
 
 
 class TeamListResponse(BaseModel):

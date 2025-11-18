@@ -148,6 +148,14 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     return customer
 
 
+async def get_current_customer_optional(authorization: Optional[str] = Header(None)) -> Optional[Customer]:
+    """Optional customer authentication - wrapper that catches exceptions and returns None"""
+    try:
+        return await get_current_customer(authorization)
+    except:
+        return None
+
+
 @router.post("/auth/register", response_model=CustomerAuthResponse)
 async def register_customer(request: CustomerRegisterRequest):
     """Register a new customer for the citizen portal"""

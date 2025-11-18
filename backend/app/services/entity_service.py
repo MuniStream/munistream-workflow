@@ -120,17 +120,20 @@ class EntityService:
                     # Other field query
                     query[key] = value
 
-        print(f"🔍 EntityService.find_entities DEBUG:")
-        print(f"   Query: {query}")
-        print(f"   Owner user ID: {owner_user_id}")
-        print(f"   Entity type: {entity_type}")
-        print(f"   Filters: {filters}")
+        logger = logging.getLogger(__name__)
+        logger.debug("EntityService.find_entities called", extra={
+            "query": query,
+            "owner_user_id": owner_user_id,
+            "entity_type": entity_type,
+            "filters": filters
+        })
 
         results = await LegalEntity.find(query).skip(skip).limit(limit).to_list()
-        print(f"   Found {len(results)} entities")
-        if results:
-            for i, entity in enumerate(results):
-                print(f"   Result {i}: ID={entity.entity_id}, type={entity.entity_type}, owner={entity.owner_user_id}")
+
+        logger.debug(f"Found {len(results)} entities", extra={
+            "count": len(results),
+            "entity_ids": [entity.entity_id for entity in results[:5]]  # Log first 5 IDs
+        })
 
         return results
     

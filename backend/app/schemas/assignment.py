@@ -33,6 +33,7 @@ class AssignmentResponse(BaseModel):
 
     # Assignment details
     status: AssignmentStatus = Field(..., description="Current assignment status")
+    workflow_status: str = Field(..., description="Current workflow execution status")
     assigned_to_user: Optional[str] = Field(None, description="Assigned user ID")
     assigned_to_team: Optional[str] = Field(None, description="Assigned team ID")
     assigned_at: Optional[datetime] = Field(None, description="When assignment was made")

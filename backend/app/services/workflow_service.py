@@ -22,10 +22,11 @@ logger = logging.getLogger(__name__)
 
 class WorkflowService:
     """Service layer for new DAG-based workflow operations"""
-    
+
     def __init__(self):
         self.dag_bag = DAGBag()
         self.executor = DAGExecutor(workflow_service=self)
+        self.logger = logging.getLogger(__name__)
     
     async def register_dag(self, dag: DAG, created_by: str = None) -> WorkflowDefinition:
         """Register a DAG and create corresponding database records"""
@@ -249,68 +250,101 @@ class WorkflowService:
         from ..workflows.dag import DAGInstance
         
         # Get the database instance
+        self.logger.info(f"🔍 get_instance: Searching for instance_id: {instance_id}")
         db_instance = await WorkflowInstance.find_one(
             WorkflowInstance.instance_id == instance_id
         )
         if not db_instance:
+            self.logger.error(f"❌ get_instance: Instance {instance_id} NOT FOUND in database")
             return None
-        
+
+        self.logger.info(f"✅ get_instance: Found instance {instance_id} in database")
+        self.logger.info(f"🔧 get_instance: db_instance.workflow_id = {db_instance.workflow_id}")
+
         # Get the DAG definition
+        self.logger.info(f"🔍 get_instance: Getting DAG for workflow_id: {db_instance.workflow_id}")
         dag = self.dag_bag.get_dag(db_instance.workflow_id)
         if not dag:
+            self.logger.error(f"❌ get_instance: DAG NOT FOUND for workflow_id: {db_instance.workflow_id}")
             return None
-        
+
+        self.logger.info(f"✅ get_instance: Found DAG: {dag.dag_id}")
+
         # Create a new DAG instance
-        dag_instance = DAGInstance(
-            dag=dag,
-            user_id=db_instance.user_id,
-            initial_data=db_instance.context or {}
-        )
+        self.logger.info(f"🔧 get_instance: Creating DAG instance with user_id: {db_instance.user_id}")
+        try:
+            dag_instance = DAGInstance(
+                dag=dag,
+                user_id=db_instance.user_id,
+                initial_data=db_instance.context or {}
+            )
+            self.logger.info(f"✅ get_instance: DAG instance created successfully")
+        except Exception as e:
+            self.logger.error(f"❌ get_instance: Failed to create DAG instance: {e}")
+            return None
         # Set the instance_id after creation
+        self.logger.info(f"🔧 get_instance: Setting instance_id and status")
         dag_instance.instance_id = instance_id
-        
+
         # Set status from database
         dag_instance.status = db_instance.status
         dag_instance.created_at = db_instance.created_at
         dag_instance.updated_at = db_instance.updated_at
         dag_instance.completed_at = db_instance.completed_at
         dag_instance.current_task = db_instance.current_step
-        
+
         # Reconstruct task states from step executions
-        step_executions = await StepExecution.find(
-            StepExecution.instance_id == instance_id
-        ).to_list()
+        self.logger.info(f"🔍 get_instance: Fetching step executions for instance {instance_id}")
+        try:
+            step_executions = await StepExecution.find(
+                StepExecution.instance_id == instance_id
+            ).to_list()
+            self.logger.info(f"✅ get_instance: Found {len(step_executions)} step executions")
+        except Exception as e:
+            self.logger.error(f"❌ get_instance: Failed to fetch step executions: {e}")
+            return None
         
         # Initialize all tasks as pending
-        for task_id in dag.tasks.keys():
-            dag_instance.task_states[task_id] = {"status": "pending"}
-        
-        # Update with execution data
-        for execution in step_executions:
-            dag_instance.task_states[execution.step_id] = {
-                "status": execution.status,
-                "started_at": execution.started_at.isoformat() if execution.started_at else None,
-                "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
-                "result": execution.output
-            }
-        
-        # Mark completed steps
-        for step_id in (db_instance.completed_steps or []):
-            if step_id in dag_instance.task_states:
-                dag_instance.task_states[step_id]["status"] = "completed"
-        
-        # Mark failed steps
-        for step_id in (db_instance.failed_steps or []):
-            if step_id in dag_instance.task_states:
-                dag_instance.task_states[step_id]["status"] = "failed"
-        
-        # Mark current step as waiting if instance is paused
-        if db_instance.status == "paused" and db_instance.current_step:
-            dag_instance.task_states[db_instance.current_step]["status"] = "waiting"
-            if db_instance.current_step not in step_executions:
-                dag_instance.task_states[db_instance.current_step]["started_at"] = datetime.utcnow().isoformat()
-        
-        return dag_instance
+        self.logger.info(f"🔧 get_instance: Initializing task states for {len(dag.tasks)} tasks")
+        try:
+            for task_id in dag.tasks.keys():
+                dag_instance.task_states[task_id] = {"status": "pending"}
+
+            # Update with execution data
+            self.logger.info(f"🔧 get_instance: Updating task states with execution data")
+            for execution in step_executions:
+                dag_instance.task_states[execution.step_id] = {
+                    "status": execution.status,
+                    "started_at": execution.started_at.isoformat() if execution.started_at else None,
+                    "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
+                    "result": execution.output
+                }
+
+            # Mark completed steps
+            self.logger.info(f"🔧 get_instance: Marking {len(db_instance.completed_steps or [])} completed steps")
+            for step_id in (db_instance.completed_steps or []):
+                if step_id in dag_instance.task_states:
+                    dag_instance.task_states[step_id]["status"] = "completed"
+
+            # Mark failed steps
+            self.logger.info(f"🔧 get_instance: Marking {len(db_instance.failed_steps or [])} failed steps")
+            for step_id in (db_instance.failed_steps or []):
+                if step_id in dag_instance.task_states:
+                    dag_instance.task_states[step_id]["status"] = "failed"
+
+            # Mark current step as waiting if instance is paused
+            if db_instance.status == "paused" and db_instance.current_step:
+                self.logger.info(f"🔧 get_instance: Marking current step {db_instance.current_step} as waiting")
+                dag_instance.task_states[db_instance.current_step]["status"] = "waiting"
+                if db_instance.current_step not in step_executions:
+                    dag_instance.task_states[db_instance.current_step]["started_at"] = datetime.utcnow().isoformat()
+
+            self.logger.info(f"✅ get_instance: DAG instance reconstruction completed successfully")
+            return dag_instance
+
+        except Exception as e:
+            self.logger.error(f"❌ get_instance: Failed during task state reconstruction: {e}")
+            return None
     
     async def get_user_instances(self, user_id: str) -> List[DAGInstance]:
         """Get all instances for a user"""
