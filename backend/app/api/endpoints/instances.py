@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends, Request
 from datetime import datetime
 import uuid
 import logging
@@ -35,6 +35,58 @@ from ...models.team import TeamModel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+async def check_instance_access(instance: WorkflowInstance, current_user: dict) -> bool:
+    """
+    Check if current user has access to view/modify a specific instance based on their role and assignment.
+
+    Access rules:
+    - admin: can access all instances
+    - manager: can access instances assigned to their teams
+    - reviewer/approver: can access instances directly assigned to them only
+    - viewer: can access instances directly assigned to them only
+    """
+    user_roles = current_user.get("roles", [])
+    user_id = current_user.get("sub")
+    user_teams = current_user.get("teams", [])
+
+    # Admin has access to everything
+    if "admin" in user_roles:
+        return True
+
+    # Check if instance is assigned to the user directly
+    if instance.assigned_user_id == user_id:
+        return True
+
+    # Manager: check if instance is assigned to their team
+    if "manager" in user_roles:
+        if instance.assigned_team_id and instance.assigned_team_id in user_teams:
+            return True
+
+    # Reviewer, approver, and viewer: only direct assignments (already checked above)
+    # If we reach here, access is denied
+    return False
+
+
+async def require_instance_access(instance_id: str, current_user: dict = Depends(require_permission("VIEW_INSTANCES"))) -> WorkflowInstance:
+    """
+    Dependency that ensures user has access to the specified instance.
+    Returns the instance if access is granted, raises HTTPException otherwise.
+    """
+    # Get the instance
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Check access
+    if not await check_instance_access(instance, current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. You can only view instances assigned to you or your team."
+        )
+
+    return instance
 
 
 @router.post("/", response_model=InstanceResponse)
@@ -77,10 +129,10 @@ async def create_workflow_instance(
 
 @router.get("/{instance_id}", response_model=InstanceResponse)
 async def get_instance(
-    instance_id: str,
-    current_user: dict = Depends(get_current_user)
+    db_instance: WorkflowInstance = Depends(require_instance_access)
 ):
-    """Get DAG instance details"""
+    """Get DAG instance details with role-based access control"""
+    instance_id = db_instance.instance_id
     try:
         dag_instance = await workflow_service.get_instance(instance_id)
     except Exception as e:
@@ -504,13 +556,13 @@ async def get_active_instances(
 
 @router.get("/{instance_id}/logs")
 async def get_instance_logs(
-    instance_id: str,
-    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
+    db_instance: WorkflowInstance = Depends(require_instance_access),
     level: Optional[str] = None,
     limit: int = Query(100, ge=1, le=500),
     group_by_step: bool = Query(False, description="Group logs by workflow step")
 ):
     """Get logs for a specific instance, optionally grouped by step"""
+    instance_id = db_instance.instance_id
     from ...models.instance_log import InstanceLog, LogLevel, LogType
     
     # Verify instance exists
@@ -954,11 +1006,9 @@ async def approve_step_dag(
 
 
 @router.get("/{instance_id}/history", response_model=InstanceHistoryResponse)
-async def get_instance_history(instance_id: str):
-    """Get execution history of a workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+async def get_instance_history(instance: WorkflowInstance = Depends(require_instance_access)):
+    """Get execution history of a workflow instance with role-based access control"""
+    instance_id = instance.instance_id
     
     # Get step executions for this instance
     step_executions = await StepExecution.find(StepExecution.instance_id == instance_id).sort(+StepExecution.started_at).to_list()
@@ -992,11 +1042,9 @@ async def get_instance_history(instance_id: str):
 
 
 @router.get("/{instance_id}/progress", response_model=InstanceProgressResponse)
-async def get_instance_progress(instance_id: str):
-    """Get detailed progress information for a workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+async def get_instance_progress(instance: WorkflowInstance = Depends(require_instance_access)):
+    """Get detailed progress information for a workflow instance with role-based access control"""
+    instance_id = instance.instance_id
     
     # Get workflow definition to calculate progress percentage
     workflow = await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == instance.workflow_id)
@@ -1048,20 +1096,273 @@ async def get_instance_progress(instance_id: str):
     }
 
 
+@router.get("/{instance_id}/track")
+async def track_instance_for_admin(
+    db_instance: WorkflowInstance = Depends(require_instance_access)
+):
+    """
+    Track workflow instance status with role-based access control.
+    Returns current state and any required actions.
+
+    Access control:
+    - Admin: can track all instances
+    - Manager: can track instances assigned to their teams
+    - Reviewer/Approver: can track instances directly assigned to them
+    - Viewer: can track instances directly assigned to them
+    """
+    instance_id = db_instance.instance_id
+
+    # Get DAG instance for detailed state
+    dag_instance = await workflow_service.get_instance(instance_id)
+
+    # Check if waiting for input - Universal form concatenation approach
+    requires_input = False
+    input_form = {}
+    waiting_tasks = []
+
+    if dag_instance:
+        for task_id, state in dag_instance.task_states.items():
+            if state.get("status") == "waiting":
+                requires_input = True
+                waiting_tasks.append(task_id)
+
+                task = dag_instance.dag.tasks.get(task_id)
+                task_form = {}
+
+                # Merge from ANY source - output_data first (async operators like EntityPickerOperator)
+                if state.get("output_data", {}).get("form_config"):
+                    task_form.update(state["output_data"]["form_config"])
+                else:
+                    # Try to get form_config from global context as fallback
+                    if dag_instance.context.get("form_config"):
+                        task_form.update(dag_instance.context["form_config"])
+
+                # Then merge from task.form_config (sync operators like UserInputOperator)
+                if task and hasattr(task, 'form_config'):
+                    task_form.update(task.form_config)
+
+                # Add task-specific metadata
+                if task_form:  # Only add metadata if we found a form
+                    task_form["current_step_id"] = task_id
+                    if state.get("output_data", {}).get("waiting_for"):
+                        task_form["waiting_for"] = state["output_data"]["waiting_for"]
+
+                    # Merge into global input_form
+                    input_form.update(task_form)
+
+        # Handle multiple waiting tasks
+        if len(waiting_tasks) > 1:
+            input_form["multiple_tasks"] = waiting_tasks
+        elif len(waiting_tasks) == 1:
+            # For single task, ensure current_step_id is set
+            if "current_step_id" not in input_form:
+                input_form["current_step_id"] = waiting_tasks[0]
+
+    # Calculate progress
+    total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
+    completed_steps = 0
+    step_progress = []
+
+    if dag_instance:
+        for task_id, state in dag_instance.task_states.items():
+            status_val = state.get("status", "pending")
+            if status_val == "completed":
+                completed_steps += 1
+
+            step_progress.append({
+                "step_id": task_id,
+                "name": task_id.replace("_", " ").title(),
+                "description": f"Step {task_id}",
+                "status": status_val,
+                "started_at": state.get("started_at"),
+                "completed_at": state.get("completed_at")
+            })
+
+    progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+
+    # Get workflow info
+    workflow = await workflow_service.get_workflow_definition(db_instance.workflow_id)
+    workflow_name = workflow.name if workflow else db_instance.workflow_id
+
+    return {
+        "instance_id": instance_id,
+        "workflow_id": db_instance.workflow_id,
+        "workflow_name": workflow_name,
+        "status": db_instance.status,
+        "progress_percentage": progress_percentage,
+        "current_step": db_instance.current_step,
+        "created_at": db_instance.created_at.isoformat() if db_instance.created_at else None,
+        "updated_at": db_instance.updated_at.isoformat() if db_instance.updated_at else None,
+        "completed_at": db_instance.completed_at.isoformat() if db_instance.completed_at else None,
+        "total_steps": total_steps,
+        "completed_steps": completed_steps,
+        "step_progress": step_progress,
+        "requires_input": requires_input,
+        "input_form": input_form,
+        "estimated_completion": None,  # Could calculate based on average step time
+        "message": f"Workflow {db_instance.status}"
+    }
+
+
+@router.post("/{instance_id}/start")
+async def start_workflow_instance(
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Start a workflow instance that is waiting to be started with role-based access control.
+    Used by admin workflows that need manual initiation.
+
+    Access control:
+    - Admin: can start all instances
+    - Manager: can start instances assigned to their teams
+    - Reviewer/Approver: can start instances directly assigned to them
+    - Viewer: can start instances directly assigned to them
+    """
+    instance_id = db_instance.instance_id
+
+    # Check if instance can be started
+    if db_instance.status not in ["waiting_for_start", "pending_assignment", "paused"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Instance status '{db_instance.status}' cannot be started. Must be 'waiting_for_start', 'pending_assignment', or 'paused'."
+        )
+
+    try:
+        # Get DAG instance
+        dag_instance = await workflow_service.get_instance(instance_id)
+        if not dag_instance:
+            raise HTTPException(status_code=404, detail="Instance not found in workflow system")
+
+        # Store original status before updating
+        original_status = db_instance.status
+
+        # Update instance status to running
+        db_instance.status = "running"
+        db_instance.started_at = datetime.utcnow()
+        db_instance.updated_at = datetime.utcnow()
+        await db_instance.save()
+
+        # Start/resume the workflow execution based on original status
+        if original_status in ["waiting_for_start", "pending_assignment"]:
+            # Start fresh execution
+            await workflow_service.execute_instance(instance_id)
+        elif original_status == "paused":
+            # Resume paused execution
+            workflow_service.executor.resume_instance(instance_id)
+
+        return {
+            "success": True,
+            "message": f"Workflow instance {instance_id} started successfully",
+            "instance_id": instance_id,
+            "status": "running",
+            "started_by": current_user.get("sub"),
+            "started_at": db_instance.started_at.isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error starting workflow instance {instance_id}: {e}", exc_info=True)
+        error_detail = str(e) if str(e) else f"Unknown error of type {type(e).__name__}"
+        raise HTTPException(status_code=500, detail=f"Failed to start workflow instance: {error_detail}")
+
+
+@router.post("/{instance_id}/submit-data")
+async def submit_workflow_data(
+    request: Request,
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Submit data for a workflow waiting for input with role-based access control.
+    Used by admin workflows that need data input.
+
+    Access control:
+    - Admin: can submit data for all instances
+    - Manager: can submit data for instances assigned to their teams
+    - Reviewer/Approver: can submit data for instances directly assigned to them
+    - Viewer: can submit data for instances directly assigned to them
+    """
+    instance_id = db_instance.instance_id
+
+    # Get DAG instance
+    dag_instance = await workflow_service.get_instance(instance_id)
+    if not dag_instance:
+        raise HTTPException(status_code=404, detail="Instance not found in workflow system")
+
+    # Find waiting task
+    waiting_task = None
+    for task_id, state in dag_instance.task_states.items():
+        if state.get("status") == "waiting":
+            waiting_task = task_id
+            break
+
+    if not waiting_task:
+        raise HTTPException(status_code=400, detail="Instance is not waiting for input")
+
+    # Get submitted data - handle both JSON and FormData
+    content_type = request.headers.get("content-type", "")
+
+    if "multipart/form-data" in content_type:
+        # Handle FormData
+        form = await request.form()
+        data = {}
+        for key, value in form.items():
+            # Handle file uploads separately if needed
+            if hasattr(value, 'filename'):
+                # This is a file upload - read the file content
+                import base64
+                file_content = await value.read()
+                # Convert to base64 for storage
+                file_base64 = base64.b64encode(file_content).decode('utf-8')
+
+                data[key] = {
+                    "filename": value.filename,
+                    "content_type": value.content_type,
+                    "base64": file_base64,  # Store the actual file content as base64
+                    "size": len(file_content)
+                }
+            else:
+                data[key] = value
+    else:
+        # Handle JSON
+        data = await request.json()
+
+    # Update BOTH the DAG instance and database with input
+    dag_instance.context[f"{waiting_task}_input"] = data
+    dag_instance.context[f"{waiting_task}_submitted_at"] = datetime.utcnow().isoformat()
+
+    # Change status from paused to running to avoid delays
+    if db_instance.status == "paused":
+        db_instance.status = "running"
+
+    # Save to database
+    db_instance.context = dag_instance.context
+    db_instance.updated_at = datetime.utcnow()
+    await db_instance.save()
+
+    # Resume execution - the DAG instance now has the data in context
+    workflow_service.executor.resume_instance(instance_id)
+
+    return {
+        "success": True,
+        "message": "Data submitted successfully",
+        "instance_id": instance_id,
+        "submitted_by": current_user.get("sub"),
+        "submitted_at": datetime.utcnow().isoformat()
+    }
+
+
 @router.post("/{instance_id}/validate")
 async def validate_citizen_data(
-    instance_id: str,
     validation_request: Dict[str, Any],
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
 ):
-    """Validate or reject citizen submitted data"""
+    """Validate or reject citizen submitted data with role-based access control"""
     from ...models.user import UserModel
-    
-    # Find the instance
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+
+    instance_id = instance.instance_id
     
     # Check if instance can be validated
     # Allow validation if:
@@ -1246,10 +1547,10 @@ async def validate_citizen_data(
 
 @router.get("/{instance_id}/citizen-data")
 async def get_citizen_data(
-    instance_id: str,
-    current_user: dict = Depends(require_permission("VIEW_INSTANCES"))
+    db_instance: WorkflowInstance = Depends(require_instance_access)
 ):
-    """Get detailed citizen data for an instance"""
+    """Get detailed citizen data for an instance with role-based access control"""
+    instance_id = db_instance.instance_id
     from ...models.user import UserModel
     
     # Find the instance
@@ -1329,16 +1630,13 @@ async def get_citizen_data(
 
 @router.post("/{instance_id}/assign-to-user")
 async def assign_instance_to_user(
-    instance_id: str,
     request: Dict[str, Any],
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
 ):
-    """Assign instance to a specific user"""
-    
-    # Get instance
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+    """Assign instance to a specific user with role-based access control"""
+
+    instance_id = instance.instance_id
     
     # Get assignment data
     user_id = request.get("user_id")
@@ -1385,16 +1683,13 @@ async def assign_instance_to_user(
 
 @router.post("/{instance_id}/assign-to-team")
 async def assign_instance_to_team(
-    instance_id: str,
     request: Dict[str, Any],
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
 ):
-    """Assign instance to a team"""
-    
-    # Get instance
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+    """Assign instance to a team with role-based access control"""
+
+    instance_id = instance.instance_id
     
     # Get assignment data
     team_id = request.get("team_id")
@@ -1731,16 +2026,13 @@ async def give_final_approval(
 
 @router.post("/{instance_id}/unassign")
 async def unassign_instance(
-    instance_id: str,
     request: Optional[Dict[str, Any]] = None,
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES"))
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user)
 ):
-    """Remove assignment from instance"""
-    
-    # Get instance
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
+    """Remove assignment from instance with role-based access control"""
+
+    instance_id = instance.instance_id
     
     # Get reason
     reason = "manual_unassignment"

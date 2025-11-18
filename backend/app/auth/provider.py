@@ -281,6 +281,7 @@ def require_permission(permission: str):
         "APPROVE_STEPS": ["approver", "manager", "admin"],
         "REVIEW_DOCUMENTS": ["reviewer", "manager", "admin"],
         "VIEW_DOCUMENTS": ["reviewer", "manager", "admin", "viewer", "approver"],
+        "VIEW_INSTANCES": ["reviewer", "manager", "admin", "viewer", "approver"],
         "VIEW_ONLY": ["viewer", "reviewer", "approver", "manager", "admin"]
     }
 

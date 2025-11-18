@@ -53,17 +53,19 @@ async def list_assignments(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     status: Optional[AssignmentStatus] = Query(None, description="Filter by assignment status"),
     parent_instance_id: Optional[str] = Query(None, description="Filter by parent instance"),
+    search: Optional[str] = Query(None, description="Search in workflow name, citizen email, citizen name, instance ID, or context data"),
     skip: int = Query(0, ge=0, description="Number of items to skip"),
     limit: int = Query(20, ge=1, le=100, description="Number of items to return"),
     admin: dict = Depends(get_current_admin)
 ):
     """
-    List workflow assignments with filtering.
+    List workflow assignments with filtering and role-based access control.
 
     Access control:
-    - Admins and Managers see all assignments
-    - Reviewers and Approvers see assignments for their teams
-    - Viewers see only their own assignments
+    - Admin: can see all assignments
+    - Manager: can see assignments for their teams + directly assigned to them
+    - Reviewer/Approver: can see ONLY assignments directly assigned to them
+    - Viewer: can see ONLY assignments directly assigned to them
     """
     # Roles are flattened to the top level by the auth provider
     user_role = admin.get("roles", [])
@@ -83,36 +85,92 @@ async def list_assignments(
     if status:
         query["assignment_status"] = status
 
-    # Role-based filtering
-    if "admin" not in user_role and "manager" not in user_role:
-        # Non-managers only see relevant assignments
-        if "reviewer" in user_role or "approver" in user_role:
-            # See team assignments
-            if team_id:
-                query["assigned_team_id"] = team_id
-            elif user_teams:
-                query["$or"] = [
-                    {"assigned_user_id": user_id_from_token},
-                    {"assigned_team_id": {"$in": user_teams}}
-                ]
-            else:
-                query["assigned_user_id"] = user_id_from_token
-        else:
-            # Viewers only see their own
-            query["assigned_user_id"] = user_id_from_token
-    else:
-        # Admins and Managers see unassigned instances by default
+    # Role-based filtering based on access control rules:
+    # - admin: can see all instances
+    # - manager: can see instances assigned to their teams + directly assigned to them
+    # - reviewer/approver: can see ONLY instances directly assigned to them
+    # - viewer: can see ONLY instances directly assigned to them
+
+    if "admin" in user_role:
+        # Admin sees everything - apply any explicit filters if provided
+        if team_id:
+            query["assigned_team_id"] = team_id
+        elif user_id:
+            query["assigned_user_id"] = user_id
+        # Otherwise no filtering - show all instances
+
+    elif "manager" in user_role:
+        # Manager sees team assignments + direct assignments
+        conditions = []
+
+        # Always include direct assignments
+        conditions.append({"assigned_user_id": user_id_from_token})
+
+        # Include team assignments if user has teams
+        if user_teams:
+            conditions.append({"assigned_team_id": {"$in": user_teams}})
+
+        # Apply explicit filters if provided
         if team_id:
             query["assigned_team_id"] = team_id
         elif user_id:
             query["assigned_user_id"] = user_id
         else:
-            # Show all admin instances for admins/managers (both assigned and unassigned)
-            pass  # No additional filtering - show all instances
+            # Use OR condition for team + direct assignments
+            query["$or"] = conditions
+
+    else:
+        # Reviewer, approver, viewer: only see direct assignments
+        query["assigned_user_id"] = user_id_from_token
 
     # Only show ADMIN workflows by default
     if not workflow_type:
         query["workflow_type"] = WorkflowType.ADMIN
+
+    # Add search functionality
+    if search:
+        # Base search conditions for instance and workflow IDs
+        search_conditions = [
+            {"instance_id": {"$regex": search, "$options": "i"}},
+            {"workflow_id": {"$regex": search, "$options": "i"}}
+        ]
+
+        # Get all unique context keys from existing instances to build dynamic search
+        pipeline = [
+            {"$match": {"context": {"$exists": True, "$ne": {}}}},
+            {"$project": {"context_keys": {"$objectToArray": "$context"}}},
+            {"$unwind": "$context_keys"},
+            {"$group": {"_id": "$context_keys.k"}},
+            {"$project": {"key": "$_id", "_id": 0}}
+        ]
+
+        try:
+            context_keys_result = await WorkflowInstance.aggregate(pipeline).to_list()
+            context_keys = [item["key"] for item in context_keys_result if isinstance(item.get("key"), str)]
+
+            # Build dynamic search conditions for all context keys
+            for key in context_keys:
+                search_conditions.append({
+                    f"context.{key}": {"$regex": search, "$options": "i"}
+                })
+
+        except Exception as e:
+            # Fallback: if aggregation fails, just search in the context object as text
+            logger.warning(f"Failed to get dynamic context keys, using fallback: {e}")
+            search_conditions.append({
+                "$where": f"JSON.stringify(this.context).toLowerCase().includes('{search.lower()}')"
+            })
+
+        # If there are existing conditions, combine with AND
+        if query:
+            # Convert existing query conditions to a list for $and
+            existing_conditions = []
+            for key, value in query.items():
+                existing_conditions.append({key: value})
+
+            query = {"$and": existing_conditions + [{"$or": search_conditions}]}
+        else:
+            query = {"$or": search_conditions}
 
     try:
         # Debug: Print the query being executed
@@ -131,24 +189,41 @@ async def list_assignments(
         else:
             print(f"[ASSIGNMENTS DEBUG] Child workflow {child_id} not found in database")
 
-        # Get paginated results
-        instances = await WorkflowInstance.find(query).skip(skip).limit(limit).to_list()
+        # Get paginated results ordered by most recent first
+        instances = await WorkflowInstance.find(query).sort([("created_at", -1)]).skip(skip).limit(limit).to_list()
         print(f"[ASSIGNMENTS DEBUG] Retrieved {len(instances)} instances")
 
         # Build response
         assignments = []
         for inst in instances:
-            # Get workflow definition for name
+            # Get workflow definition for name and total steps
             workflow_def = await WorkflowDefinition.find_one(
                 WorkflowDefinition.workflow_id == inst.workflow_id
             )
+
+            # Calculate completion percentage based on workflow steps
+            total_steps = 0
+            if workflow_def:
+                # Get total steps from workflow definition
+                from ...models.workflow import WorkflowStep
+                total_steps = await WorkflowStep.find(
+                    WorkflowStep.workflow_id == inst.workflow_id
+                ).count()
+
+            # Calculate progress percentage
+            completion_percentage = 0
+            if total_steps > 0 and inst.completed_steps:
+                completion_percentage = (len(inst.completed_steps) / total_steps) * 100
+                # Cap at 100%
+                completion_percentage = min(completion_percentage, 100)
 
             assignments.append(AssignmentResponse(
                 instance_id=inst.instance_id,
                 workflow_id=inst.workflow_id,
                 workflow_type=inst.workflow_type,
                 workflow_name=workflow_def.name if workflow_def else inst.workflow_id,
-                status=inst.assignment_status,
+                status=inst.assignment_status,  # Keep assignment status for compatibility
+                workflow_status=inst.status,  # Add workflow status as new field
                 assigned_to_user=inst.assigned_user_id,
                 assigned_to_team=inst.assigned_team_id,
                 assigned_at=inst.assigned_at,
@@ -160,10 +235,7 @@ async def list_assignments(
                 updated_at=inst.updated_at,
                 citizen_email=inst.context.get("parent_customer_email"),
                 current_step=inst.current_step,
-                completion_percentage=(
-                    len(inst.completed_steps) / len(inst.context.get("total_steps", [1])) * 100
-                    if inst.completed_steps else 0
-                )
+                completion_percentage=completion_percentage
             ))
 
         return AssignmentListResponse(
