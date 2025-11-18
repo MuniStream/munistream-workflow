@@ -26,7 +26,7 @@ class WorkflowStartOperator(BaseOperator):
     child to complete before continuing.
 
     Example:
-        # In a citizen workflow (Tramite 07)
+        # Basic team assignment (original functionality)
         validate_property = WorkflowStartOperator(
             task_id="validate_property_admin",
             workflow_id="admin_property_validation",
@@ -38,6 +38,19 @@ class WorkflowStartOperator(BaseOperator):
                 "property_id": "property_id",
                 "documents": "uploaded_files"
             }
+        )
+
+        # Enhanced: Auto-assignment with role and auto-start
+        validate_property_enhanced = WorkflowStartOperator(
+            task_id="validate_property_admin",
+            workflow_id="admin_property_validation",
+            workflow_type=WorkflowType.ADMIN,
+            assign_to={"team": "validadores_catastro"},  # Keycloak group
+            auto_assign=True,                            # Enable auto user assignment
+            assignee_role="reviewer",                    # Only assign to reviewers
+            assignment_strategy="round_robin",           # Use round-robin assignment
+            auto_start=True,                             # Auto-start after assignment
+            wait_for_completion=True
         )
     """
 
@@ -53,6 +66,10 @@ class WorkflowStartOperator(BaseOperator):
         context_mapping: Optional[Dict[str, str]] = None,
         required_status: str = "approved",
         priority: int = 5,
+        auto_assign: bool = False,
+        assignee_role: Optional[str] = None,
+        auto_start: bool = False,
+        assignment_strategy: str = "round_robin",
         **kwargs
     ):
         """
@@ -69,6 +86,10 @@ class WorkflowStartOperator(BaseOperator):
             context_mapping: Map parent context keys to child keys
             required_status: Expected terminal status for success (if waiting)
             priority: Priority level for the child workflow (1-10)
+            auto_assign: Enable automatic user assignment from Keycloak group
+            assignee_role: Required role for assignee (e.g., "reviewer", "approver")
+            auto_start: Automatically start workflow after assignment
+            assignment_strategy: Assignment strategy (round_robin, workload_based, etc.)
             **kwargs: Additional arguments passed to BaseOperator
         """
         super().__init__(task_id=task_id, **kwargs)
@@ -81,6 +102,10 @@ class WorkflowStartOperator(BaseOperator):
         self.context_mapping = context_mapping or {}
         self.required_status = required_status
         self.priority = priority
+        self.auto_assign = auto_assign
+        self.assignee_role = assignee_role
+        self.auto_start = auto_start
+        self.assignment_strategy = assignment_strategy
 
         # State key will be set per instance to ensure uniqueness
         self._state_key = None
@@ -488,7 +513,7 @@ class WorkflowStartOperator(BaseOperator):
         context: Dict[str, Any]
     ) -> None:
         """
-        Assign the workflow to a team or user.
+        Assign the workflow to a team or user, with optional auto-assignment to specific user from Keycloak group.
 
         Args:
             instance: Workflow instance to assign
@@ -496,23 +521,73 @@ class WorkflowStartOperator(BaseOperator):
         """
         print(f"[WorkflowStartOperator] _assign_workflow started")
         print(f"[WorkflowStartOperator] assign_to: {self.assign_to}")
+        print(f"[WorkflowStartOperator] auto_assign: {self.auto_assign}")
+        print(f"[WorkflowStartOperator] assignee_role: {self.assignee_role}")
         print(f"[WorkflowStartOperator] instance.instance_id: {instance.instance_id}")
 
         assigned_by = context.get("user_id", "system")
         print(f"[WorkflowStartOperator] assigned_by: {assigned_by}")
 
         try:
+            assigned_user_id = None
+
             if "team" in self.assign_to:
-                print(f"[WorkflowStartOperator] Assigning to team: {self.assign_to['team']}")
+                team_id = self.assign_to["team"]
+                print(f"[WorkflowStartOperator] Assigning to team: {team_id}")
+
+                # If auto_assign is enabled, try to assign to specific user within the group
+                if self.auto_assign:
+                    print(f"[WorkflowStartOperator] Auto-assign enabled, looking for specific user")
+                    try:
+                        # Import the service here to avoid circular imports
+                        from ...services.keycloak_group_assignment import keycloak_group_assignment_service
+
+                        assigned_user_id = await keycloak_group_assignment_service.assign_to_user_from_group(
+                            group_id=team_id,
+                            required_role=self.assignee_role,
+                            workflow_id=self.workflow_id,
+                            assignment_strategy=self.assignment_strategy
+                        )
+
+                        if assigned_user_id:
+                            print(f"[WorkflowStartOperator] Auto-assigned to specific user: {assigned_user_id}")
+                            logger.info("Auto-assigned to specific user from group",
+                                       user_id=assigned_user_id,
+                                       group_id=team_id,
+                                       role=self.assignee_role,
+                                       instance_id=instance.instance_id)
+                        else:
+                            print(f"[WorkflowStartOperator] Auto-assignment failed, falling back to team assignment")
+                            logger.warning("Auto-assignment to specific user failed, using team assignment",
+                                         group_id=team_id,
+                                         role=self.assignee_role)
+                    except Exception as auto_assign_error:
+                        print(f"[WorkflowStartOperator] Auto-assignment error: {auto_assign_error}")
+                        logger.error("Error in auto-assignment, falling back to team assignment",
+                                   error=str(auto_assign_error),
+                                   group_id=team_id)
+
+                # Assign to team (always done) and optionally to specific user
                 instance.assign_to_team(
-                    team_id=self.assign_to["team"],
+                    team_id=team_id,
                     assigned_by=assigned_by,
                     assignment_type=AssignmentType.AUTOMATIC,
                     notes=f"Auto-assigned by workflow {context.get('workflow_id', 'unknown')} task {self.task_id}"
                 )
+
+                # If we have a specific user, assign to them as well
+                if assigned_user_id:
+                    instance.assign_to_user(
+                        user_id=assigned_user_id,
+                        assigned_by=assigned_by,
+                        assignment_type=AssignmentType.AUTOMATIC,
+                        notes=f"Auto-assigned to user {assigned_user_id} from group {team_id} with role {self.assignee_role}"
+                    )
+
                 print(f"[WorkflowStartOperator] Team assignment completed")
                 logger.info("Assigned to team",
-                           team_id=self.assign_to["team"],
+                           team_id=team_id,
+                           assigned_user_id=assigned_user_id,
                            instance_id=instance.instance_id)
 
             elif "admin" in self.assign_to:
@@ -523,6 +598,7 @@ class WorkflowStartOperator(BaseOperator):
                     assignment_type=AssignmentType.AUTOMATIC,
                     notes=f"Auto-assigned by workflow {context.get('workflow_id', 'unknown')} task {self.task_id}"
                 )
+                assigned_user_id = self.assign_to["admin"]
                 print(f"[WorkflowStartOperator] User assignment completed")
                 logger.info("Assigned to user",
                            user_id=self.assign_to["admin"],
@@ -536,9 +612,22 @@ class WorkflowStartOperator(BaseOperator):
             print(f"[WorkflowStartOperator] parent_workflow_id set to: {instance.parent_workflow_id}")
 
             print(f"[WorkflowStartOperator] Updating status and assignment_status")
-            # Update status to waiting_for_start after assignment
-            instance.status = "waiting_for_start"
-            instance.assignment_status = AssignmentStatus.PENDING_REVIEW
+
+            # Determine initial status based on auto_start setting and assignment
+            if self.auto_start and assigned_user_id:
+                # Auto-start enabled and we have a specific user - start immediately
+                instance.status = "running"
+                instance.assignment_status = AssignmentStatus.UNDER_REVIEW
+                print(f"[WorkflowStartOperator] Auto-start enabled with specific user - status set to running")
+                logger.info("Auto-started workflow with specific user assignment",
+                           instance_id=instance.instance_id,
+                           assigned_user_id=assigned_user_id)
+            else:
+                # Standard flow - wait for manual start
+                instance.status = "waiting_for_start"
+                instance.assignment_status = AssignmentStatus.PENDING_REVIEW
+                print(f"[WorkflowStartOperator] Standard flow - status set to waiting_for_start")
+
             print(f"[WorkflowStartOperator] Status set to: {instance.status}")
             print(f"[WorkflowStartOperator] Assignment status set to: {instance.assignment_status}")
 
@@ -546,10 +635,31 @@ class WorkflowStartOperator(BaseOperator):
             await instance.save()
             print(f"[WorkflowStartOperator] Instance saved successfully")
 
+            # If auto-start is enabled and we have a specific user, trigger workflow execution
+            if self.auto_start and assigned_user_id:
+                try:
+                    print(f"[WorkflowStartOperator] Triggering auto-start workflow execution")
+                    from ...services.workflow_service import workflow_service
+
+                    # Start the workflow execution
+                    await workflow_service.execute_instance(instance.instance_id)
+                    logger.info("Auto-started workflow execution triggered",
+                               instance_id=instance.instance_id,
+                               assigned_user_id=assigned_user_id)
+                    print(f"[WorkflowStartOperator] Auto-start execution triggered successfully")
+
+                except Exception as auto_start_error:
+                    logger.error("Failed to auto-start workflow execution",
+                               error=str(auto_start_error),
+                               instance_id=instance.instance_id)
+                    print(f"[WorkflowStartOperator] Auto-start execution failed: {auto_start_error}")
+                    # Don't raise the error - assignment was successful, just auto-start failed
+
             logger.info("Parent-child relationship established",
                        child_instance_id=instance.instance_id,
                        parent_instance_id=instance.parent_instance_id,
-                       parent_workflow_id=instance.parent_workflow_id)
+                       parent_workflow_id=instance.parent_workflow_id,
+                       auto_started=self.auto_start and assigned_user_id is not None)
             print(f"[WorkflowStartOperator] _assign_workflow completed successfully")
 
         except Exception as e:
