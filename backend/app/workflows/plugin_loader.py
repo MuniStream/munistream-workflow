@@ -32,6 +32,7 @@ class WorkflowPlugin:
         self.name = config.get("name", "unnamed_plugin")
         self.version = config.get("version", "1.0.0")
         self.workflows = config.get("workflows", [])
+        self.visualizers = config.get("visualizers", [])
         self.local_path = None
         
     def clone_or_update(self, base_path: str = "/tmp/civicstream_plugins") -> str:
@@ -167,6 +168,79 @@ class WorkflowPlugin:
                 print(f"   - {error}")
         
         return loaded_workflows
+
+    def load_visualizers(self) -> int:
+        """Load and register all visualizers from the plugin"""
+        if not self.local_path:
+            raise ValueError("Plugin not cloned yet. Call clone_or_update first.")
+
+        loaded_count = 0
+        errors = []
+
+        # Import VisualizerFactory here to avoid circular imports
+        from ..services.visualizers.visualizer_factory import VisualizerFactory
+
+        # Add plugin path to Python path
+        if self.local_path not in sys.path:
+            sys.path.insert(0, self.local_path)
+
+        try:
+            print(f"🎨 DEBUG: Processing {len(self.visualizers)} visualizers for plugin {self.name}")
+            print(f"🎨 DEBUG: Visualizers list: {self.visualizers}")
+
+            for visualizer_info in self.visualizers:
+                module_path = visualizer_info.get("module")
+                class_name = visualizer_info.get("class")
+                name = visualizer_info.get("name")
+
+                print(f"🎨 DEBUG: Processing visualizer_info: {visualizer_info}")
+                print(f"🎨 DEBUG: module_path={module_path}, class_name={class_name}, name={name}")
+
+                if not module_path or not class_name or not name:
+                    error_msg = f"Skipping visualizer with missing module/class/name: {visualizer_info}"
+                    print(f"⚠️ {error_msg}")
+                    errors.append(error_msg)
+                    continue
+
+                try:
+                    print(f"🎨 DEBUG: Attempting to load {module_path}.{class_name}...")
+                    # Import the module
+                    module = importlib.import_module(module_path)
+                    print(f"🎨 DEBUG: Successfully imported module {module_path}")
+
+                    # Get the visualizer class
+                    if hasattr(module, class_name):
+                        visualizer_class = getattr(module, class_name)
+
+                        # Register with the factory
+                        VisualizerFactory.register_visualizer(name, visualizer_class)
+                        loaded_count += 1
+                        print(f"✅ Registered visualizer: {name} -> {visualizer_class.__name__} from {self.name}")
+                    else:
+                        error_msg = f"Module {module_path} has no class {class_name}"
+                        print(f"❌ {error_msg}")
+                        errors.append(error_msg)
+
+                except ImportError as e:
+                    error_msg = f"Failed to import {module_path}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+                except Exception as e:
+                    error_msg = f"Error loading {module_path}.{class_name}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+
+        finally:
+            # Clean up sys.path
+            if self.local_path in sys.path:
+                sys.path.remove(self.local_path)
+
+        if errors:
+            print(f"⚠️ Plugin {self.name} had {len(errors)} errors during visualizer loading")
+            for error in errors:
+                print(f"   - {error}")
+
+        return loaded_count
     
     def _auto_discover_workflows(self) -> List[Dict[str, str]]:
         """Auto-discover workflows by scanning for DAG files"""
@@ -343,9 +417,12 @@ class WorkflowPluginManager:
         print(f"Unique workflow IDs: {len(workflow_ids_loaded)}")
         print(f"{'='*60}")
 
-        # Now that all repositories are cloned, load themes from both local config and plugin repos
+        # Now that all repositories are cloned, load themes and visualizers from both local config and plugin repos
         print(f"\n📦 Loading themes...")
         self._load_themes(self._stored_config)
+
+        print(f"\n🎨 Loading visualizers...")
+        self._load_visualizers()
         print(f"{'='*60}\n")
 
         return total_loaded
@@ -427,6 +504,24 @@ class WorkflowPluginManager:
 
         if total_theme_count > 0:
             print(f"   ✅ Total themes loaded: {total_theme_count}")
+
+    def _load_visualizers(self):
+        """Load visualizers from all plugins"""
+        total_visualizer_count = 0
+
+        print(f"   Loading visualizers from {len(self.plugins)} plugins...")
+        for plugin in self.plugins:
+            if plugin.visualizers:
+                try:
+                    visualizer_count = plugin.load_visualizers()
+                    total_visualizer_count += visualizer_count
+                    if visualizer_count > 0:
+                        print(f"   ✅ Loaded {visualizer_count} visualizer(s) from {plugin.name}")
+                except Exception as e:
+                    print(f"   ⚠️ Error loading visualizers from {plugin.name}: {e}")
+
+        if total_visualizer_count > 0:
+            print(f"   ✅ Total visualizers loaded: {total_visualizer_count}")
 
 
 # Example plugin configuration file (plugins.yaml):

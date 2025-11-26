@@ -9,6 +9,7 @@ from enum import Enum
 from .base import BaseOperator, TaskResult
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity
+from ...services.visualizers.visualizer_factory import VisualizerFactory
 
 
 class EntityCreationOperator(BaseOperator):
@@ -27,6 +28,7 @@ class EntityCreationOperator(BaseOperator):
         visualization_config: Optional[Dict[str, Any]] = None,  # Field-level visualization hints
         entity_display_config: Optional[Dict[str, Any]] = None,  # Entity-level display config
         user_id_source: Optional[str] = None,  # Optional: context field to get user_id from (admin only)
+        visualizer: Optional[str] = None,  # Visualizer type for entity PDF generation
         **kwargs
     ):
         """
@@ -39,8 +41,9 @@ class EntityCreationOperator(BaseOperator):
             data_mapping: Map context keys to entity data fields
             static_data: Static data to always include
             visualization_config: Field-level visualization hints (e.g., {"field": {"type": "qr_code"}})
-            entity_display_config: Entity-level display configuration (e.g., {"default_view": "pdf_report"})
+            entity_display_config: Entity-level display configuration (e.g., {"default_view": "pdf_report", "base_url": "https://..."})
             user_id_source: Optional context field to get user_id from (admin workflows only)
+            visualizer: Visualizer type for entity PDF generation (e.g., "pdf_report", "signed_pdf")
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
@@ -49,11 +52,18 @@ class EntityCreationOperator(BaseOperator):
         self.static_data = static_data or {}
         self.visualization_config = visualization_config or {}
         self.user_id_source = user_id_source
+        self.visualizer = visualizer
+
+        # Merge visualizer into entity_display_config
         self.entity_display_config = entity_display_config or {
             "default_view": "card",  # card | pdf_report | table
             "pdf_template": None,     # Template name for PDF generation
             "preview_fields": [],     # Fields to show in preview
         }
+
+        # Add visualizer to display config if provided
+        if self.visualizer:
+            self.entity_display_config["visualizer"] = self.visualizer
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Create the entity based on workflow context"""
@@ -80,30 +90,47 @@ class EntityCreationOperator(BaseOperator):
                     error="No user_id, customer_id, or user_id_source in context"
                 )
             
-            # Get entity name - can be from context or static
-            if self.name_source in context:
-                entity_name = context[self.name_source]
-                print(f"   Found entity name in context: {entity_name}")
-            else:
-                entity_name = self.name_source  # Use as static string
-                print(f"   Using static entity name: {entity_name}")
-            
-            # Build entity data from mappings and static data
+            # Build entity data from context automatically first
             entity_data = dict(self.static_data)  # Start with static data
-            
-            # Map context fields to entity data
-            for context_key, data_field in self.data_mapping.items():
-                # Support nested context keys like "user_input.field"
-                value = context
-                for key_part in context_key.split("."):
-                    if isinstance(value, dict):
-                        value = value.get(key_part)
-                        if value is None:
-                            break
-                
-                if value is not None:
-                    entity_data[data_field] = value
-            
+
+            # Auto-collect all task outputs from context
+            for key, value in context.items():
+                # Skip system/internal fields
+                if key.startswith(('_', 'instance', 'workflow', 'task_instance')):
+                    continue
+
+                # Include all task outputs that contain actual form data
+                if isinstance(value, dict):
+                    entity_data.update(value)
+                elif value is not None and not isinstance(value, (list, dict)):
+                    entity_data[key] = value
+
+            # Apply explicit mapping overrides if provided
+            if self.data_mapping:
+                for context_key, data_field in self.data_mapping.items():
+                    value = context
+                    for key_part in context_key.split("."):
+                        if isinstance(value, dict):
+                            value = value.get(key_part)
+                            if value is None:
+                                break
+
+                    if value is not None:
+                        entity_data[data_field] = value
+
+            # Get entity name - can be from entity_data, context or static
+            entity_name = None
+            if self.name_source in entity_data:
+                entity_name = entity_data[self.name_source]
+                print(f"   Found entity name in entity_data: {entity_name}")
+            else:
+                entity_name = self._extract_value_from_context(context, self.name_source)
+                if entity_name is not None:
+                    print(f"   Found entity name in context: {entity_name}")
+                else:
+                    entity_name = self.name_source  # Use as static string
+                    print(f"   Using static entity name: {entity_name}")
+
             # For async operations, we'll handle this in execute_async
             # Store the parameters for async execution
             self._entity_params = {
@@ -148,7 +175,7 @@ class EntityCreationOperator(BaseOperator):
             try:
                 entity = await EntityService.create_entity(**self._entity_params)
                 print(f"   ✅ Entity created successfully: {entity.entity_id}")
-                
+
                 # Log successful creation - operator-level log
                 await self.log_info(
                     f"Successfully created {self.entity_type}: {entity.entity_id}",
@@ -158,13 +185,73 @@ class EntityCreationOperator(BaseOperator):
                         "data": entity.data
                     }
                 )
-                
+
+                # Generate visualization if visualizer is specified
+                pdf_generated = False
+                if self.visualizer:
+                    try:
+                        print(f"   🎨 Generating visualization with {self.visualizer}...")
+
+                        # Get the visualizer instance
+                        visualizer = VisualizerFactory.get_visualizer(
+                            visualizer_type=self.visualizer,
+                            config=self.entity_display_config
+                        )
+
+                        if visualizer:
+                            # Generate PDF for the entity
+                            pdf_data = await visualizer.generate_pdf(entity)
+
+                            if pdf_data:
+                                # Store PDF reference in entity data
+                                entity.data["_pdf_generated"] = {
+                                    "visualizer": self.visualizer,
+                                    "generated_at": datetime.utcnow().isoformat(),
+                                    "size_bytes": len(pdf_data)
+                                }
+
+                                # Update entity with PDF info
+                                await entity.save()
+                                pdf_generated = True
+
+                                await self.log_info(
+                                    f"PDF visualization generated for entity {entity.entity_id}",
+                                    details={
+                                        "visualizer": self.visualizer,
+                                        "pdf_size": len(pdf_data)
+                                    }
+                                )
+                                print(f"   ✅ PDF generated successfully ({len(pdf_data)} bytes)")
+                            else:
+                                await self.log_warning(
+                                    f"PDF generation returned empty data for entity {entity.entity_id}",
+                                    details={"visualizer": self.visualizer}
+                                )
+                        else:
+                            await self.log_warning(
+                                f"Visualizer '{self.visualizer}' not found or not available",
+                                details={"available_visualizers": VisualizerFactory.get_available_visualizers()}
+                            )
+
+                    except Exception as e:
+                        await self.log_error(
+                            f"Failed to generate PDF visualization for entity {entity.entity_id}",
+                            error=e,
+                            details={"visualizer": self.visualizer}
+                        )
+                        print(f"   ⚠️ PDF generation failed: {e}")
+
                 # Update the output data
                 output_data = {
                     f"{self.task_id}_entity_id": entity.entity_id,
                     f"{self.task_id}_entity_type": entity.entity_type,
-                    f"created_entity_{self.entity_type}": entity.entity_id
+                    f"created_entity_{self.entity_type}": entity.entity_id,
+                    f"{self.task_id}_pdf_generated": pdf_generated
                 }
+
+                if pdf_generated:
+                    output_data[f"{self.task_id}_visualizer"] = self.visualizer
+
                 self.state.output_data = output_data
                 return TaskResult(
                     status="continue",
@@ -189,6 +276,29 @@ class EntityCreationOperator(BaseOperator):
         
         # If regular execute didn't need async, return its result
         return result
+
+    def _extract_value_from_context(self, context: Dict[str, Any], key: str) -> Any:
+        """Extract value from context using dot notation (e.g., 'collect_data.field_name')"""
+        if not key:
+            return None
+
+        # Try direct key first
+        if key in context:
+            return context[key]
+
+        # Try nested key with dot notation
+        if '.' in key:
+            value = context
+            for key_part in key.split('.'):
+                if isinstance(value, dict):
+                    value = value.get(key_part)
+                    if value is None:
+                        break
+                else:
+                    return None
+            return value
+
+        return None
 
 
 class EntityValidationOperator(BaseOperator):

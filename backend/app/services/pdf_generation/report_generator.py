@@ -78,7 +78,8 @@ class EntityReportGenerator:
         template_name: str = "default",
         include_qr: bool = True,
         include_signatures: bool = True,
-        format: str = "pdf"
+        format: str = "pdf",
+        base_url: Optional[str] = None
     ) -> bytes:
         """
         Generate PDF report using ReportLab with Jinja2 templates
@@ -97,7 +98,8 @@ class EntityReportGenerator:
         template_data = await self._prepare_template_data(
             entity,
             include_qr,
-            include_signatures
+            include_signatures,
+            base_url
         )
 
         if format == "html":
@@ -125,7 +127,8 @@ class EntityReportGenerator:
         self,
         entity: LegalEntity,
         include_qr: bool,
-        include_signatures: bool
+        include_signatures: bool,
+        base_url: Optional[str] = None
     ) -> Dict[str, Any]:
         """Prepare data for template rendering"""
         data = {
@@ -137,15 +140,28 @@ class EntityReportGenerator:
 
         # Generate QR codes if requested
         if include_qr:
-            # Main entity QR code
-            qr_data = {
+            # Calculate checksum of critical data for integrity verification
+            import hashlib
+            critical_data = {
                 "entity_id": entity.entity_id,
-                "type": entity.entity_type,
+                "entity_type": entity.entity_type,
                 "name": entity.name,
-                "verification_url": f"/verify/{entity.entity_id}"
+                "status": entity.status,
+                "created_at": entity.created_at.isoformat() if entity.created_at else None
             }
+            # Sort keys for consistent hashing
+            data_string = str(sorted(critical_data.items()))
+            checksum = hashlib.sha256(data_string.encode()).hexdigest()[:16]
+
+            # Create verification URL with checksum
+            verification_url = f"/verify/{entity.entity_id}?checksum={checksum}"
+            if base_url:
+                verification_url = f"{base_url.rstrip('/')}/verify/{entity.entity_id}?checksum={checksum}"
+
+            # Main entity QR code - generate URL with checksum for scanning
+            qr_data_url = verification_url
             data["qr_code"] = await self.qr_generator.generate_qr_code(
-                str(qr_data),
+                qr_data_url,
                 size=200
             )
             data["qr_code_data_url"] = self._to_data_url(data["qr_code"])
@@ -156,8 +172,17 @@ class EntityReportGenerator:
                 for field_name, config in entity.visualization_config.items():
                     if config.get("type") == "qr_code":
                         field_value = entity.data.get(field_name, "")
+
+                        # Limit QR code data size to prevent overflow
+                        qr_data = str(field_value)
+                        max_qr_length = 1000  # Safe limit for QR codes
+
+                        if len(qr_data) > max_qr_length:
+                            # For large data, use just the field name and entity ID for verification
+                            qr_data = f"field:{field_name}|entity:{entity.entity_id}"
+
                         qr_bytes = await self.qr_generator.generate_qr_code(
-                            str(field_value),
+                            qr_data,
                             size=config.get("options", {}).get("size", 150)
                         )
                         data["field_qr_codes"][field_name] = self._to_data_url(qr_bytes)

@@ -322,6 +322,9 @@ class DAGExecutor:
                         task.state.output_data = task_result.data
                         # Also update dag_instance task_states for tracking endpoint
                         dag_instance.task_states[task_id]["output_data"] = task_result.data
+                    # Always sync waiting_for from task state (not just when there's data)
+                    if hasattr(task, 'state') and hasattr(task.state, 'waiting_for') and task.state.waiting_for:
+                        dag_instance.task_states[task_id]["waiting_for"] = task.state.waiting_for
                 else:
                     # Regular synchronous execution
                     result = task.run(dag_instance.context)
@@ -389,6 +392,9 @@ class DAGExecutor:
                 # Ensure output_data is available in task_states for tracking endpoint
                 if hasattr(task, 'state') and task.state.output_data:
                     dag_instance.task_states[task_id]["output_data"] = task.state.output_data
+                # Sync waiting_for from task state
+                if hasattr(task, 'state') and hasattr(task.state, 'waiting_for') and task.state.waiting_for:
+                    dag_instance.task_states[task_id]["waiting_for"] = task.state.waiting_for
                 # Schedule re-check after a delay for polling
                 # The instance will be re-queued in the main loop since it's PAUSED
                 break  # Stop processing for now, will resume via polling

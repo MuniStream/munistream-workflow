@@ -336,6 +336,10 @@ class WorkflowStartOperator(BaseOperator):
         if "customer_email" in parent_context:
             child_context["parent_customer_email"] = parent_context["customer_email"]
 
+        # ALWAYS copy the entire parent context as _parent_context
+        # This allows administrative operators to access all parent workflow data
+        child_context["_parent_context"] = parent_context.copy()
+
         # Map specific fields from parent to child
         if self.pass_context and self.context_mapping:
             for parent_key, child_key in self.context_mapping.items():
@@ -743,16 +747,24 @@ class WorkflowStartOperator(BaseOperator):
                            terminal_status=terminal_status)
                 try:
                     print(f"[DEBUG] Creating SUCCESS TaskResult...")
+                    # Copy entire child context to parent, excluding system fields
+                    child_data = {
+                        "child_instance_id": self.child_instance_id,
+                        "child_workflow_id": self.child_instance_id,
+                        "child_status": terminal_status,
+                        "completed_at": child.completed_at.isoformat() if child.completed_at else None,
+                        "message": f"Child workflow completed with status {terminal_status}"
+                    }
+
+                    # Copy all child context data, excluding internal fields
+                    if child.context:
+                        for key, value in child.context.items():
+                            if not key.startswith(('_', 'instance', 'workflow', 'task_instance')):
+                                child_data[key] = value
+
                     task_result = TaskResult(
                         status=TaskStatus.CONTINUE,
-                        data={
-                            "child_instance_id": self.child_instance_id,  # Add instance_id
-                            "child_workflow_id": self.child_instance_id,  # Keep for backward compatibility
-                            "child_status": terminal_status,
-                            "child_result": child.context.get("result", {}) if child.context else {},
-                            "completed_at": child.completed_at.isoformat() if child.completed_at else None,
-                            "message": f"Child workflow completed with status {terminal_status}"
-                        }
+                        data=child_data
                     )
                     print(f"[DEBUG] SUCCESS TaskResult created successfully")
                     return task_result

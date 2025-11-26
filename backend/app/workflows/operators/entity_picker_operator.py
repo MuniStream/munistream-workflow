@@ -439,7 +439,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         """Automatically select entities and return continuation data"""
         logger.info("Performing automatic entity selection")
 
-        auto_selection_data = {}
+        selected_entities_group = {}
 
         for req in requirements:
             entity_type = req["entity_type"]
@@ -451,22 +451,24 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             selected_entities = entities[:min_count]
             selected_ids = [e.entity_id for e in selected_entities]
 
-            auto_selection_data[store_as] = selected_ids
-            auto_selection_data[f"{entity_type}_count"] = len(selected_ids)
-            if selected_ids:
-                auto_selection_data[f"{entity_type}_first"] = selected_ids[0]
+            # Store in grouped format under selected_entities
+            selected_entities_group[store_as] = selected_ids
 
             logger.info("Auto-selected entities for requirement",
                        entity_type=entity_type,
                        selected_count=len(selected_ids),
                        entity_ids=selected_ids[:3])  # Log first 3 IDs
 
+        # Only store the grouped selected entities
+        auto_selection_data = {"selected_entities": selected_entities_group}
+
         # Update state for tracking
         self.state.output_data = auto_selection_data
 
         logger.info("Auto-selection completed successfully",
                    total_requirements=len(requirements),
-                   total_selected=sum(len(ids) for ids in auto_selection_data.values() if isinstance(ids, list)))
+                   total_selected=sum(len(ids) for ids in selected_entities_group.values()),
+                   grouped_entities=selected_entities_group)
 
         return TaskResult(
             status="continue",
@@ -536,7 +538,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             print(f"DEBUG: requirements_count={len(self.requirements)}")
 
             # Validate each requirement
-            output_data = {}
+            selected_entities_group = {}
             validation_errors = []
 
             logger.info("Starting validation loop",
@@ -582,11 +584,8 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                                  found=len(selected_ids),
                                  error=error_msg)
                 else:
-                    # Store valid selections
-                    output_data[store_as] = selected_ids
-                    output_data[f"{entity_type}_count"] = len(selected_ids)
-                    if selected_ids:
-                        output_data[f"{entity_type}_first"] = selected_ids[0]
+                    # Store valid selections in grouped format
+                    selected_entities_group[store_as] = selected_ids
                     logger.info("Requirement validation passed",
                               entity_type=entity_type,
                               store_as=store_as,
@@ -595,7 +594,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             logger.debug("Validation complete",
                         total_errors=len(validation_errors),
                         validation_errors=validation_errors,
-                        output_data=output_data)
+                        selected_entities=selected_entities_group)
 
             if validation_errors:
                 # Return to selection with validation errors
@@ -612,10 +611,11 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                     }
                 )
 
-            # All selections valid
+            # All selections valid - store as grouped entities
+            output_data = {"selected_entities": selected_entities_group}
             logger.info("All validations passed, continuing workflow",
-                       output_data_keys=list(output_data.keys()),
-                       output_data=output_data)
+                       selected_entities=selected_entities_group,
+                       total_selected=sum(len(ids) for ids in selected_entities_group.values()))
             self.state.output_data = output_data
             return TaskResult(
                 status="continue",
