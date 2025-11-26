@@ -151,8 +151,12 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
 async def get_current_customer_optional(authorization: Optional[str] = Header(None)) -> Optional[Customer]:
     """Optional customer authentication - wrapper that catches exceptions and returns None"""
     try:
+        # If no authorization header, return None immediately
+        if not authorization:
+            return None
         return await get_current_customer(authorization)
-    except:
+    except Exception as e:
+        logger.debug(f"Optional authentication failed: {e}")
         return None
 
 
@@ -319,8 +323,16 @@ async def track_instance(
     requires_input = False
     input_form = {}
     waiting_tasks = []
+    waiting_for = None
 
     if dag_instance:
+        # Check if instance is paused and waiting for input
+        if db_instance.status == "paused" and dag_instance.context.get("waiting_for"):
+            requires_input = True
+            waiting_for = dag_instance.context.get("waiting_for")
+            if dag_instance.context.get("form_config"):
+                input_form.update(dag_instance.context["form_config"])
+
         for task_id, state in dag_instance.task_states.items():
             if state.get("status") == "waiting":
                 requires_input = True
@@ -344,8 +356,10 @@ async def track_instance(
                 # Add task-specific metadata
                 if task_form:  # Only add metadata if we found a form
                     task_form["current_step_id"] = task_id
-                    if state.get("output_data", {}).get("waiting_for"):
-                        task_form["waiting_for"] = state["output_data"]["waiting_for"]
+                    task_waiting_for = state.get("output_data", {}).get("waiting_for")
+                    if task_waiting_for:
+                        task_form["waiting_for"] = task_waiting_for
+                        waiting_for = task_waiting_for  # Set top-level waiting_for
 
                     # Merge into global input_form
                     input_form.update(task_form)
@@ -399,6 +413,7 @@ async def track_instance(
         "step_progress": step_progress,
         "requires_input": requires_input,
         "input_form": input_form,
+        "waiting_for": waiting_for,
         "estimated_completion": None,  # Could calculate based on average step time
         "message": f"Workflow {db_instance.status}"
     }

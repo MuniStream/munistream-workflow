@@ -1115,48 +1115,41 @@ async def track_instance_for_admin(
     # Get DAG instance for detailed state
     dag_instance = await workflow_service.get_instance(instance_id)
 
-    # Check if waiting for input - Universal form concatenation approach
+    # Check if waiting for input - Current step only
     requires_input = False
     input_form = {}
-    waiting_tasks = []
+    waiting_for = None
 
     if dag_instance:
-        for task_id, state in dag_instance.task_states.items():
+        current_step = db_instance.current_step
+
+        # Check if instance is paused and waiting for input
+        if db_instance.status == "paused" and dag_instance.context.get("waiting_for"):
+            requires_input = True
+            waiting_for = dag_instance.context.get("waiting_for")
+            if dag_instance.context.get("form_config"):
+                input_form = dag_instance.context["form_config"]
+
+        # Also check current step state for waiting status
+        if current_step and current_step in dag_instance.task_states:
+            state = dag_instance.task_states[current_step]
+
             if state.get("status") == "waiting":
                 requires_input = True
-                waiting_tasks.append(task_id)
+                waiting_for = (
+                    state.get("waiting_for") or
+                    state.get("output_data", {}).get("waiting_for") or
+                    dag_instance.context.get("waiting_for") or
+                    None
+                )
 
-                task = dag_instance.dag.tasks.get(task_id)
-                task_form = {}
-
-                # Merge from ANY source - output_data first (async operators like EntityPickerOperator)
+                # Get form from task output_data or context fallback
                 if state.get("output_data", {}).get("form_config"):
-                    task_form.update(state["output_data"]["form_config"])
-                else:
-                    # Try to get form_config from global context as fallback
-                    if dag_instance.context.get("form_config"):
-                        task_form.update(dag_instance.context["form_config"])
+                    input_form = state["output_data"]["form_config"]
+                elif dag_instance.context.get("form_config"):
+                    # Fallback to context form_config for signature forms
+                    input_form = dag_instance.context["form_config"]
 
-                # Then merge from task.form_config (sync operators like UserInputOperator)
-                if task and hasattr(task, 'form_config'):
-                    task_form.update(task.form_config)
-
-                # Add task-specific metadata
-                if task_form:  # Only add metadata if we found a form
-                    task_form["current_step_id"] = task_id
-                    if state.get("output_data", {}).get("waiting_for"):
-                        task_form["waiting_for"] = state["output_data"]["waiting_for"]
-
-                    # Merge into global input_form
-                    input_form.update(task_form)
-
-        # Handle multiple waiting tasks
-        if len(waiting_tasks) > 1:
-            input_form["multiple_tasks"] = waiting_tasks
-        elif len(waiting_tasks) == 1:
-            # For single task, ensure current_step_id is set
-            if "current_step_id" not in input_form:
-                input_form["current_step_id"] = waiting_tasks[0]
 
     # Calculate progress
     total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
@@ -1199,6 +1192,7 @@ async def track_instance_for_admin(
         "step_progress": step_progress,
         "requires_input": requires_input,
         "input_form": input_form,
+        "waiting_for": waiting_for,
         "estimated_completion": None,  # Could calculate based on average step time
         "message": f"Workflow {db_instance.status}"
     }
