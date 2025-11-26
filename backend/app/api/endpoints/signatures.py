@@ -483,26 +483,12 @@ async def get_entity_html(
         if not html_content:
             raise HTTPException(status_code=500, detail="Failed to generate HTML")
 
-        # Get origin for CORS
-        origin = request.headers.get("origin")
-        referer = request.headers.get("referer")
-
-        # Build CORS headers
-        cors_headers = {
-            "Cache-Control": "no-cache"
-        }
-
-        # Add CORS headers if request comes from known origin
-        if origin:
-            cors_headers["Access-Control-Allow-Origin"] = origin
-            cors_headers["Access-Control-Allow-Methods"] = "GET"
-            cors_headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-
         # Return HTML with proper headers for iframe embedding
+        # CORS is handled by NGINX, so we don't add duplicate headers
         return Response(
             content=html_content,
             media_type="text/html",
-            headers=cors_headers
+            headers={"Cache-Control": "no-cache"}
         )
 
     except HTTPException:
