@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     MAX_DOCUMENT_SIZE_MB: int = 50
     DOCUMENT_BASE_URL: Optional[str] = None  # For serving files
 
+    # Frontend/Citizen Portal Configuration
+    FRONTEND_BASE_URL: Optional[str] = None  # Frontend URL for QR codes and verification links
+
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None

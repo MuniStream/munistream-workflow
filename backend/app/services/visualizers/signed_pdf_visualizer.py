@@ -126,13 +126,17 @@ class SignedPDFVisualizer(PDFVisualizer):
                 updated_at=entity.updated_at
             )
 
+            # Get base_url from config if available
+            base_url = self.config.get("base_url")
+
             # Generate PDF with signature information
             pdf_data = await self.report_generator.generate_entity_report(
                 entity=temp_entity,
                 template_name=self.config.get("template", "signed_entity.html"),
                 include_qr=self.config.get("include_qr", True),
                 include_signatures=True,
-                format="pdf"
+                format="pdf",
+                base_url=base_url
             )
 
             if not pdf_data:

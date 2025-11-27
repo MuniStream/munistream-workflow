@@ -353,10 +353,14 @@ async def get_entity_pdf(
         if include_signatures and entity.data and "signature" in entity.data:
             visualizer = "signed_pdf"
 
+        # Get base URL for frontend (citizen portal) - used for QR codes and verification links
+        from app.core.config import settings
+        base_url = settings.FRONTEND_BASE_URL
+
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
             visualizer_type=visualizer,
-            config={"include_signatures": include_signatures}
+            config={"include_signatures": include_signatures, "base_url": base_url}
         )
 
         if not pdf_visualizer:
@@ -406,10 +410,14 @@ async def get_entity_preview(
         if entity.data and "signature" in entity.data:
             visualizer = "signed_pdf"
 
+        # Get base URL for frontend (citizen portal) - used for QR codes and verification links
+        from app.core.config import settings
+        base_url = settings.FRONTEND_BASE_URL
+
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
             visualizer_type=visualizer,
-            config={}
+            config={"base_url": base_url}
         )
 
         if not pdf_visualizer:
@@ -461,10 +469,9 @@ async def get_entity_html(
         elif entity.data and "signature" in entity.data:
             visualizer = "signed_pdf"
 
-        # Get base URL from request
-        base_url = f"{request.url.scheme}://{request.url.hostname}"
-        if request.url.port:
-            base_url += f":{request.url.port}"
+        # Get base URL for frontend (citizen portal) - used for QR codes and verification links
+        from app.core.config import settings
+        base_url = settings.FRONTEND_BASE_URL
 
         # Get visualizer
         entity_visualizer = VisualizerFactory.get_visualizer(

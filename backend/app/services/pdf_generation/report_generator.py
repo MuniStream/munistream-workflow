@@ -166,6 +166,9 @@ class EntityReportGenerator:
             )
             data["qr_code_data_url"] = self._to_data_url(data["qr_code"])
 
+            # Add verification URL for template use
+            data["verification_url"] = verification_url
+
             # Field-specific QR codes
             if entity.visualization_config:
                 data["field_qr_codes"] = {}
