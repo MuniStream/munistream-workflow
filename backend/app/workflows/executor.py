@@ -318,6 +318,8 @@ class DAGExecutor:
                     task._last_result = task_result
                     # Extract status string and update task's output data
                     result = task_result.status
+                    # DEBUG: Log the result mapping
+                    logger.info(f"DEBUG: Task {task_id} returned result = '{result}'")
                     if task_result.data:
                         task.state.output_data = task_result.data
                         # Also update dag_instance task_states for tracking endpoint
@@ -331,15 +333,8 @@ class DAGExecutor:
                     # Note: for sync tasks, _last_result is already set in the run() method
 
 
-                logger.info(f"✅ Step completed successfully: {task_id}", extra={
-                    "workflow_step": task_id,
-                    "workflow_action": "step_completed",
-                    "step_result": str(result),
-                    "user_id": getattr(db_instance, 'user_id', None) or db_instance.context.get('customer_email'),
-                    "workflow_id": db_instance.workflow_id,
-                    "instance_id": instance_id,
-                    "tenant": getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
-                })
+                # DEBUG: Log result handling
+                logger.info(f"DEBUG: Task {task_id} returned result = '{result}'")
 
                 await InstanceLog.log(
                     instance_id=instance_id,
@@ -375,6 +370,8 @@ class DAGExecutor:
                 result = "failed"
             
             # Update task status based on result
+            # DEBUG: Log result handling
+            logger.info(f"DEBUG: Handling result '{result}' for task {task_id}")
             if result == "continue":
                 dag_instance.update_task_status(task_id, "completed")
                 # Update context with task output - this is critical for data flow

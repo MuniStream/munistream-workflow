@@ -150,6 +150,9 @@ async def list_public_workflows(
         workflow_data = await _get_workflow_data(w, dag, "es")
         result.append(workflow_data)
 
+    # Sort workflows alphabetically by name
+    result.sort(key=lambda x: x.get('name', '').lower())
+
     return {"workflows": result}
 
 
@@ -173,6 +176,9 @@ async def list_document_processing_workflows(
         dag = workflow_service.dag_bag.get_dag(w.workflow_id)
         workflow_data = await _get_workflow_data(w, dag, locale)
         result.append(workflow_data)
+
+    # Sort document workflows alphabetically by name
+    result.sort(key=lambda x: x.get('name', '').lower())
 
     return {"documents": result}
 
@@ -201,6 +207,9 @@ async def get_featured_workflows(
         # Add compatibility field
         workflow_data["estimatedTime"] = workflow_data["estimatedDuration"]
         result.append(workflow_data)
+
+    # Sort featured workflows alphabetically by name
+    result.sort(key=lambda x: x.get('name', '').lower())
     
     return {
         "featured": result,
@@ -316,6 +325,9 @@ async def search_workflows(
     for wd in filtered:
         workflow_data = await _get_workflow_data(wd["workflow"], wd["dag"], locale)
         results.append(workflow_data)
+
+    # Sort search results alphabetically by name
+    results.sort(key=lambda x: x.get('name', '').lower())
     
     return {
         "results": results,

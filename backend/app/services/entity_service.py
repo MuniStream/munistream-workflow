@@ -112,13 +112,13 @@ class EntityService:
             for key, value in filters.items():
                 if key.startswith("data."):
                     # Direct data field query
-                    query[key] = value
+                    query[key] = {"$in": value} if isinstance(value, list) else value
                 elif "." not in key:
                     # Assume it's a data field if no dot
-                    query[f"data.{key}"] = value
+                    query[f"data.{key}"] = {"$in": value} if isinstance(value, list) else value
                 else:
                     # Other field query
-                    query[key] = value
+                    query[key] = {"$in": value} if isinstance(value, list) else value
 
         logger = logging.getLogger(__name__)
         logger.debug("EntityService.find_entities called", extra={
@@ -128,7 +128,7 @@ class EntityService:
             "filters": filters
         })
 
-        results = await LegalEntity.find(query).skip(skip).limit(limit).to_list()
+        results = await LegalEntity.find(query).sort([("created_at", -1)]).skip(skip).limit(limit).to_list()
 
         logger.debug(f"Found {len(results)} entities", extra={
             "count": len(results),

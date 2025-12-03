@@ -6,8 +6,8 @@ for entity fields, allowing frontends to provide immediate
 feedback and assistance to users.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 import importlib
@@ -293,19 +293,29 @@ async def get_entity_rules(
 async def fetch_entity_file(
     entity_id: str,
     file_url: str,
+    convert: Optional[str] = Query(None, description="Convert file to format (png, jpg, preview)"),
+    page: Optional[str] = Query(None, description="PDF page number or 'all'"),
+    max_width: Optional[int] = Query(None, description="Maximum width for converted images"),
+    thumbnail: Optional[bool] = Query(False, description="Return thumbnail version"),
     current_user: Optional[User] = Depends(get_current_user_optional)
 ):
     """
-    Fetch a specific file from an entity and serve it directly to the browser.
+    Fetch a specific file from an entity and optionally convert it for preview.
 
     This endpoint securely fetches files by:
     1. Looking up the entity by ID
     2. Verifying the requested file_url exists in the entity's data
-    3. Downloading from S3/MinIO and serving with proper content type
+    3. Downloading from S3/MinIO
+    4. Optionally converting to image format for preview
+    5. Serving with proper content type and caching headers
 
     Args:
         entity_id: The entity ID to fetch files from
         file_url: The exact file URL that must exist in the entity's data
+        convert: Optional conversion format (png, jpg, preview)
+        page: For PDFs, page number or 'all' for all pages
+        max_width: Maximum width for converted images
+        thumbnail: Return smaller thumbnail version
 
     Returns:
         StreamingResponse with the file content
@@ -375,11 +385,48 @@ async def fetch_entity_file(
             # Extract filename from S3 key
             filename = os.path.basename(s3_key)
 
-            # Create headers for proper browser handling
+            # Handle file conversion if requested
+            if convert:
+                from app.services.file_conversion_service import FileConversionService
+
+                conversion_service = FileConversionService()
+
+                # Parse page parameter
+                page_param = None
+                if page:
+                    if page == "all":
+                        page_param = "all"
+                    else:
+                        try:
+                            page_param = int(page)
+                        except ValueError:
+                            page_param = 1
+
+                # Convert file
+                conversion_result = await conversion_service.convert_file(
+                    file_bytes=file_content,
+                    filename=filename,
+                    convert_format=convert,
+                    page=page_param,
+                    max_width=max_width,
+                    thumbnail=thumbnail
+                )
+
+                # Return JSON response with conversion result
+                return JSONResponse(
+                    content=conversion_result,
+                    headers={
+                        'Cache-Control': 'public, max-age=3600',  # Cache for 1 hour
+                        'Content-Type': 'application/json'
+                    }
+                )
+
+            # No conversion requested - return file as-is
             headers = {
                 'Content-Type': content_type,
                 'Content-Length': str(content_length),
-                'Content-Disposition': f'inline; filename="{filename}"'
+                'Content-Disposition': f'inline; filename="{filename}"',
+                'Cache-Control': 'public, max-age=86400'  # Cache original files for 24 hours
             }
 
             # Return file as streaming response

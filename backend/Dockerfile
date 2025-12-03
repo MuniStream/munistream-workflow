@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-spa \
     poppler-utils \
+    libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
