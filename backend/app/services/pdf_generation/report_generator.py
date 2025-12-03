@@ -3,10 +3,15 @@ Entity Report Generator using ReportLab and Jinja2
 """
 
 import io
+import os
 import base64
+import logging
 from typing import Any, Dict, Optional, List, Union
 from datetime import datetime
 from pathlib import Path
+
+# Silence fontTools logging
+logging.getLogger('fontTools.subset').setLevel(logging.WARNING)
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, letter
@@ -24,6 +29,8 @@ from .template_engine import TemplateEngine
 from .qr_generator import QRCodeGenerator
 from .data_formatter import DataFormatter
 from ...models.legal_entity import LegalEntity
+
+logger = logging.getLogger(__name__)
 
 
 class EntityReportGenerator:
@@ -135,7 +142,6 @@ class EntityReportGenerator:
             "entity": entity,
             "generated_at": datetime.utcnow().isoformat(),
             "formatted_data": self.data_formatter.format_entity_data(entity.data),
-            "sections": self._organize_data_sections(entity),
         }
 
         # Generate QR codes if requested
@@ -162,9 +168,11 @@ class EntityReportGenerator:
             qr_data_url = verification_url
             data["qr_code"] = await self.qr_generator.generate_qr_code(
                 qr_data_url,
-                size=200
+                size=200,
+                format="JPEG"
             )
             data["qr_code_data_url"] = self._to_data_url(data["qr_code"])
+
 
             # Add verification URL for template use
             data["verification_url"] = verification_url
@@ -208,7 +216,96 @@ class EntityReportGenerator:
                     sig_data["qr_code"] = self._to_data_url(sig_qr)
                 data["signatures"].append(sig_data)
 
+        # Process entity files for preview/embedding
+        if entity.data:
+            file_previews = await self._process_entity_files(entity)
+            if file_previews:
+                data["file_previews"] = file_previews
+
         return data
+
+    async def _process_entity_files(self, entity) -> Dict[str, Any]:
+        """Process file_url and file_metadata fields from entity to generate previews"""
+        from app.services.file_conversion_service import FileConversionService
+
+        file_previews = {}
+        entity_data = entity.data if hasattr(entity, 'data') else {}
+
+        # Look for file-related fields
+        for field_name, field_value in entity_data.items():
+            if self._is_file_field(field_name, field_value):
+                try:
+                    field_previews = await self._get_file_field_previews(field_name, field_value)
+                    if field_previews:
+                        file_previews[field_name] = field_previews
+                except Exception as e:
+                    logger.warning(f"Failed to process files for field {field_name}: {e}")
+                    continue
+
+        return file_previews
+
+    def _is_file_field(self, field_name: str, field_value: Any) -> bool:
+        """Check if a field contains file-related data"""
+        if not field_value:
+            return False
+
+        # Check field name patterns
+        file_indicators = ['file', 'url', 'attachment', 'document', 'image']
+        if any(indicator in field_name.lower() for indicator in file_indicators):
+            # Check if value is URL-like
+            if isinstance(field_value, str) and 'http' in field_value:
+                return True
+            elif isinstance(field_value, list) and len(field_value) > 0:
+                # Check if list contains URLs
+                first_item = field_value[0]
+                if isinstance(first_item, str) and 'http' in first_item:
+                    return True
+
+        return False
+
+    async def _get_file_field_previews(self, field_name: str, field_value: Any) -> List[Dict[str, Any]]:
+        """Get preview data for files in a field using FileConversionService"""
+        from app.services.file_conversion_service import FileConversionService
+
+        previews = []
+        file_urls = []
+
+        # Extract URLs from field value
+        if isinstance(field_value, str):
+            file_urls = [field_value]
+        elif isinstance(field_value, list):
+            file_urls = [url for url in field_value if isinstance(url, str)]
+
+        conversion_service = FileConversionService()
+
+        # Process each URL
+        for file_url in file_urls:
+            try:
+                # Convert file using FileConversionService (it will download internally)
+                conversion_result = await conversion_service.convert_file(
+                    file_url=file_url,
+                    convert_format='png',
+                    max_width=600,
+                    page='all'
+                )
+
+                previews.append({
+                    'file_url': file_url,
+                    'field_name': field_name,
+                    **conversion_result
+                })
+
+            except Exception as e:
+                logger.error(f"Error processing file {file_url}: {e}")
+                previews.append({
+                    'file_url': file_url,
+                    'field_name': field_name,
+                    'type': 'file',
+                    'filename': os.path.basename(file_url.split('?')[0]),
+                    'error': str(e)
+                })
+
+        return previews
 
     async def _generate_reportlab_pdf(
         self,
@@ -333,7 +430,7 @@ class EntityReportGenerator:
         template_name: str,
         template_data: Dict[str, Any]
     ) -> bytes:
-        """Generate PDF from HTML template using xhtml2pdf"""
+        """Generate PDF from HTML template using WeasyPrint for exact HTML rendering"""
         # Render HTML
         html = await self.template_engine.render_entity(
             entity,
@@ -341,19 +438,19 @@ class EntityReportGenerator:
             template_data
         )
 
-        # Convert HTML to PDF
-        buffer = io.BytesIO()
-        pisa_status = pisa.CreatePDF(
-            html,
-            dest=buffer,
-            encoding='utf-8'
+        # Use WeasyPrint for exact HTML/CSS rendering
+        from weasyprint import HTML, CSS
+        from weasyprint.text.fonts import FontConfiguration
+
+        # Create font configuration for better font support
+        font_config = FontConfiguration()
+
+        # Convert HTML to PDF using WeasyPrint
+        pdf_bytes = HTML(string=html, base_url=None).write_pdf(
+            font_config=font_config
         )
 
-        if pisa_status.err:
-            raise Exception(f"PDF generation failed: {pisa_status.err}")
-
-        buffer.seek(0)
-        return buffer.read()
+        return pdf_bytes
 
     async def generate_field_visualization(
         self,
@@ -462,7 +559,7 @@ class EntityReportGenerator:
     def _to_data_url(self, image_bytes: bytes) -> str:
         """Convert image bytes to data URL"""
         base64_str = base64.b64encode(image_bytes).decode('utf-8')
-        return f"data:image/png;base64,{base64_str}"
+        return f"data:image/jpeg;base64,{base64_str}"
 
     def _create_image_from_bytes(self, image_bytes: bytes, width: float) -> Image:
         """Create ReportLab Image from bytes"""
