@@ -122,6 +122,7 @@ class ContextExplorerValidator(BaseOperator):
             )
         else:
             # Invalid decision, show form again
+            self.state.waiting_for = "context_validation"
             return TaskResult(
                 status="waiting",
                 data={
@@ -140,8 +141,18 @@ class ContextExplorerValidator(BaseOperator):
         logger.info("Displaying context explorer interface",
                    context_path=self.context_path)
 
+        # DEBUG: Log context keys
+        logger.info(f"DEBUG: Available context keys: {list(context.keys())}")
+
         # Get specified context
         target_context = self._get_context_data(context)
+
+        # DEBUG: Log target context result
+        logger.info(f"DEBUG: target_context found: {target_context is not None}")
+        if target_context:
+            logger.info(f"DEBUG: target_context keys: {list(target_context.keys())}")
+        else:
+            logger.warning(f"DEBUG: target_context is None for path: {self.context_path}")
 
         if not target_context:
             logger.warning("No context found at specified path",
@@ -211,13 +222,25 @@ class ContextExplorerValidator(BaseOperator):
             }
         ]
 
-        return TaskResult(
+        # DEBUG: Log that we're returning waiting status
+        logger.info("DEBUG: ContextExplorerValidator returning WAITING status with context_validation")
+
+        # Set waiting_for in task state (like SelfieOperator does)
+        self.state.waiting_for = "context_validation"
+
+        task_result = TaskResult(
             status="waiting",
             data={
                 "waiting_for": "context_validation",
                 "form_config": form_config
             }
         )
+
+        # DEBUG: Log the actual TaskResult being returned
+        logger.info(f"DEBUG: TaskResult.status = {task_result.status}")
+        logger.info(f"DEBUG: TaskResult.data keys = {list(task_result.data.keys()) if task_result.data else 'None'}")
+
+        return task_result
 
     def _get_context_data(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Get context data from the specified path"""

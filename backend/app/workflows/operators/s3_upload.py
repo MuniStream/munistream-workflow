@@ -204,6 +204,40 @@ class S3UploadOperator(BaseOperator):
 
         return []
 
+    def _clean_base64_from_context(self, context: Dict[str, Any]) -> None:
+        """
+        Remove base64 and content fields from context after successful upload.
+        This prevents massive base64 strings from being persisted in workflow instances.
+
+        Args:
+            context: Execution context to clean
+        """
+        # Clean direct file source
+        if self.file_source in context:
+            files_data = context[self.file_source]
+            if isinstance(files_data, list):
+                for file_data in files_data:
+                    if isinstance(file_data, dict):
+                        file_data.pop('base64', None)
+                        file_data.pop('content', None)
+            elif isinstance(files_data, dict):
+                files_data.pop('base64', None)
+                files_data.pop('content', None)
+
+        # Clean task output data (from UserInputOperator)
+        for key, value in context.items():
+            if key.endswith('_data') and isinstance(value, dict):
+                if self.file_source in value:
+                    file_data = value[self.file_source]
+                    if isinstance(file_data, list):
+                        for f in file_data:
+                            if isinstance(f, dict):
+                                f.pop('base64', None)
+                                f.pop('content', None)
+                    elif isinstance(file_data, dict):
+                        file_data.pop('base64', None)
+                        file_data.pop('content', None)
+
     def _upload_file_to_s3(
         self,
         file_content: bytes,
@@ -432,7 +466,7 @@ class S3UploadOperator(BaseOperator):
             successful_uploads = [r for r in results if r.get("success")]
             failed_uploads = [r for r in results if not r.get("success")]
 
-            # Store results in context
+            # Store results in context with task-specific keys to avoid conflicts
             upload_summary = {
                 "uploaded_files": successful_uploads,
                 "failed_files": failed_uploads,
@@ -447,6 +481,15 @@ class S3UploadOperator(BaseOperator):
             if successful_uploads:
                 upload_summary["s3_urls"] = [f["url"] for f in successful_uploads]
                 upload_summary["s3_keys"] = [f["s3_key"] for f in successful_uploads]
+
+            # Also store with task-specific key to prevent conflicts when multiple S3 operators are used
+            task_specific_key = f"{self.task_id}_result"
+            context[task_specific_key] = upload_summary
+
+            # Clean base64 content from context to prevent it from being persisted
+            if successful_uploads:
+                self._clean_base64_from_context(context)
+                print(f"🧹 S3UploadOperator: Cleaned base64 content from context after successful upload")
 
             # Log results
             print(f"✅ S3UploadOperator: Uploaded {len(successful_uploads)}/{len(results)} files")

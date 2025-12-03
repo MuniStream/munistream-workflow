@@ -21,6 +21,8 @@ from .entity_picker_operator import EntityPickerOperator
 from .document_operators import DocumentCreationOperator, DocumentRequirementOperator
 from .workflow_start_operator import WorkflowStartOperator
 from .context_explorer_validator import ContextExplorerValidator
+from .selfie_operator import SelfieOperator
+from .id_capture_operator import IDCaptureOperator
 
 __all__ = [
     # Base classes
@@ -64,5 +66,11 @@ __all__ = [
     "WorkflowStartOperator",
 
     # Context exploration operators
-    "ContextExplorerValidator"
+    "ContextExplorerValidator",
+
+    # Selfie operators
+    "SelfieOperator",
+
+    # ID capture operators
+    "IDCaptureOperator"
 ]

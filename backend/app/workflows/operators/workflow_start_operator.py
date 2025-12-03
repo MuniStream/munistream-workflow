@@ -338,7 +338,9 @@ class WorkflowStartOperator(BaseOperator):
 
         # ALWAYS copy the entire parent context as _parent_context
         # This allows administrative operators to access all parent workflow data
-        child_context["_parent_context"] = parent_context.copy()
+        # Filter out large base64 content and internal fields to prevent bloat
+        filtered_parent_context = self._filter_parent_context(parent_context)
+        child_context["_parent_context"] = filtered_parent_context
 
         # Map specific fields from parent to child
         if self.pass_context and self.context_mapping:
@@ -361,6 +363,44 @@ class WorkflowStartOperator(BaseOperator):
                     child_context[field] = parent_context[field]
 
         return child_context
+
+    def _filter_parent_context(self, parent_context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Filter parent context to remove large base64 content and internal fields.
+
+        Args:
+            parent_context: Original parent context
+
+        Returns:
+            Filtered parent context without base64 data
+        """
+        def clean_value(value, path=""):
+            """Recursively clean base64 and large strings from nested structures"""
+            if isinstance(value, dict):
+                cleaned = {}
+                for k, v in value.items():
+                    current_path = f"{path}.{k}" if path else k
+                    # Skip base64 content and other large binary data
+                    if k in ['base64', 'content', 'image_data'] and isinstance(v, str) and len(v) > 1000:
+                        logger.debug(f"Filtering large base64 content at {current_path} ({len(v)} chars)")
+                        continue
+                    # Skip internal fields that start with underscore
+                    elif k.startswith('_') and k not in ['_parent_context']:
+                        logger.debug(f"Filtering internal field at {current_path}")
+                        continue
+                    else:
+                        cleaned[k] = clean_value(v, current_path)
+                return cleaned
+            elif isinstance(value, list):
+                return [clean_value(item, f"{path}[{i}]") for i, item in enumerate(value)]
+            elif isinstance(value, str) and len(value) > 50000:
+                # Filter very large strings that might be base64
+                logger.debug(f"Filtering large string at {path} ({len(value)} chars)")
+                return f"[FILTERED_LARGE_CONTENT_{len(value)}_chars]"
+            else:
+                return value
+
+        return clean_value(parent_context)
 
     async def _create_child_workflow(self, context: Dict[str, Any]) -> WorkflowInstance:
         """

@@ -29,6 +29,7 @@ class EntityCreationOperator(BaseOperator):
         entity_display_config: Optional[Dict[str, Any]] = None,  # Entity-level display config
         user_id_source: Optional[str] = None,  # Optional: context field to get user_id from (admin only)
         visualizer: Optional[str] = None,  # Visualizer type for entity PDF generation
+        field_blacklist: Optional[List[str]] = None,  # Fields to exclude from entity data
         **kwargs
     ):
         """
@@ -44,6 +45,7 @@ class EntityCreationOperator(BaseOperator):
             entity_display_config: Entity-level display configuration (e.g., {"default_view": "pdf_report", "base_url": "https://..."})
             user_id_source: Optional context field to get user_id from (admin workflows only)
             visualizer: Visualizer type for entity PDF generation (e.g., "pdf_report", "signed_pdf")
+            field_blacklist: Fields to exclude from entity data (e.g., ["base64", "content"])
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
@@ -53,6 +55,7 @@ class EntityCreationOperator(BaseOperator):
         self.visualization_config = visualization_config or {}
         self.user_id_source = user_id_source
         self.visualizer = visualizer
+        self.field_blacklist = field_blacklist or ["base64", "content"]
 
         # Merge visualizer into entity_display_config
         self.entity_display_config = entity_display_config or {
@@ -64,6 +67,30 @@ class EntityCreationOperator(BaseOperator):
         # Add visualizer to display config if provided
         if self.visualizer:
             self.entity_display_config["visualizer"] = self.visualizer
+
+    def _should_include_field(self, field_name: str) -> bool:
+        """
+        Check if a field should be included in entity data.
+
+        Args:
+            field_name: Name of the field to check
+
+        Returns:
+            True if field should be included, False otherwise
+        """
+        # Skip fields that start with underscore (system/internal)
+        if field_name.startswith('_'):
+            return False
+
+        # Skip system fields
+        if field_name.startswith(('instance', 'workflow', 'task_instance')):
+            return False
+
+        # Skip blacklisted fields
+        if field_name in self.field_blacklist:
+            return False
+
+        return True
     
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Create the entity based on workflow context"""
@@ -95,13 +122,15 @@ class EntityCreationOperator(BaseOperator):
 
             # Auto-collect all task outputs from context
             for key, value in context.items():
-                # Skip system/internal fields
-                if key.startswith(('_', 'instance', 'workflow', 'task_instance')):
+                # Skip fields using the blacklist filter
+                if not self._should_include_field(key):
                     continue
 
                 # Include all task outputs that contain actual form data
                 if isinstance(value, dict):
-                    entity_data.update(value)
+                    # Filter fields within dictionaries too
+                    filtered_dict = {k: v for k, v in value.items() if self._should_include_field(k)}
+                    entity_data.update(filtered_dict)
                 elif value is not None and not isinstance(value, (list, dict)):
                     entity_data[key] = value
 
