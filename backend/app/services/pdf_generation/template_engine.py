@@ -70,10 +70,17 @@ class TemplateEngine:
             return str(value)  # Could be enhanced with better formatting
         return str(value)
 
-    def _format_date(self, date_str: str) -> str:
+    def _format_date(self, date_value) -> str:
         """Format date for display"""
-        # Simple format, could be enhanced
-        return date_str.split("T")[0] if "T" in date_str else date_str
+        from datetime import datetime, date
+
+        if isinstance(date_value, datetime):
+            return date_value.strftime('%Y-%m-%d')
+        elif isinstance(date_value, date):
+            return date_value.strftime('%Y-%m-%d')
+        elif isinstance(date_value, str):
+            return date_value.split("T")[0] if "T" in date_value else date_value
+        return str(date_value)
 
     async def render_entity(
         self,
@@ -92,18 +99,10 @@ class TemplateEngine:
         Returns:
             Rendered HTML string
         """
-        # Determine template file
+        # Determine template file - no fallbacks, fail if not found
         template_file = f"{template_name}.html"
-        if not (self.template_dir / template_file).exists():
-            # Fall back to entity type template
-            entity_type_template = f"{entity.entity_type}_entity.html"
-            if (self.template_dir / entity_type_template).exists():
-                template_file = entity_type_template
-            else:
-                # Fall back to default
-                template_file = "default.html"
 
-        # Get template
+        # Get template - will raise TemplateNotFound if doesn't exist
         template = self.env.get_template(template_file)
 
         # Merge context
