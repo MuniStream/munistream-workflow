@@ -253,7 +253,8 @@ class WorkflowPlugin:
             "**/*_workflow.py",
             "**/dags/*.py",
             "**/workflows/documents/*.py",
-            "**/workflows/processes/*.py"
+            "**/workflows/processes/*.py",
+            "**/workflows/admin/*.py"
         ]
         
         from pathlib import Path
