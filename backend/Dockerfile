@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y \
     libgles2 \
     libglx0 \
     libglvnd0 \
+    libfreetype6-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
