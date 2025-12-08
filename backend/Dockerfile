@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install system dependencies including GL libraries for DeepFace
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -17,6 +17,12 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr-spa \
     poppler-utils \
     libzbar0 \
+    libgl1-mesa-dev \
+    libglib2.0-0 \
+    libgl1 \
+    libgles2 \
+    libglx0 \
+    libglvnd0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory

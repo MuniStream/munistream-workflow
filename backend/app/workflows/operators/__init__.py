@@ -23,6 +23,7 @@ from .workflow_start_operator import WorkflowStartOperator
 from .context_explorer_validator import ContextExplorerValidator
 from .selfie_operator import SelfieOperator
 from .id_capture_operator import IDCaptureOperator
+from .facial_verification_operator import FacialVerificationOperator
 
 __all__ = [
     # Base classes
@@ -72,5 +73,8 @@ __all__ = [
     "SelfieOperator",
 
     # ID capture operators
-    "IDCaptureOperator"
+    "IDCaptureOperator",
+
+    # Facial verification operators
+    "FacialVerificationOperator"
 ]

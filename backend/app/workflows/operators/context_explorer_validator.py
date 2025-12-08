@@ -36,6 +36,7 @@ class ContextExplorerValidator(BaseOperator):
         show_selected_entities: bool = True,
         show_form_data: bool = True,
         show_user_info: bool = True,
+        show_s3_uploads: bool = True,
         entity_display_fields: Optional[List[str]] = None,
         **kwargs
     ):
@@ -51,6 +52,7 @@ class ContextExplorerValidator(BaseOperator):
             show_selected_entities: Whether to show selected entities with visualizers
             show_form_data: Whether to show form submission data
             show_user_info: Whether to show user/customer information
+            show_s3_uploads: Whether to show uploaded files from S3
             entity_display_fields: Fields to display for each entity
             **kwargs: Additional arguments passed to BaseOperator
         """
@@ -62,6 +64,7 @@ class ContextExplorerValidator(BaseOperator):
         self.show_selected_entities = show_selected_entities
         self.show_form_data = show_form_data
         self.show_user_info = show_user_info
+        self.show_s3_uploads = show_s3_uploads
         self.entity_display_fields = entity_display_fields or [
             "name", "entity_type", "upload_date", "file_size", "status"
         ]
@@ -141,18 +144,8 @@ class ContextExplorerValidator(BaseOperator):
         logger.info("Displaying context explorer interface",
                    context_path=self.context_path)
 
-        # DEBUG: Log context keys
-        logger.info(f"DEBUG: Available context keys: {list(context.keys())}")
-
         # Get specified context
         target_context = self._get_context_data(context)
-
-        # DEBUG: Log target context result
-        logger.info(f"DEBUG: target_context found: {target_context is not None}")
-        if target_context:
-            logger.info(f"DEBUG: target_context keys: {list(target_context.keys())}")
-        else:
-            logger.warning(f"DEBUG: target_context is None for path: {self.context_path}")
 
         if not target_context:
             logger.warning("No context found at specified path",
@@ -195,7 +188,18 @@ class ContextExplorerValidator(BaseOperator):
             if form_section:
                 form_config["sections"].append(form_section)
 
-        # Section 4: Raw Context (optional)
+        # Section 4: S3 Uploaded Files
+        if self.show_s3_uploads:
+            s3_section = await self._build_s3_uploads_section(target_context)
+            if s3_section:
+                form_config["sections"].append(s3_section)
+
+        # Section 5: Validation Results
+        validation_section = self._build_validation_results_section(target_context)
+        if validation_section:
+            form_config["sections"].append(validation_section)
+
+        # Section 6: Raw Context (optional)
         if self.show_raw_context:
             context_section = self._build_raw_context_section(target_context)
             if context_section:
@@ -222,8 +226,6 @@ class ContextExplorerValidator(BaseOperator):
             }
         ]
 
-        # DEBUG: Log that we're returning waiting status
-        logger.info("DEBUG: ContextExplorerValidator returning WAITING status with context_validation")
 
         # Set waiting_for in task state (like SelfieOperator does)
         self.state.waiting_for = "context_validation"
@@ -236,9 +238,6 @@ class ContextExplorerValidator(BaseOperator):
             }
         )
 
-        # DEBUG: Log the actual TaskResult being returned
-        logger.info(f"DEBUG: TaskResult.status = {task_result.status}")
-        logger.info(f"DEBUG: TaskResult.data keys = {list(task_result.data.keys()) if task_result.data else 'None'}")
 
         return task_result
 
@@ -404,4 +403,194 @@ class ContextExplorerValidator(BaseOperator):
             "data": filtered_context,
             "collapsible": True,
             "collapsed": True
+        }
+
+    async def _build_s3_uploads_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Build S3 uploads section with file previews"""
+
+        s3_uploads = {}
+
+        # Find all S3 upload results in context
+        for key, value in target_context.items():
+
+            # Look for S3 upload patterns
+            pattern_matches = [pattern for pattern in ['_s3_result', '_s3_upload', '_result'] if pattern in key]
+            has_upload_or_s3 = 'upload' in key or 's3' in key.lower()
+
+
+            if pattern_matches and has_upload_or_s3:
+
+                if isinstance(value, dict) and 'url' in value:
+                    # Process single upload
+                    file_info = await self._process_s3_file(value, key)
+                    if file_info:
+                        s3_uploads[key] = file_info
+                elif isinstance(value, dict) and 'uploaded_files' in value:
+                    # Process uploaded_files array structure
+                    uploaded_files = value.get('uploaded_files', [])
+                    processed_files = []
+                    for item in uploaded_files:
+                        if isinstance(item, dict) and 'url' in item:
+                            file_info = await self._process_s3_file(item, key)
+                            if file_info:
+                                processed_files.append(file_info)
+                    if processed_files:
+                        s3_uploads[key] = processed_files
+                elif isinstance(value, list):
+                    # Process multiple uploads
+                    processed_files = []
+                    for item in value:
+                        if isinstance(item, dict) and 'url' in item:
+                            file_info = await self._process_s3_file(item, key)
+                            if file_info:
+                                processed_files.append(file_info)
+                    if processed_files:
+                        s3_uploads[key] = processed_files
+
+        if not s3_uploads:
+            return None
+
+        return {
+            "title": "📁 Uploaded Files",
+            "type": "s3_files_display",
+            "data": s3_uploads
+        }
+
+    async def _process_s3_file(self, upload_result: Dict[str, Any], source_key: str) -> Optional[Dict[str, Any]]:
+        """Process a single S3 file for display"""
+        try:
+            from app.services.file_conversion_service import FileConversionService
+
+            file_url = upload_result.get('url')
+            if not file_url:
+                return None
+
+            # Extract meaningful task name from source key
+            task_name = source_key.replace('_s3_result', '').replace('_s3_upload', '').replace('_result', '')
+            task_name = task_name.replace('upload_', '').replace('_', ' ').title()
+
+            # Initialize conversion service
+            conversion_service = FileConversionService()
+
+            # Convert to preview (reusing FileConversionService logic)
+            conversion_result = await conversion_service.convert_file(
+                file_url=file_url,
+                convert_format='png',
+                max_width=400,
+                thumbnail=True
+            )
+
+            # Prepare the result with proper field mapping for frontend
+            result = {
+                'url': file_url,
+                'filename': upload_result.get('filename', 'unknown'),
+                's3_key': upload_result.get('s3_key'),
+                'source_task': task_name,
+                'size': upload_result.get('size'),
+                'bucket': upload_result.get('bucket'),
+            }
+
+            # Map conversion result fields to frontend expectations
+            if conversion_result:
+                if 'data' in conversion_result:
+                    result['preview_data'] = conversion_result['data']  # Map data -> preview_data
+                if 'format' in conversion_result:
+                    result['file_type'] = conversion_result['format']
+                if 'type' in conversion_result:
+                    result['conversion_type'] = conversion_result['type']
+                if 'error' in conversion_result:
+                    result['error'] = conversion_result['error']
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"Could not process S3 file from {source_key}: {e}")
+            return {
+                'url': upload_result.get('url', ''),
+                'filename': upload_result.get('filename', 'unknown'),
+                'source_task': source_key.replace('_s3_result', '').replace('_s3_upload', '').replace('_result', ''),
+                'error': str(e)
+            }
+
+    def _build_validation_results_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Build validation results section for SelfieOperator and IDCaptureOperator"""
+
+        validation_results = {}
+
+        # Look for validation patterns
+        validation_patterns = {
+            'capture_selfie': {
+                'validation_key': 'capture_selfie_validation_score',
+                'provenance_key': 'capture_selfie_provenance',
+                'capture_key': 'selfie_capture',
+                'display_name': 'Selfie Validation'
+            },
+            'capture_id_document': {
+                'validation_key': 'capture_id_document_quality_score',
+                'provenance_key': 'capture_id_document_provenance',
+                'capture_key': 'captured_document',
+                'display_name': 'ID Document Validation'
+            }
+        }
+
+        for pattern_key, pattern_info in validation_patterns.items():
+            validation_data = {}
+
+            # Get validation score
+            if pattern_info['validation_key'] in target_context:
+                validation_data['score'] = target_context[pattern_info['validation_key']]
+
+            # Get provenance information
+            if pattern_info['provenance_key'] in target_context:
+                provenance = target_context[pattern_info['provenance_key']]
+                validation_data['provenance'] = {
+                    'capture_method': provenance.get('capture_method'),
+                    'platform': provenance.get('platform'),
+                    'user_agent': provenance.get('user_agent', '').split(' ')[0] if provenance.get('user_agent') else None,
+                    'capture_timestamp': provenance.get('capture_timestamp'),
+                    'quality_score': provenance.get('quality_score'),
+                    'validation_checks_passed': provenance.get('validation_checks_passed'),
+                    'all_validations_passed': provenance.get('all_validations_passed')
+                }
+
+            # Get capture/validation details
+            if pattern_info['capture_key'] in target_context:
+                capture_data = target_context[pattern_info['capture_key']]
+
+                if 'validation' in capture_data:
+                    validation_info = capture_data['validation']
+                    validation_data['validation_details'] = {
+                        'valid': validation_info.get('valid'),
+                        'quality_score': validation_info.get('quality_score'),
+                        'errors': validation_info.get('errors', []),
+                        'validation_timestamp': validation_info.get('validation_timestamp')
+                    }
+
+                    # Specific validations for selfie
+                    if pattern_key == 'capture_selfie':
+                        validation_data['validation_details'].update({
+                            'face_detected': validation_info.get('face_detected'),
+                            'face_confidence': validation_info.get('face_confidence'),
+                            'face_count': validation_info.get('face_count')
+                        })
+
+                    # Specific validations for ID document
+                    elif pattern_key == 'capture_id_document':
+                        validation_data['validation_details'].update({
+                            'front_quality': validation_info.get('front_quality'),
+                            'back_quality': validation_info.get('back_quality'),
+                            'detected_elements': validation_info.get('detected_elements', {})
+                        })
+
+            # Add to results if we have data
+            if validation_data:
+                validation_results[pattern_info['display_name']] = validation_data
+
+        if not validation_results:
+            return None
+
+        return {
+            "title": "🔍 Validation Results",
+            "type": "validation_results_display",
+            "data": validation_results
         }
