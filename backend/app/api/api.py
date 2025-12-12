@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, themes, assignments, admin_users, admin_teams, admin_sync, signatures, verify
+from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, themes, assignments, admin_users, admin_teams, admin_sync, signatures, verify, wallet, catalogs, admin_catalogs, files
 from .v1 import performance, entities
 
 api_router = APIRouter()
@@ -18,10 +18,16 @@ api_router.include_router(teams.router, prefix="/teams", tags=["teams"])
 api_router.include_router(themes.router, prefix="/themes", tags=["themes"])
 api_router.include_router(performance.router, prefix="/performance", tags=["performance"])
 api_router.include_router(entities.router, prefix="/entities", tags=["entities"])
+api_router.include_router(wallet.router, tags=["wallet"])
 api_router.include_router(assignments.router, prefix="/assignments", tags=["assignments"])
 api_router.include_router(signatures.router, prefix="/signatures", tags=["signatures"])
+api_router.include_router(files.router, prefix="/files", tags=["files"])
 
 # Administrative endpoints (hidden from schema)
 api_router.include_router(admin_users.router, prefix="/admin", tags=["admin-users"])
 api_router.include_router(admin_teams.router, prefix="/admin", tags=["admin-teams"])
 api_router.include_router(admin_sync.router, prefix="/admin", tags=["admin-sync"])
+api_router.include_router(admin_catalogs.router, prefix="/admin", tags=["admin-catalogs"])
+
+# Public catalog endpoints
+api_router.include_router(catalogs.router, tags=["catalogs"])
