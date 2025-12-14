@@ -189,7 +189,8 @@ async def startup_event():
         
         # Sync plugin DAGs to database
         await sync_plugin_dags()
-        
+
+
     except FileNotFoundError:
         print("⚠️ No plugins.yaml file found - skipping plugin loading")
     except Exception as e:
