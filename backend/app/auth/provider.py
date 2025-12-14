@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import httpx
 from jose import jwt, JWTError
-from fastapi import HTTPException, status, Depends
+from fastapi import HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
 from ..core.config import settings
@@ -200,6 +200,32 @@ class KeycloakProvider:
 
 # Global provider instance
 keycloak = KeycloakProvider()
+
+
+async def get_current_tenant(request: Request) -> Optional[str]:
+    """
+    Extract tenant ID from request.
+
+    Tries multiple sources:
+    1. X-Tenant-Id header
+    2. Subdomain from host
+    3. Environment variable
+    """
+    # Try header first
+    tenant_id = request.headers.get("X-Tenant-Id")
+    if tenant_id:
+        return tenant_id
+
+    # Try subdomain
+    host = request.headers.get("host", "")
+    if "." in host:
+        subdomain = host.split(".")[0]
+        # Map common subdomains to tenant IDs
+        if subdomain in ["conapesca", "catastro", "demo"]:
+            return subdomain
+
+    # Fall back to environment variable
+    return getattr(settings, "TENANT_ID", None)
 
 
 async def get_current_user(
