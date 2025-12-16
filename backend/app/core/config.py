@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # Frontend/Citizen Portal Configuration
     FRONTEND_BASE_URL: Optional[str] = None  # Frontend URL for QR codes and verification links
 
+    # Tenant Configuration
+    TENANT_ID: Optional[str] = None  # Multi-tenant identifier
+
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
@@ -88,6 +91,15 @@ class Settings(BaseSettings):
     # OCR Configuration
     TESSERACT_CMD: Optional[str] = None  # Path to tesseract executable
     OCR_LANGUAGES: str = "eng+spa"  # English and Spanish
+
+    # Wallet Configuration
+    APPLE_TEAM_ID: Optional[str] = None
+    APPLE_PASS_TYPE_ID: Optional[str] = None
+    APPLE_CERTIFICATE_PATH: Optional[str] = None
+    APPLE_WWDR_CERT_PATH: Optional[str] = None
+    GOOGLE_WALLET_ISSUER_ID: Optional[str] = None
+    GOOGLE_WALLET_ISSUER_EMAIL: Optional[str] = None
+    GOOGLE_SERVICE_ACCOUNT_KEY_PATH: Optional[str] = None
 
     class Config:
         env_file = ".env"

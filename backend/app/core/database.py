@@ -19,6 +19,7 @@ from ..models.team import TeamModel
 from ..models.customer import Customer, CustomerSession
 from ..models.legal_entity import EntityType, LegalEntity
 from ..models.instance_log import InstanceLog
+from ..models.catalog import Catalog, CatalogData
 
 
 class Database:
@@ -56,7 +57,9 @@ async def connect_to_mongo():
             CustomerSession,
             EntityType,
             LegalEntity,
-            InstanceLog
+            InstanceLog,
+            Catalog,
+            CatalogData
         ]
     )
     

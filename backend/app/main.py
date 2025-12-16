@@ -1,9 +1,12 @@
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from typing import Dict, Any, List
+from pydantic import ValidationError
 
 from .core.config import settings
 from .core.database import connect_to_mongo, close_mongo_connection
@@ -59,6 +62,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# Add validation error handler to capture 422 errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    from .core.logging_config import get_workflow_logger
+    logger = get_workflow_logger(__name__)
+
+    logger.error(f"Validation error on {request.method} {request.url}: {exc.errors()}")
+    logger.error(f"Request body: {exc.body if hasattr(exc, 'body') else 'N/A'}")
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
 
 
 @app.get("/")
