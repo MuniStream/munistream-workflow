@@ -5,7 +5,7 @@ from typing import Dict, Any, Callable, Optional
 import asyncio
 import inspect
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 
 class PythonOperator(BaseOperator):
@@ -82,13 +82,13 @@ class PythonOperator(BaseOperator):
                 output_data = {"result": result}
             
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=str(e)
             )
 
@@ -132,7 +132,7 @@ class ShortCircuitOperator(PythonOperator):
             # Check if we should short-circuit
             if result is False:
                 return TaskResult(
-                    status="skip",
+                    status=TaskStatus.SKIP,
                     data={"short_circuited": True}
                 )
             
@@ -140,12 +140,12 @@ class ShortCircuitOperator(PythonOperator):
             output_data = {"result": result} if not isinstance(result, dict) else result
             
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=str(e)
             )

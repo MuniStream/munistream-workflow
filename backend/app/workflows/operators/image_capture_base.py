@@ -25,7 +25,7 @@ from PIL import Image
 import cv2
 import numpy as np
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +346,7 @@ class ImageCaptureOperator(BaseOperator):
 
         if not self.allow_retake or current_attempts >= self.max_attempts:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Maximum capture attempts exceeded: {error_message}",
                 data={
                     "validation_failed": True,
@@ -362,7 +362,7 @@ class ImageCaptureOperator(BaseOperator):
             del context[waiting_for_key]
 
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": self.get_waiting_for_key(),
                 "validation_error": error_message,

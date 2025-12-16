@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 from base64 import b64encode
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -69,18 +69,18 @@ class AirflowOperator(BaseOperator):
             # IMPORTANT: Update the context with the current state
             data[self._state_key] = self._airflow_state.copy()
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data=data,
             metadata={"message": message, **metadata}
         )
 
     def _success_result(self, data: Dict[str, Any]) -> TaskResult:
         """Create a success TaskResult."""
-        return TaskResult(status="continue", data=data)
+        return TaskResult(status=TaskStatus.CONTINUE, data=data)
 
     def _failed_result(self, error: str) -> TaskResult:
         """Create a failed TaskResult."""
-        return TaskResult(status="failed", error=error)
+        return TaskResult(status=TaskStatus.FAILED, error=error)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for Airflow API."""
@@ -166,7 +166,7 @@ class AirflowOperator(BaseOperator):
 
                         # Return with the state data explicitly
                         return TaskResult(
-                            status="waiting",
+                            status=TaskStatus.WAITING,
                             data={self._state_key: self._airflow_state},
                             metadata={
                                 "message": f"Airflow DAG {self.dag_id} triggered",

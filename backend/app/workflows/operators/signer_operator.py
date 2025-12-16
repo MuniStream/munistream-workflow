@@ -12,7 +12,7 @@ import hashlib
 import base64
 from pydantic import BaseModel, Field
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.signature.context_signer import ContextSignerService
 from ...models.workflow import WorkflowInstance
 
@@ -159,7 +159,7 @@ class SignerOperator(BaseOperator):
             instance_id = context.get("instance_id")
             if not instance_id:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error="No instance_id in context for signature"
                 )
 
@@ -245,7 +245,7 @@ class SignerOperator(BaseOperator):
                 )
 
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data=output_data
                 )
 
@@ -275,7 +275,7 @@ class SignerOperator(BaseOperator):
 
             # Return waiting status - signature needed from client
             return TaskResult(
-                status="waiting",
+                status=TaskStatus.WAITING,
                 data={
                     "waiting_for": "signature",
                     "form_config": self.form_config,
@@ -298,7 +298,7 @@ class SignerOperator(BaseOperator):
 
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 
@@ -323,7 +323,7 @@ class SignerOperator(BaseOperator):
             for field in required_fields:
                 if field not in signature_data:
                     return TaskResult(
-                        status="failed",
+                        status=TaskStatus.FAILED,
                         error=f"Missing required signature field: {field}"
                     )
 
@@ -341,7 +341,7 @@ class SignerOperator(BaseOperator):
             )
 
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data={}
             )
 
@@ -354,7 +354,7 @@ class SignerOperator(BaseOperator):
             )
 
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

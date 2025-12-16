@@ -6,7 +6,7 @@ KISS and DRY principles - minimal, stateless implementation.
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from .base import BaseOperator, TaskResult, TaskState
+from .base import BaseOperator, TaskResult, TaskState, TaskStatus
 from ...core.logging_config import get_workflow_logger
 
 logger = get_workflow_logger(__name__)
@@ -128,7 +128,7 @@ class CatalogSelectorOperator(BaseOperator):
                 # Invalid selection - wait for correction
                 self.state.waiting_for = "catalog_selection"
                 return TaskResult(
-                    status="waiting",
+                    status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "catalog_selection",
                         "form_config": self._build_form_config(),
@@ -144,7 +144,7 @@ class CatalogSelectorOperator(BaseOperator):
         self.state.waiting_for = "catalog_selection"
 
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": "catalog_selection",
                 "form_config": self._build_form_config()
@@ -276,6 +276,6 @@ class CatalogSelectorOperator(BaseOperator):
         logger.info(f"User selected {len(processed_items)} items from catalog {self.catalog_id}")
 
         return TaskResult(
-            status="continue",
+            status=TaskStatus.CONTINUE,
             data=result_data
         )

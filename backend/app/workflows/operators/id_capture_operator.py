@@ -26,7 +26,7 @@ import numpy as np
 import pytesseract
 from pyzbar import pyzbar
 
-from .base import TaskResult
+from .base import TaskResult, TaskStatus
 from .image_capture_base import ImageCaptureOperator
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,7 @@ class IDCaptureOperator(ImageCaptureOperator):
             # Check for timeout using base class method
             if self.has_timed_out(context):
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"Document capture timed out after {self.timeout_minutes} minutes"
                 )
 
@@ -167,7 +167,7 @@ class IDCaptureOperator(ImageCaptureOperator):
                 self.state.waiting_for = "id_capture"
 
                 return TaskResult(
-                    status="waiting",
+                    status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "id_capture",
                         "form_config": self.form_config,
@@ -340,7 +340,7 @@ class IDCaptureOperator(ImageCaptureOperator):
             )
 
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
 
@@ -357,7 +357,7 @@ class IDCaptureOperator(ImageCaptureOperator):
             )
 
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 
@@ -379,13 +379,13 @@ class IDCaptureOperator(ImageCaptureOperator):
 
         if attempts >= self.max_attempts:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Maximum document capture attempts ({self.max_attempts}) exceeded. Last error: {error_message}"
             )
 
         # Allow retry with feedback
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": "id_capture",
                 "form_config": self.form_config,

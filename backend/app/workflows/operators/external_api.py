@@ -8,7 +8,7 @@ import asyncio
 import json
 from datetime import datetime
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 
 class ExternalAPIOperator(BaseOperator):
@@ -82,7 +82,7 @@ class ExternalAPIOperator(BaseOperator):
                     processed_data = self.response_processor(response["data"])
                 
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data={
                         "api_response": processed_data,
                         "api_status_code": response["status_code"],
@@ -94,18 +94,18 @@ class ExternalAPIOperator(BaseOperator):
                 # API call failed
                 if response.get("retryable", False):
                     return TaskResult(
-                        status="retry",
+                        status=TaskStatus.RETRY,
                         error=f"API error (retryable): {response['error']}"
                     )
                 else:
                     return TaskResult(
-                        status="failed",
+                        status=TaskStatus.FAILED,
                         error=f"API error: {response['error']}"
                     )
                     
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Error calling API: {str(e)}"
             )
     

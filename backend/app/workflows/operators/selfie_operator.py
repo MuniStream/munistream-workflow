@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 from PIL import Image, ExifTags
 
-from .base import TaskResult
+from .base import TaskResult, TaskStatus
 from .image_capture_base import ImageCaptureOperator
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ class SelfieOperator(ImageCaptureOperator):
             # Check for timeout using base class method
             if self.has_timed_out(context):
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"Selfie capture timed out after {self.timeout_minutes} minutes"
                 )
 
@@ -140,7 +140,7 @@ class SelfieOperator(ImageCaptureOperator):
                 self.state.waiting_for = "selfie"
 
                 return TaskResult(
-                    status="waiting",
+                    status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "selfie",
                         "form_config": self.form_config,
@@ -265,7 +265,7 @@ class SelfieOperator(ImageCaptureOperator):
             )
 
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
 
@@ -283,7 +283,7 @@ class SelfieOperator(ImageCaptureOperator):
             )
 
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

@@ -90,7 +90,7 @@ class ApprovalOperator(BaseOperator):
                     self.state.metadata["auto_approved"] = True
                     self.state.metadata["auto_approved_reason"] = "timeout"
                     return TaskResult(
-                        status="continue",
+                        status=TaskStatus.CONTINUE,
                         data={"approved": True, "auto_approved": True, "approver": "system_timeout"}
                     )
                 elif self.escalation_path and self.current_escalation_level < len(self.escalation_path):
@@ -99,7 +99,7 @@ class ApprovalOperator(BaseOperator):
                 else:
                     # Timeout without auto-approval
                     return TaskResult(
-                        status="failed",
+                        status=TaskStatus.FAILED,
                         error=f"Approval timeout after {self.timeout_hours} hours"
                     )
         
@@ -117,7 +117,7 @@ class ApprovalOperator(BaseOperator):
         self.state.waiting_for = "approval"
         
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": "approval",
                 "assigned_to": self.state.assigned_to,
@@ -202,7 +202,7 @@ class ApprovalOperator(BaseOperator):
         
         if decision == ApprovalDecision.APPROVED:
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data={
                     "approval_status": "approved",
                     "approved_by": self.state.metadata.get("decided_by"),
@@ -212,7 +212,7 @@ class ApprovalOperator(BaseOperator):
             )
         elif decision == ApprovalDecision.REJECTED:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Rechazado: {self.state.rejection_reason or 'Sin razón especificada'}"
             )
         elif decision == ApprovalDecision.REQUEST_CHANGES:
@@ -221,14 +221,14 @@ class ApprovalOperator(BaseOperator):
             self.state.has_input = False
             self.request_sent_at = None
             return TaskResult(
-                status="retry",
+                status=TaskStatus.RETRY,
                 error=f"Cambios solicitados: {self.state.metadata.get('requested_changes', 'Ver comentarios')}"
             )
         elif decision == ApprovalDecision.ESCALATE:
             return self.escalate()
         
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={"waiting_for": "approval"}
         )
     
@@ -249,7 +249,7 @@ class ApprovalOperator(BaseOperator):
             self.state.metadata["escalated_at"] = datetime.utcnow().isoformat()
             
             return TaskResult(
-                status="waiting",
+                status=TaskStatus.WAITING,
                 data={
                     "escalated": True,
                     "escalated_to": next_approver
@@ -257,7 +257,7 @@ class ApprovalOperator(BaseOperator):
             )
         else:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error="No hay más niveles de escalación disponibles"
             )
     
@@ -326,7 +326,7 @@ class ConditionalApprovalOperator(ApprovalOperator):
         if self.skip_condition and self.skip_condition(context):
             # Auto-approve based on condition
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data={
                     "approval_status": "auto_approved",
                     "auto_approval_reason": "condition_met",

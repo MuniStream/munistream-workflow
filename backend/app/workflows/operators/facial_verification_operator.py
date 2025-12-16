@@ -116,7 +116,7 @@ class FacialVerificationOperator(BaseOperator):
             source_image = self._extract_image_from_context(context, self.source_image_key)
             if source_image is None:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"[FACIAL_VERIFICATION] Source image not found at key: {self.source_image_key}"
                 )
 
@@ -131,7 +131,7 @@ class FacialVerificationOperator(BaseOperator):
 
             if not target_images:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"[FACIAL_VERIFICATION] No target images found from keys: {self.target_image_keys}"
                 )
 
@@ -181,7 +181,7 @@ class FacialVerificationOperator(BaseOperator):
                 logger.error(f"🔍 {error_msg}")
 
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=error_msg,
                     data=output_data
                 )
@@ -195,7 +195,7 @@ class FacialVerificationOperator(BaseOperator):
             await self._log_verification_results(results)
 
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
 
@@ -204,7 +204,7 @@ class FacialVerificationOperator(BaseOperator):
             logger.error(f"🔍 FacialVerificationOperator error: {e}")
 
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

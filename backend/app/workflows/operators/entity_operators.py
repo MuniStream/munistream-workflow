@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from enum import Enum
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity
 from ...services.visualizers.visualizer_factory import VisualizerFactory
@@ -113,7 +113,7 @@ class EntityCreationOperator(BaseOperator):
             if not user_id:
                 print(f"❌ EntityCreationOperator: No user_id, customer_id, or {self.user_id_source or 'user_id_source'} in context")
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error="No user_id, customer_id, or user_id_source in context"
                 )
             
@@ -175,13 +175,13 @@ class EntityCreationOperator(BaseOperator):
             
             # Return pending status - will be handled by execute_async
             return TaskResult(
-                status="pending_async",
+                status=TaskStatus.PENDING_ASYNC,
                 data={}
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Failed to create entity: {str(e)}"
             )
     
@@ -284,7 +284,7 @@ class EntityCreationOperator(BaseOperator):
 
                 self.state.output_data = output_data
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data=output_data
                 )
             except Exception as e:
@@ -300,7 +300,7 @@ class EntityCreationOperator(BaseOperator):
                 error_msg = str(e)
                 self.state.error_message = error_msg
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=error_msg
                 )
         
@@ -389,7 +389,7 @@ class EntityValidationOperator(BaseOperator):
         entity_id = context.get(self.entity_id_field)
         if not entity_id:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"No entity ID found in context field '{self.entity_id_field}'"
             )
 
@@ -397,7 +397,7 @@ class EntityValidationOperator(BaseOperator):
         user_id = context.get("user_id")
         if not user_id:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error="No user_id in context"
             )
 
@@ -412,7 +412,7 @@ class EntityValidationOperator(BaseOperator):
 
         # Return pending_async status - will be handled by execute_async
         return TaskResult(
-            status="pending_async",
+            status=TaskStatus.PENDING_ASYNC,
             data={}
         )
 
@@ -431,7 +431,7 @@ class EntityValidationOperator(BaseOperator):
                     error_msg = "Entity not found or not owned by user"
                     self.state.error_message = error_msg
                     return TaskResult(
-                        status="failed",
+                        status=TaskStatus.FAILED,
                         error=error_msg
                     )
 
@@ -440,7 +440,7 @@ class EntityValidationOperator(BaseOperator):
                     error_msg = "Entity is not verified"
                     self.state.error_message = error_msg
                     return TaskResult(
-                        status="failed",
+                        status=TaskStatus.FAILED,
                         error=error_msg
                     )
 
@@ -450,7 +450,7 @@ class EntityValidationOperator(BaseOperator):
                         error_msg = f"Entity missing required field: {field}"
                         self.state.error_message = error_msg
                         return TaskResult(
-                            status="failed",
+                            status=TaskStatus.FAILED,
                             error=error_msg
                         )
 
@@ -461,7 +461,7 @@ class EntityValidationOperator(BaseOperator):
                         error_msg = f"Entity missing required relationship: {rel_type}"
                         self.state.error_message = error_msg
                         return TaskResult(
-                            status="failed",
+                            status=TaskStatus.FAILED,
                             error=error_msg
                         )
 
@@ -473,7 +473,7 @@ class EntityValidationOperator(BaseOperator):
                 self.state.output_data = output_data
 
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data=output_data
                 )
 
@@ -484,7 +484,7 @@ class EntityValidationOperator(BaseOperator):
             error_msg = f"Validation error: {str(e)}"
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 
@@ -537,7 +537,7 @@ class EntityRequirementOperator(BaseOperator):
 
         if not user_id:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error="No user_id in context"
             )
 
@@ -552,7 +552,7 @@ class EntityRequirementOperator(BaseOperator):
 
         # Return pending_async status - will be handled by execute_async
         return TaskResult(
-            status="pending_async",
+            status=TaskStatus.PENDING_ASYNC,
             data={}
         )
 
@@ -604,7 +604,7 @@ class EntityRequirementOperator(BaseOperator):
                     self.state.output_data = output_data
 
                     return TaskResult(
-                        status="continue",
+                        status=TaskStatus.CONTINUE,
                         data=output_data
                     )
                 else:
@@ -646,7 +646,7 @@ class EntityRequirementOperator(BaseOperator):
 
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 
@@ -693,14 +693,14 @@ class EntityRelationshipOperator(BaseOperator):
             
             if not from_id or not to_id:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"Missing entity IDs: from={from_id}, to={to_id}"
                 )
             
             user_id = context.get("user_id") or context.get("customer_id")
             if not user_id:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error="No user_id or customer_id in context"
                 )
             
@@ -720,13 +720,13 @@ class EntityRelationshipOperator(BaseOperator):
             }
             
             return TaskResult(
-                status="pending_async",
+                status=TaskStatus.PENDING_ASYNC,
                 data={}
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Relationship creation failed: {str(e)}"
             )
     
@@ -827,7 +827,7 @@ class MultiEntityRequirementOperator(BaseOperator):
 
         if not user_id:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error="No user_id in context"
             )
 
@@ -839,7 +839,7 @@ class MultiEntityRequirementOperator(BaseOperator):
         }
 
         return TaskResult(
-            status="pending_async",
+            status=TaskStatus.PENDING_ASYNC,
             data={}
         )
 
@@ -931,7 +931,7 @@ class MultiEntityRequirementOperator(BaseOperator):
                     )
 
                     return TaskResult(
-                        status="continue",
+                        status=TaskStatus.CONTINUE,
                         data=output_data
                     )
                 else:
@@ -973,7 +973,7 @@ class MultiEntityRequirementOperator(BaseOperator):
 
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

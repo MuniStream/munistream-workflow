@@ -8,7 +8,7 @@ from enum import Enum
 import hashlib
 import uuid
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity, EntityRelationship
 
@@ -65,7 +65,7 @@ class DocumentCreationOperator(BaseOperator):
             user_id = context.get("user_id") or context.get("customer_id")
             if not user_id:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error="No user_id or customer_id in context"
                 )
             
@@ -125,13 +125,13 @@ class DocumentCreationOperator(BaseOperator):
                 print(f"   Will link to entity: {self._link_to_entity_id}")
             
             return TaskResult(
-                status="pending_async",
+                status=TaskStatus.PENDING_ASYNC,
                 data={}
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Failed to create document: {str(e)}"
             )
     
@@ -254,7 +254,7 @@ class DocumentRequirementOperator(BaseOperator):
             entity_id = context.get(self.entity_id_source)
             if not entity_id:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"No entity ID found in context at '{self.entity_id_source}'"
                 )
             
@@ -262,13 +262,13 @@ class DocumentRequirementOperator(BaseOperator):
             self._entity_id = entity_id
             
             return TaskResult(
-                status="pending_async",
+                status=TaskStatus.PENDING_ASYNC,
                 data={}
             )
             
         except Exception as e:
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=f"Document requirement check failed: {str(e)}"
             )
     

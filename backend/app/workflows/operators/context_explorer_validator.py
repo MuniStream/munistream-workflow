@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.entity_service import EntityService
 from ...core.logging_config import get_workflow_logger
 
@@ -104,7 +104,7 @@ class ContextExplorerValidator(BaseOperator):
 
         if decision == "approved":
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data={
                     "validation_decision": "approved",
                     "validation_comments": comments,
@@ -114,7 +114,7 @@ class ContextExplorerValidator(BaseOperator):
             )
         elif decision == "rejected":
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 data={
                     "validation_decision": "rejected",
                     "validation_comments": comments,
@@ -127,7 +127,7 @@ class ContextExplorerValidator(BaseOperator):
             # Invalid decision, show form again
             self.state.waiting_for = "context_validation"
             return TaskResult(
-                status="waiting",
+                status=TaskStatus.WAITING,
                 data={
                     "waiting_for": "context_validation",
                     "validation_errors": ["Please select a validation decision"]
@@ -151,7 +151,7 @@ class ContextExplorerValidator(BaseOperator):
             logger.warning("No context found at specified path",
                           context_path=self.context_path)
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 data={
                     "error": f"No workflow context available at path: {self.context_path}",
                     "available_keys": list(context.keys())
@@ -236,7 +236,7 @@ class ContextExplorerValidator(BaseOperator):
         self.state.waiting_for = "context_validation"
 
         task_result = TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": "context_validation",
                 "form_config": form_config

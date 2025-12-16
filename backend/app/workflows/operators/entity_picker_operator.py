@@ -7,7 +7,7 @@ Extends MultiEntityRequirementOperator to add selection interface for found enti
 from typing import Dict, Any, List
 import logging
 
-from .base import BaseOperator, TaskResult, OperatorRequirement, RequirementStatus
+from .base import BaseOperator, TaskResult, OperatorRequirement, RequirementStatus, TaskStatus
 from .entity_operators import MultiEntityRequirementOperator
 from ...services.entity_service import EntityService
 from ...core.logging_config import get_workflow_logger, set_workflow_context
@@ -270,7 +270,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
     def _fail_missing_user(self, context: Dict[str, Any]) -> TaskResult:
         """Return failure result for missing user context"""
         return TaskResult(
-            status="failed",
+            status=TaskStatus.FAILED,
             error="No user_id in context"
         )
 
@@ -317,7 +317,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         logger.info("Prepared for entity discovery",
                    requirements_count=len(self.requirements))
         return TaskResult(
-            status="pending_async",
+            status=TaskStatus.WAITING,
             data={}
         )
 
@@ -478,7 +478,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                    grouped_entities=selected_entities_group)
 
         return TaskResult(
-            status="continue",
+            status=TaskStatus.CONTINUE,
             data=auto_selection_data
         )
 
@@ -490,7 +490,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         self._save_waiting_state("missing_entities", form_config)
 
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={"waiting_for": "missing_entities", "form_config": form_config}
         )
 
@@ -502,7 +502,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         self._save_waiting_state("entity_selection", form_config)
 
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={"waiting_for": "entity_selection", "form_config": form_config}
         )
 
@@ -609,7 +609,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                              error_count=len(validation_errors),
                              errors=validation_errors)
                 return TaskResult(
-                    status="waiting",
+                    status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "entity_selection",
                         "form_config": self._last_form_config,
@@ -625,7 +625,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                        total_selected=sum(len(ids) for ids in selected_entities_group.values()))
             self.state.output_data = output_data
             return TaskResult(
-                status="continue",
+                status=TaskStatus.CONTINUE,
                 data=output_data
             )
 
@@ -633,7 +633,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             error_msg = f"Selection validation failed: {str(e)}"
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 
@@ -649,8 +649,8 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             # First run the regular execute to prepare parameters
             result = self.execute(context)
 
-            # If validation passed (status="continue"), return that result immediately
-            if result.status == "continue":
+            # If validation passed (status=TaskStatus.CONTINUE), return that result immediately
+            if result.status == TaskStatus.CONTINUE:
                 logger.info("Validation passed, returning continue result from execute_async")
                 return result
 
@@ -679,7 +679,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
             self.state.error_message = error_msg
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

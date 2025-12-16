@@ -14,7 +14,7 @@ import aiofiles
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 from ...core.config import settings
 
 
@@ -425,7 +425,7 @@ class S3UploadOperator(BaseOperator):
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Execute method required by BaseOperator - delegates to execute_async"""
         return TaskResult(
-            status="pending_async",
+            status=TaskStatus.WAITING,
             data={}
         )
 
@@ -449,7 +449,7 @@ class S3UploadOperator(BaseOperator):
                 error_msg = f"No files found in context key '{self.file_source}'. Expected files for upload but none were provided."
                 print(f"❌ S3UploadOperator: {error_msg}")
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=error_msg
                 )
 
@@ -499,19 +499,19 @@ class S3UploadOperator(BaseOperator):
             # Determine status based on results
             if not successful_uploads:
                 return TaskResult(
-                    status="failed",
+                    status=TaskStatus.FAILED,
                     error=f"All {len(failed_uploads)} uploads failed",
                     data={task_specific_key: upload_summary}
                 )
             elif failed_uploads:
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data={task_specific_key: upload_summary},
                     metadata={"warning": f"{len(failed_uploads)} uploads failed"}
                 )
             else:
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data={task_specific_key: upload_summary}
                 )
 
@@ -523,7 +523,7 @@ class S3UploadOperator(BaseOperator):
             traceback.print_exc()
             print(f"   Error occurred at line: {traceback.extract_tb(e.__traceback__)[-1].lineno}")
             return TaskResult(
-                status="failed",
+                status=TaskStatus.FAILED,
                 error=error_msg
             )
 

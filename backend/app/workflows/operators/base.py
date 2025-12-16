@@ -71,6 +71,7 @@ class TaskStatus(str, Enum):
     WAITING_INPUT = "waiting_input"
     WAITING_APPROVAL = "waiting_approval"
     VALIDATING = "validating"
+    PENDING_ASYNC = "pending_async"
     
     # Result states
     CONTINUE = "continue"
@@ -107,7 +108,7 @@ class TaskState(BaseModel):
 
 class TaskResult(BaseModel):
     """Result of a task execution"""
-    status: str  # "continue", "failed", "waiting", "retry", "skip"
+    status: TaskStatus  # TaskStatus enum
     data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     next_task: Optional[str] = None  # For branching operations
@@ -292,22 +293,22 @@ class BaseOperator(ABC):
             self._last_result = result
 
             # Update state based on result
-            if result.status == "continue":
+            if result.status == TaskStatus.CONTINUE:
                 self.state.status = TaskStatus.CONTINUE
                 self.state.output_data = result.data or {}
                 self.state.completed_at = datetime.utcnow()
-            elif result.status == "waiting":
+            elif result.status == TaskStatus.WAITING:
                 self.state.status = TaskStatus.WAITING_INPUT
                 # IMPORTANT: Save data even when waiting (for state persistence)
                 self.state.output_data = result.data or {}
-            elif result.status == "failed":
+            elif result.status == TaskStatus.FAILED:
                 self.state.status = TaskStatus.FAILED
                 self.state.error_message = result.error
                 self.state.completed_at = datetime.utcnow()
-            elif result.status == "retry":
+            elif result.status == TaskStatus.RETRY:
                 self.state.status = TaskStatus.RETRY
                 self.state.retry_count += 1
-            elif result.status == "skip":
+            elif result.status == TaskStatus.SKIP:
                 self.state.status = TaskStatus.SKIP
                 self.state.completed_at = datetime.utcnow()
             
@@ -317,7 +318,7 @@ class BaseOperator(ABC):
             self.state.status = TaskStatus.FAILED
             self.state.error_message = str(e)
             self.state.completed_at = datetime.utcnow()
-            return "failed"
+            return TaskStatus.FAILED
     
     def __rshift__(self, other: Union['BaseOperator', List['BaseOperator']]) -> Union['BaseOperator', 'TaskList']:
         """

@@ -5,7 +5,7 @@ This operator allows a workflow to start another workflow (typically administrat
 and optionally wait for its completion. Supports automatic assignment to teams or users.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -70,6 +70,10 @@ class WorkflowStartOperator(BaseOperator):
         assignee_role: Optional[str] = None,
         auto_start: bool = False,
         assignment_strategy: str = "round_robin",
+        on_child_failure: str = "fail",
+        retry_target_task: Optional[str] = None,
+        max_child_retries: int = 1,
+        clear_completed_tasks: Optional[List[str]] = None,
         **kwargs
     ):
         """
@@ -90,6 +94,10 @@ class WorkflowStartOperator(BaseOperator):
             assignee_role: Required role for assignee (e.g., "reviewer", "approver")
             auto_start: Automatically start workflow after assignment
             assignment_strategy: Assignment strategy (round_robin, workload_based, etc.)
+            on_child_failure: Action when child fails ("fail", "retry_parent", "goto_task")
+            retry_target_task: Target task for "goto_task" recovery
+            max_child_retries: Maximum retry attempts before permanent failure
+            clear_completed_tasks: List of tasks to clear on recovery
             **kwargs: Additional arguments passed to BaseOperator
         """
         super().__init__(task_id=task_id, **kwargs)
@@ -106,6 +114,10 @@ class WorkflowStartOperator(BaseOperator):
         self.assignee_role = assignee_role
         self.auto_start = auto_start
         self.assignment_strategy = assignment_strategy
+        self.on_child_failure = on_child_failure
+        self.retry_target_task = retry_target_task
+        self.max_child_retries = max_child_retries
+        self.clear_completed_tasks = clear_completed_tasks or []
 
         # State key will be set per instance to ensure uniqueness
         self._state_key = None
@@ -133,10 +145,7 @@ class WorkflowStartOperator(BaseOperator):
         print(f"[WorkflowStartOperator] Workflow ID target: {self.workflow_id}")
 
         try:
-            logger.info("WorkflowStartOperator.execute() started",
-                       task_id=self.task_id,
-                       workflow_id=self.workflow_id,
-                       parent_instance_id=context.get("instance_id"))
+            logger.info(f"WorkflowStartOperator.execute() started: task_id={self.task_id}, workflow_id={self.workflow_id}, parent_instance_id={context.get('instance_id')}")
         except Exception as e:
             print(f"[WorkflowStartOperator] Error logging: {e}")
             import traceback
@@ -163,11 +172,15 @@ class WorkflowStartOperator(BaseOperator):
         # Get or initialize operator state (persisted across executions)
         self._operator_state = context.get(self._state_key, {})
 
+        # Initialize child_failure_count if not present
+        if "child_failure_count" not in self._operator_state:
+            self._operator_state["child_failure_count"] = 0
+
         print(f"[WorkflowStartOperator] State key: {self._state_key}")
         print(f"[WorkflowStartOperator] Current state: {self._operator_state}")
 
-        # Check if we're resuming (already have state from previous execution)
-        if self._operator_state:
+        # Check if we're resuming (have child_instance_id from previous execution)
+        if self._operator_state.get("child_instance_id"):
             # Restore state from previous execution
             self.child_instance_id = self._operator_state.get("child_instance_id")
             start_time_str = self._operator_state.get("start_time")
@@ -180,32 +193,24 @@ class WorkflowStartOperator(BaseOperator):
                 self.start_time = datetime.utcnow()
 
             print(f"[WorkflowStartOperator] Resuming with child_instance_id: {self.child_instance_id}")
-            logger.info("Resuming check for child workflow",
-                       child_workflow_id=self.child_instance_id,
-                       workflow_type=self.workflow_type.value)
+            logger.info(f"Resuming check for child workflow: child_workflow_id={self.child_instance_id}, workflow_type={self.workflow_type.value}")
             return await self._check_child_status(context)
 
         # Create new child workflow
-        logger.info("Starting child workflow creation process",
-                   target_workflow_id=self.workflow_id,
-                   workflow_type=self.workflow_type.value,
-                   assign_to=self.assign_to,
-                   wait_for_completion=self.wait_for_completion,
-                   parent_context_keys=list(context.keys()))
+        logger.info(f"Starting child workflow creation process: target_workflow_id={self.workflow_id}, workflow_type={self.workflow_type.value}, assign_to={self.assign_to}, wait_for_completion={self.wait_for_completion}, parent_context_keys={list(context.keys())}")
 
         try:
             # Prepare context for child
-            logger.debug("Preparing child context")
+            logger.debug(f"Preparing child context")
             child_context = self._prepare_child_context(context)
-            logger.debug("Child context prepared",
-                        child_context_keys=list(child_context.keys()))
+            logger.debug(f"Child context prepared")
 
             # Create the child instance
-            logger.info("Calling _create_child_workflow")
+            logger.info(f"Calling _create_child_workflow")
             child_instance = await self._create_child_workflow(child_context)
 
             if not child_instance:
-                logger.error("Child instance creation returned None")
+                logger.error(f"Child instance creation returned None")
                 return TaskResult(
                     status=TaskStatus.FAILED,
                     data={
@@ -217,37 +222,28 @@ class WorkflowStartOperator(BaseOperator):
             self.child_instance_id = child_instance.instance_id
             self.start_time = datetime.utcnow()
 
-            logger.info("Child workflow instance created successfully",
-                       child_instance_id=self.child_instance_id,
-                       parent_instance_id=context.get("instance_id"),
-                       child_status=child_instance.status)
+            # Reset failure processing flag for new child workflow
+            self._operator_state["current_child_failure_processed"] = False
+
+            logger.info(f"Child workflow instance created successfully, child_status={child_instance.status}")
 
             # Assign if configuration provided
             if self.assign_to:
-                logger.debug("Starting workflow assignment",
-                            assign_to=self.assign_to)
+                logger.debug(f"Starting workflow assignment")
                 print(f"[WorkflowStartOperator] About to call _assign_workflow")
                 try:
                     await self._assign_workflow(child_instance, context)
                     print(f"[WorkflowStartOperator] _assign_workflow completed successfully")
-                    logger.info("Child workflow assigned",
-                               child_instance_id=self.child_instance_id,
-                               assignment=self.assign_to)
+                    logger.info(f"Child workflow assigned")
                 except Exception as assign_error:
                     print(f"[WorkflowStartOperator] ERROR in _assign_workflow: {assign_error}")
                     print(f"[WorkflowStartOperator] Error type: {type(assign_error).__name__}")
                     import traceback
                     traceback.print_exc()
-                    logger.error("Failed to assign child workflow",
-                               error=str(assign_error),
-                               error_type=type(assign_error).__name__,
-                               child_instance_id=self.child_instance_id,
-                               exc_info=True)
+                    logger.error(f"Failed to assign child workflow, error_type={type(assign_error).__name__}, child_instance_id={self.child_instance_id}", exc_info=True)
                     raise
             else:
-                logger.warning("No assignment configuration provided - workflow not assigned",
-                             workflow_id=self.workflow_id,
-                             task_id=self.task_id)
+                logger.warning(f"No assignment configuration provided - workflow not assigned")
 
             # Store state for persistence across executions AFTER successful assignment
             self._operator_state = {
@@ -258,14 +254,11 @@ class WorkflowStartOperator(BaseOperator):
             }
             context[self._state_key] = self._operator_state
 
-            logger.info("WorkflowStartOperator state persisted after assignment",
-                       state_key=self._state_key,
-                       child_instance_id=self.child_instance_id)
+            logger.info(f"WorkflowStartOperator state persisted after assignment")
 
             # If not waiting for completion, return success immediately
             if not self.wait_for_completion:
-                logger.info("Not waiting for completion, returning success",
-                           child_instance_id=self.child_instance_id)
+                logger.info(f"Not waiting for completion, returning success")
                 return TaskResult(
                     status=TaskStatus.COMPLETED,
                     data={
@@ -279,8 +272,7 @@ class WorkflowStartOperator(BaseOperator):
                 )
 
             # Otherwise, check status (will return WAITING)
-            logger.info("Waiting for child workflow completion",
-                       child_instance_id=self.child_instance_id)
+            logger.info(f"Waiting for child workflow completion")
             try:
                 print(f"[DEBUG] About to call _check_child_status...")
                 result = await self._check_child_status(context)
@@ -295,12 +287,7 @@ class WorkflowStartOperator(BaseOperator):
                 raise
 
         except Exception as e:
-            logger.error("Exception in WorkflowStartOperator.execute",
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        workflow_id=self.workflow_id,
-                        parent_instance_id=context.get("instance_id"),
-                        exc_info=True)
+            logger.error(f"Exception in WorkflowStartOperator.execute, error_type={type(e).__name__}, workflow_id={self.workflow_id}, parent_instance_id={context.get('instance_id')}", exc_info=True)
             return TaskResult(
                 status=TaskStatus.FAILED,
                 data={
@@ -347,9 +334,7 @@ class WorkflowStartOperator(BaseOperator):
             for parent_key, child_key in self.context_mapping.items():
                 if parent_key in parent_context:
                     child_context[child_key] = parent_context[parent_key]
-                    logger.debug("Mapped context field",
-                               parent_key=parent_key,
-                               child_key=child_key)
+                    logger.debug(f"Mapped context field")
 
         # If pass_context is True but no specific mapping, pass common fields
         elif self.pass_context:
@@ -416,22 +401,19 @@ class WorkflowStartOperator(BaseOperator):
         print(f"[WorkflowStartOperator] Target workflow_id: {self.workflow_id}")
         print(f"[WorkflowStartOperator] Parent instance: {context.get('parent_instance_id')}")
 
-        logger.info("_create_child_workflow started",
-                   workflow_id=self.workflow_id,
-                   parent_instance_id=context.get("parent_instance_id"))
+        logger.info(f"_create_child_workflow started")
 
         try:
             # Import workflow_service dynamically to avoid circular import
             print(f"[WorkflowStartOperator] About to import workflow_service")
-            logger.debug("Importing workflow_service")
+            logger.debug(f"Importing workflow_service")
             from ...services.workflow_service import workflow_service
             print(f"[WorkflowStartOperator] workflow_service imported successfully")
-            logger.debug("workflow_service imported successfully")
+            logger.debug(f"workflow_service imported successfully")
 
             # Get the workflow definition to verify it exists and check type
             print(f"[WorkflowStartOperator] Getting workflow definition for: {self.workflow_id}")
-            logger.info("Getting workflow definition",
-                       workflow_id=self.workflow_id)
+            logger.info(f"Getting workflow definition")
             workflow_def = await workflow_service.get_workflow_definition(self.workflow_id)
 
             if workflow_def:
@@ -441,20 +423,15 @@ class WorkflowStartOperator(BaseOperator):
                 print(f"[WorkflowStartOperator] Workflow definition NOT found!")
             print(f"[WorkflowStartOperator] Got workflow def: {workflow_def is not None}")
             if not workflow_def:
-                logger.error("Workflow definition not found",
-                           workflow_id=self.workflow_id)
+                logger.error(f"Workflow definition not found")
                 raise ValueError(f"Workflow {self.workflow_id} not found")
 
-            logger.debug("Workflow definition found",
-                        workflow_id=self.workflow_id,
-                        has_workflow_type=hasattr(workflow_def, 'workflow_type'))
+            logger.debug(f"Workflow definition found")
 
             # Create the instance
             print(f"[WorkflowStartOperator] About to create instance")
             print(f"[WorkflowStartOperator] User ID: {context.get('parent_user_id', 'system')}")
-            logger.info("Creating workflow instance via workflow_service",
-                       workflow_id=self.workflow_id,
-                       user_id=context.get("parent_user_id", "system"))
+            logger.info(f"Creating workflow instance via workflow_service")
 
             try:
                 dag_instance = await workflow_service.create_instance(
@@ -473,27 +450,22 @@ class WorkflowStartOperator(BaseOperator):
                 raise
 
             if not dag_instance:
-                logger.error("workflow_service.create_instance returned None")
+                logger.error(f"workflow_service.create_instance returned None")
                 raise RuntimeError("Failed to create workflow instance - returned None")
 
-            logger.info("DAG instance created",
-                       instance_id=dag_instance.instance_id)
+            logger.info(f"DAG instance created")
 
             # Get the database instance to modify status
-            logger.debug("Looking up database instance",
-                        instance_id=dag_instance.instance_id)
+            logger.debug(f"Looking up database instance")
             db_instance = await WorkflowInstance.find_one(
                 WorkflowInstance.instance_id == dag_instance.instance_id
             )
 
             if not db_instance:
-                logger.error("Database instance not found after creation",
-                           instance_id=dag_instance.instance_id)
+                logger.error(f"Database instance not found after creation")
                 raise RuntimeError(f"Failed to find created instance {dag_instance.instance_id}")
 
-            logger.debug("Database instance found",
-                        instance_id=db_instance.instance_id,
-                        current_status=db_instance.status)
+            logger.debug(f"Database instance found")
             print(f"[WorkflowStartOperator] DB instance workflow_type BEFORE setting: {db_instance.workflow_type}")
 
             # Set workflow type if available
@@ -501,8 +473,7 @@ class WorkflowStartOperator(BaseOperator):
                 print(f"[WorkflowStartOperator] Setting workflow_type from definition: {workflow_def.workflow_type}")
                 db_instance.workflow_type = workflow_def.workflow_type
                 print(f"[WorkflowStartOperator] DB instance workflow_type now: {db_instance.workflow_type}")
-                logger.debug("Set workflow type",
-                           workflow_type=workflow_def.workflow_type)
+                logger.debug(f"Set workflow type")
             else:
                 print(f"[WorkflowStartOperator] Workflow definition has no workflow_type attribute")
 
@@ -512,30 +483,23 @@ class WorkflowStartOperator(BaseOperator):
                 print(f"[WorkflowStartOperator] Setting admin workflow status")
                 db_instance.status = "pending_assignment"
                 db_instance.assignment_status = AssignmentStatus.PENDING_REVIEW
-                logger.info("Set child workflow to pending_assignment status",
-                           instance_id=db_instance.instance_id)
+                logger.info(f"Set child workflow to pending_assignment status")
             else:
                 print(f"[WorkflowStartOperator] Not an ADMIN workflow, keeping default status")
 
             # Store parent reference in context
             if "parent_instance_id" not in db_instance.context:
                 db_instance.context["parent_instance_id"] = context.get("parent_instance_id")
-                logger.debug("Added parent reference to context",
-                           parent_instance_id=context.get("parent_instance_id"))
+                logger.debug(f"Added parent reference to context")
 
             # Set priority
             db_instance.priority = self.priority
-            logger.debug("Set priority",
-                        priority=self.priority)
+            logger.debug(f"Set priority")
 
-            logger.info("Saving database instance",
-                       instance_id=db_instance.instance_id)
+            logger.info(f"Saving database instance")
             await db_instance.save()
 
-            logger.info("Child workflow created successfully",
-                       instance_id=db_instance.instance_id,
-                       status=db_instance.status,
-                       workflow_type=self.workflow_type.value)
+            logger.info(f"Child workflow created successfully")
 
             return db_instance
 
@@ -544,11 +508,7 @@ class WorkflowStartOperator(BaseOperator):
             print(f"[WorkflowStartOperator] Exception type: {type(e).__name__}")
             import traceback
             traceback.print_exc()
-            logger.error("Exception in _create_child_workflow",
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        workflow_id=self.workflow_id,
-                        exc_info=True)
+            logger.error(f"Exception in _create_child_workflow, error_type={type(e).__name__}, workflow_id={self.workflow_id}", exc_info=True)
             raise
 
     async def _assign_workflow(
@@ -595,21 +555,13 @@ class WorkflowStartOperator(BaseOperator):
 
                         if assigned_user_id:
                             print(f"[WorkflowStartOperator] Auto-assigned to specific user: {assigned_user_id}")
-                            logger.info("Auto-assigned to specific user from group",
-                                       user_id=assigned_user_id,
-                                       group_id=team_id,
-                                       role=self.assignee_role,
-                                       instance_id=instance.instance_id)
+                            logger.info(f"Auto-assigned to specific user from group")
                         else:
                             print(f"[WorkflowStartOperator] Auto-assignment failed, falling back to team assignment")
-                            logger.warning("Auto-assignment to specific user failed, using team assignment",
-                                         group_id=team_id,
-                                         role=self.assignee_role)
+                            logger.warning(f"Auto-assignment to specific user failed, using team assignment")
                     except Exception as auto_assign_error:
                         print(f"[WorkflowStartOperator] Auto-assignment error: {auto_assign_error}")
-                        logger.error("Error in auto-assignment, falling back to team assignment",
-                                   error=str(auto_assign_error),
-                                   group_id=team_id)
+                        logger.error(f"Error in auto-assignment, falling back to team assignment, group_id={team_id}")
 
                 # Assign to team (always done) and optionally to specific user
                 instance.assign_to_team(
@@ -629,10 +581,7 @@ class WorkflowStartOperator(BaseOperator):
                     )
 
                 print(f"[WorkflowStartOperator] Team assignment completed")
-                logger.info("Assigned to team",
-                           team_id=team_id,
-                           assigned_user_id=assigned_user_id,
-                           instance_id=instance.instance_id)
+                logger.info(f"Assigned to team")
 
             elif "admin" in self.assign_to:
                 print(f"[WorkflowStartOperator] Assigning to user: {self.assign_to['admin']}")
@@ -644,9 +593,7 @@ class WorkflowStartOperator(BaseOperator):
                 )
                 assigned_user_id = self.assign_to["admin"]
                 print(f"[WorkflowStartOperator] User assignment completed")
-                logger.info("Assigned to user",
-                           user_id=self.assign_to["admin"],
-                           instance_id=instance.instance_id)
+                logger.info(f"Assigned to user")
 
             print(f"[WorkflowStartOperator] Setting parent-child relationship")
             # Set parent-child relationship
@@ -663,9 +610,7 @@ class WorkflowStartOperator(BaseOperator):
                 instance.status = "running"
                 instance.assignment_status = AssignmentStatus.UNDER_REVIEW
                 print(f"[WorkflowStartOperator] Auto-start enabled with specific user - status set to running")
-                logger.info("Auto-started workflow with specific user assignment",
-                           instance_id=instance.instance_id,
-                           assigned_user_id=assigned_user_id)
+                logger.info(f"Auto-started workflow with specific user assignment")
             else:
                 # Standard flow - wait for manual start
                 instance.status = "waiting_for_start"
@@ -687,23 +632,15 @@ class WorkflowStartOperator(BaseOperator):
 
                     # Start the workflow execution
                     await workflow_service.execute_instance(instance.instance_id)
-                    logger.info("Auto-started workflow execution triggered",
-                               instance_id=instance.instance_id,
-                               assigned_user_id=assigned_user_id)
+                    logger.info(f"Auto-started workflow execution triggered")
                     print(f"[WorkflowStartOperator] Auto-start execution triggered successfully")
 
                 except Exception as auto_start_error:
-                    logger.error("Failed to auto-start workflow execution",
-                               error=str(auto_start_error),
-                               instance_id=instance.instance_id)
+                    logger.error(f"Failed to auto-start workflow execution, instance_id={instance.instance_id}")
                     print(f"[WorkflowStartOperator] Auto-start execution failed: {auto_start_error}")
                     # Don't raise the error - assignment was successful, just auto-start failed
 
-            logger.info("Parent-child relationship established",
-                       child_instance_id=instance.instance_id,
-                       parent_instance_id=instance.parent_instance_id,
-                       parent_workflow_id=instance.parent_workflow_id,
-                       auto_started=self.auto_start and assigned_user_id is not None)
+            logger.info(f"Parent-child relationship established")
             print(f"[WorkflowStartOperator] _assign_workflow completed successfully")
 
         except Exception as e:
@@ -723,26 +660,23 @@ class WorkflowStartOperator(BaseOperator):
         Returns:
             TaskResult indicating current status
         """
-        logger.debug("_check_child_status called",
-                    child_instance_id=self.child_instance_id)
+        logger.debug(f"_check_child_status called")
 
         if not self.child_instance_id:
-            logger.error("No child workflow instance ID to check")
+            logger.error(f"No child workflow instance ID to check")
             return TaskResult(
                 status=TaskStatus.FAILED,
                 data={"error": "No child workflow instance to check"}
             )
 
         # Get updated instance from database
-        logger.debug("Looking up child instance in database",
-                    child_instance_id=self.child_instance_id)
+        logger.debug(f"Looking up child instance in database")
         child = await WorkflowInstance.find_one(
             WorkflowInstance.instance_id == self.child_instance_id
         )
 
         if not child:
-            logger.error("Child workflow instance not found in database",
-                        child_instance_id=self.child_instance_id)
+            logger.error(f"Child workflow instance not found in database")
             return TaskResult(
                 status=TaskStatus.FAILED,
                 data={
@@ -755,10 +689,7 @@ class WorkflowStartOperator(BaseOperator):
         if self.start_time:
             elapsed_minutes = (datetime.utcnow() - self.start_time).total_seconds() / 60
             if elapsed_minutes > self.timeout_minutes:
-                logger.warning("Child workflow timed out",
-                              child_instance_id=self.child_instance_id,
-                              elapsed_minutes=elapsed_minutes,
-                              timeout_minutes=self.timeout_minutes)
+                logger.warning(f"Child workflow timed out")
                 return TaskResult(
                     status=TaskStatus.FAILED,
                     data={
@@ -782,9 +713,7 @@ class WorkflowStartOperator(BaseOperator):
 
             if terminal_status == self.required_status or self.required_status == "any":
                 print(f"[DEBUG] SUCCESS: Child workflow completion validated")
-                logger.info("Child workflow completed",
-                           child_instance_id=self.child_instance_id,
-                           terminal_status=terminal_status)
+                logger.info(f"Child workflow completed")
                 try:
                     print(f"[DEBUG] Creating SUCCESS TaskResult...")
                     # Copy entire child context to parent, excluding system fields
@@ -815,10 +744,7 @@ class WorkflowStartOperator(BaseOperator):
                     raise
             else:
                 print(f"[DEBUG] FAILURE: Terminal status mismatch")
-                logger.warning("Child workflow completed with unexpected status",
-                              child_instance_id=self.child_instance_id,
-                              actual_status=terminal_status,
-                              expected_status=self.required_status)
+                logger.warning(f"Child workflow completed with unexpected status")
                 return TaskResult(
                     status=TaskStatus.FAILED,
                     data={
@@ -829,17 +755,122 @@ class WorkflowStartOperator(BaseOperator):
                 )
 
         # Check if failed
-        if child.status in ["failed", "cancelled"]:
-            logger.error("Child workflow failed",
-                        child_instance_id=self.child_instance_id,
-                        status=child.status)
+        try:
+            child_status = child.status if child else "unknown"
+            child_is_failed = child_status in ["failed", "cancelled"]
+
+            logger.info(f"[WorkflowStartOperator] Child workflow status check")
+
+            print(f"[WorkflowStartOperator] After logger.info - child.status = '{child_status}', child_is_failed = {child_is_failed}")
+        except Exception as e:
+            logger.error(f"[WorkflowStartOperator] Error accessing child status, child_instance_id={self.child_instance_id}")
+            child_status = "error"
+            child_is_failed = False
+
+        if child_is_failed:
+            logger.error(f"[WorkflowStartOperator] Child workflow failed")
+
+            # Increment child failure count only once per parent attempt
+            if not self._operator_state.get("current_child_failure_processed", False):
+                old_count = self._operator_state.get("child_failure_count", 0)
+                self._operator_state["child_failure_count"] = old_count + 1
+                self._operator_state["current_child_failure_processed"] = True
+                context[self._state_key] = self._operator_state
+
+                logger.info(f"[WorkflowStartOperator] Child failure detected - incremented failure count")
+            else:
+                logger.debug(f"[WorkflowStartOperator] Child failure already processed for this attempt")
+
+            # Determine action based on recovery configuration
+            result_status = TaskStatus.FAILED
+            result_data = {
+                "error": f"Child workflow {child_status}",
+                "child_workflow_id": self.child_instance_id,
+                "child_error": child.terminal_message or "Unknown error",
+                "child_failure_count": self._operator_state["child_failure_count"]
+            }
+            next_task = None
+
+            # Check if we should attempt recovery
+            current_failure_count = self._operator_state["child_failure_count"]
+            should_recover = (current_failure_count <= self.max_child_retries and
+                            self.on_child_failure != "fail")
+
+            logger.info(f"[WorkflowStartOperator] Evaluating recovery options")
+
+            print(f"[WorkflowStartOperator] RECOVERY DEBUG: current_failure_count={current_failure_count}, max_child_retries={self.max_child_retries}, on_child_failure={self.on_child_failure}, should_recover={should_recover}")
+
+            print(f"[WorkflowStartOperator] ENTERING RECOVERY: should_recover={should_recover}")
+
+            if should_recover:
+                print(f"[WorkflowStartOperator] INSIDE RECOVERY BLOCK: on_child_failure={self.on_child_failure}")
+
+                if self.on_child_failure == "retry_parent":
+                    print(f"[WorkflowStartOperator] INSIDE RETRY_PARENT BLOCK")
+                    try:
+                        # Get first task from workflow service
+                        from ...services.workflow_service import workflow_service
+                        parent_workflow_id = context.get("workflow_id")
+                        print(f"[WorkflowStartOperator] Getting first task for workflow_id: {parent_workflow_id}")
+                        try:
+                            first_task = workflow_service.find_first_task(parent_workflow_id)
+                            print(f"[WorkflowStartOperator] RETRY PARENT DEBUG: parent_workflow_id={parent_workflow_id}, first_task={first_task}")
+                            print(f"[WorkflowStartOperator] FIRST TASK CHECK: first_task type = {type(first_task)}, bool(first_task) = {bool(first_task)}")
+                        except Exception as e:
+                            print(f"[WorkflowStartOperator] find_first_task EXCEPTION: {str(e)}")
+                            import traceback
+                            print(f"[WorkflowStartOperator] find_first_task TRACEBACK: {traceback.format_exc()}")
+                            first_task = None
+                        if first_task:
+                            result_status = TaskStatus.RETRY
+                            next_task = first_task
+                            result_data.update({
+                                "recovery_action": "retry_parent",
+                                "clear_tasks": context.get("completed_steps", []),
+                                "message": f"Restarting parent workflow due to child failure (attempt {self._operator_state['child_failure_count']}/{self.max_child_retries})",
+                                self._state_key: self._operator_state
+                            })
+                            print(f"[WorkflowStartOperator] RESULT DEBUG: result_status={result_status}, next_task={next_task}")
+                            logger.info(f"[WorkflowStartOperator] Initiating parent workflow restart: child_instance_id={self.child_instance_id}, retry_count={self._operator_state['child_failure_count']}, restart_task={first_task}")
+                        else:
+                            print(f"[WorkflowStartOperator] ERROR: No first task found for workflow {parent_workflow_id}")
+                    except Exception as e:
+                        print(f"[WorkflowStartOperator] EXCEPTION in retry_parent: {str(e)}")
+                        import traceback
+                        traceback_str = traceback.format_exc()
+                        print(f"[WorkflowStartOperator] FULL TRACEBACK:\n{traceback_str}")
+                        # Find the specific line that caused the error
+                        import sys
+                        exc_type, exc_value, exc_traceback = sys.exc_info()
+                        if exc_traceback:
+                            tb = exc_traceback
+                            while tb.tb_next:
+                                tb = tb.tb_next
+                            print(f"[WorkflowStartOperator] ERROR LINE: {tb.tb_lineno} in file {tb.tb_frame.f_code.co_filename}")
+
+                elif self.on_child_failure == "goto_task" and self.retry_target_task:
+                    result_status = TaskStatus.RETRY
+                    next_task = self.retry_target_task
+                    result_data.update({
+                        "recovery_action": "goto_task",
+                        "clear_tasks": self.clear_completed_tasks,
+                        "message": f"Jumping to task {self.retry_target_task} due to child failure (attempt {self._operator_state['child_failure_count']}/{self.max_child_retries})",
+                        self._state_key: self._operator_state
+                    })
+                    logger.info(f"Initiating parent workflow jump to specific task: child_instance_id={self.child_instance_id}, retry_count={self._operator_state['child_failure_count']}, target_task={self.retry_target_task}")
+
+            print(f"[WorkflowStartOperator] FINAL RESULT: result_status={result_status}, next_task={next_task}")
+
+            # If still failed after recovery logic
+            if result_status == TaskStatus.FAILED:
+                if self._operator_state["child_failure_count"] > self.max_child_retries:
+                    result_data["error"] += f" after {self.max_child_retries} recovery attempts"
+                    result_data["recovery_exhausted"] = True
+
             return TaskResult(
-                status=TaskStatus.FAILED,
-                data={
-                    "error": f"Child workflow {child.status}",
-                    "child_workflow_id": self.child_instance_id,
-                    "child_error": child.terminal_message or "Unknown error"
-                }
+                status=result_status,
+                next_task=next_task,
+                data=result_data
             )
 
         # Still in progress - return waiting status
@@ -854,10 +885,7 @@ class WorkflowStartOperator(BaseOperator):
         elif child.assignment_status == AssignmentStatus.UNDER_REVIEW:
             status_message = f"Under review by {child.assigned_user_id or child.assigned_team_id}"
 
-        logger.debug("Child workflow still in progress",
-                    child_instance_id=self.child_instance_id,
-                    child_status=child.status,
-                    assignment_status=child.assignment_status.value if child.assignment_status else None)
+        logger.debug(f"Child workflow still in progress")
 
         # Update state with last check time
         self._operator_state["last_check"] = datetime.utcnow().isoformat()
@@ -869,7 +897,7 @@ class WorkflowStartOperator(BaseOperator):
                 "waiting_for": "child_workflow_completion",
                 "child_instance_id": self.child_instance_id,  # Add instance_id
                 "child_workflow_id": self.child_instance_id,  # Keep for backward compatibility
-                "child_status": child.status,
+                "child_status": child_status,
                 "assignment_status": child.assignment_status.value if child.assignment_status else None,
                 "assigned_to": child.assigned_user_id or child.assigned_team_id,
                 "message": status_message,

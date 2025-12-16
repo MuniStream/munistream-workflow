@@ -2,7 +2,7 @@
 Simple, stateless User Input Operator.
 """
 from typing import Dict, Any, List, Optional
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 
 class UserInputOperator(BaseOperator):
@@ -50,7 +50,7 @@ class UserInputOperator(BaseOperator):
             if not errors:
                 # Valid input - continue workflow
                 return TaskResult(
-                    status="continue",
+                    status=TaskStatus.CONTINUE,
                     data={
                         f"{self.task_id}_validated": True,
                         f"{self.task_id}_data": user_input
@@ -59,7 +59,7 @@ class UserInputOperator(BaseOperator):
             else:
                 # Invalid input - wait for correction
                 return TaskResult(
-                    status="waiting",
+                    status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "user_input",
                         "form_config": self.form_config,
@@ -70,7 +70,7 @@ class UserInputOperator(BaseOperator):
         
         # No input yet - wait for it
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data={
                 "waiting_for": "user_input",
                 "form_config": self.form_config,

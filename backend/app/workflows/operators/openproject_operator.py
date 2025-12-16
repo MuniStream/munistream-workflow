@@ -12,7 +12,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
-from .base import BaseOperator, TaskResult
+from .base import BaseOperator, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -128,18 +128,18 @@ class OpenProjectAssignmentOperator(BaseOperator):
             data[self._state_key] = self._openproject_state.copy()
         logger.debug(f"Returning waiting result: {message}, state_key={self._state_key}, has_state={bool(data.get(self._state_key))}")
         return TaskResult(
-            status="waiting",
+            status=TaskStatus.WAITING,
             data=data,
             metadata={"message": message, **metadata}
         )
 
     def _success_result(self, data: Dict[str, Any]) -> TaskResult:
         """Create a success TaskResult."""
-        return TaskResult(status="continue", data=data)
+        return TaskResult(status=TaskStatus.CONTINUE, data=data)
 
     def _failed_result(self, error: str, **context_data) -> TaskResult:
         """Create a failed TaskResult with optional context data."""
-        return TaskResult(status="failed", error=error, data=context_data)
+        return TaskResult(status=TaskStatus.FAILED, error=error, data=context_data)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for OpenProject API."""
@@ -298,7 +298,7 @@ class OpenProjectAssignmentOperator(BaseOperator):
                         }
 
                         return TaskResult(
-                            status="waiting",
+                            status=TaskStatus.WAITING,
                             data={self._state_key: self._openproject_state},
                             metadata={
                                 "message": f"Created OpenProject work package #{wp_id} with {len(upload_results)} files",
