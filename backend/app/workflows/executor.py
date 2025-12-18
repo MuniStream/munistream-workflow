@@ -9,6 +9,7 @@ import logging
 from enum import Enum
 
 from .dag import InstanceStatus
+from .operators.base import TaskStatus
 from ..models.instance_log import InstanceLog, LogLevel, LogType
 from ..models.workflow import WorkflowInstance, EventType
 from .event_manager import WorkflowEventManager
@@ -340,7 +341,7 @@ class DAGExecutor:
                     instance_id=instance_id,
                     workflow_id=dag_instance.dag.dag_id,
                     level=LogLevel.INFO,
-                    log_type=LogType.TASK_COMPLETE if result == "continue" else LogType.TASK_FAILED,
+                    log_type=LogType.TASK_COMPLETE if result == TaskStatus.CONTINUE else LogType.TASK_FAILED,
                     task_id=task_id,
                     message=f"Task completed with status: {result}",
                     details={"result": result, "output": task.get_output() if hasattr(task, 'get_output') else None}
@@ -367,19 +368,19 @@ class DAGExecutor:
                     message=f"Task execution failed",
                     error=e
                 )
-                result = "failed"
+                result = TaskStatus.FAILED
             
             # Update task status based on result
             # DEBUG: Log result handling
             logger.info(f"DEBUG: Handling result '{result}' for task {task_id}")
-            if result == "continue":
+            if result == TaskStatus.CONTINUE:
                 dag_instance.update_task_status(task_id, "completed")
                 # Update context with task output - this is critical for data flow
                 output = task.get_output()
                 if output:
                     dag_instance.context.update(output)
                     logger.debug(f"Task {task_id} added to context: {list(output.keys())}")
-            elif result == "waiting":
+            elif result == TaskStatus.WAITING:
                 dag_instance.update_task_status(task_id, "waiting")
                 # CRITICAL: Save task output/context even when waiting (for state tracking)
                 output = task.get_output()
@@ -395,26 +396,53 @@ class DAGExecutor:
                 # Schedule re-check after a delay for polling
                 # The instance will be re-queued in the main loop since it's PAUSED
                 break  # Stop processing for now, will resume via polling
-            elif result == "failed":
+            elif result == TaskStatus.FAILED:
+                print(f"[EXECUTOR] TASK FAILED: {task_id} in instance {instance_id}")
+                if hasattr(task, '_last_result') and task._last_result:
+                    print(f"[EXECUTOR] Task failure data: {task._last_result.data}")
+                    print(f"[EXECUTOR] Task failure error: {getattr(task._last_result, 'error', 'No error message')}")
                 dag_instance.update_task_status(task_id, "failed")
                 break  # Stop processing, task failed
-            elif result == "retry":
-                # Don't mark as completed, keep it ready for retry
-                dag_instance.update_task_status(task_id, "pending")
-                # Clear from completed tasks if it was there
-                if task_id in dag_instance.completed_tasks:
-                    dag_instance.completed_tasks.remove(task_id)
+            elif result == TaskStatus.RETRY:
+                # Handle workflow recovery logic if next_task is specified
+                if hasattr(task, '_last_result') and task._last_result and hasattr(task._last_result, 'next_task') and task._last_result.next_task:
+                    next_task_id = task._last_result.next_task
+                    recovery_data = task._last_result.data or {}
+                    clear_tasks = recovery_data.get("clear_tasks", [])
+                    recovery_action = recovery_data.get("recovery_action", "unknown")
 
-                # Get retry delay from task result if available
-                retry_delay = 5  # Default delay (seconds)
-                if hasattr(task, '_last_result') and task._last_result:
-                    if hasattr(task._last_result, 'retry_delay') and task._last_result.retry_delay:
-                        retry_delay = task._last_result.retry_delay
+                    logger.info(f"Handling workflow recovery: {recovery_action} - instance: {instance_id}, current_task: {task_id}, next_task: {next_task_id}")
 
-                # Set the retry timestamp on the task
-                from datetime import timedelta
-                task._retry_after = datetime.utcnow() + timedelta(seconds=retry_delay)
-                # Don't break - instance will continue to be re-queued and checked
+                    # Execute complete retry workflow reset
+                    success = await self._execute_retry_workflow_reset(
+                        dag_instance, db_instance, instance_id,
+                        next_task_id, task_id, recovery_data, recovery_action
+                    )
+
+                    if success:
+                        logger.info(f"Breaking execution loop to restart from {next_task_id}")
+                        return await self.execute_instance(instance_id)
+                    else:
+                        logger.error(f"Invalid next_task specified: {next_task_id} - instance: {instance_id}, available_tasks: {list(dag_instance.dag.tasks.keys())}")
+
+                else:
+                    # Standard retry logic
+                    # Don't mark as completed, keep it ready for retry
+                    dag_instance.update_task_status(task_id, "pending")
+                    # Clear from completed tasks if it was there
+                    if task_id in dag_instance.completed_tasks:
+                        dag_instance.completed_tasks.remove(task_id)
+
+                    # Get retry delay from task result if available
+                    retry_delay = 5  # Default delay (seconds)
+                    if hasattr(task, '_last_result') and task._last_result:
+                        if hasattr(task._last_result, 'retry_delay') and task._last_result.retry_delay:
+                            retry_delay = task._last_result.retry_delay
+
+                    # Set the retry timestamp on the task
+                    from datetime import timedelta
+                    task._retry_after = datetime.utcnow() + timedelta(seconds=retry_delay)
+                    # Don't break - instance will continue to be re-queued and checked
             else:
                 dag_instance.update_task_status(task_id, "completed")
         
@@ -466,21 +494,7 @@ class DAGExecutor:
         old_status = db_instance.status
         new_status = self._map_status(dag_instance.status)
 
-        # Ensure instance_id and workflow_id are always saved in context
-        dag_instance.context["instance_id"] = instance_id
-        dag_instance.context["workflow_id"] = dag_instance.dag.dag_id
-
-        db_instance.status = new_status
-        db_instance.context = dag_instance.context
-        db_instance.current_step = dag_instance.current_task
-        db_instance.completed_steps = list(dag_instance.completed_tasks)
-        db_instance.failed_steps = list(dag_instance.failed_tasks)
-        db_instance.updated_at = datetime.utcnow()
-        
-        if dag_instance.completed_at:
-            db_instance.completed_at = dag_instance.completed_at
-        
-        await db_instance.save()
+        await self._save_instance_state(dag_instance, db_instance, instance_id, new_status)
         
         # Log status change
         if old_status != new_status:
@@ -520,7 +534,154 @@ class DAGExecutor:
             InstanceStatus.CANCELLED: "cancelled"
         }
         return mapping.get(dag_status, "running")
-    
+
+    async def _save_instance_state(self, dag_instance, db_instance, instance_id, new_status=None):
+        """Save instance state to database"""
+        # Ensure instance_id and workflow_id are always saved in context
+        dag_instance.context["instance_id"] = instance_id
+        dag_instance.context["workflow_id"] = dag_instance.dag.dag_id
+
+        db_instance.context = dag_instance.context
+        db_instance.current_step = dag_instance.current_task
+        db_instance.completed_steps = list(dag_instance.completed_tasks)
+        db_instance.failed_steps = list(dag_instance.failed_tasks)
+        db_instance.updated_at = datetime.utcnow()
+
+        if new_status:
+            db_instance.status = new_status
+
+        if dag_instance.completed_at:
+            db_instance.completed_at = dag_instance.completed_at
+
+        await db_instance.save()
+
+    async def _execute_retry_workflow_reset(self, dag_instance, db_instance, instance_id,
+                                          next_task_id, failed_task_id, recovery_data, recovery_action):
+        """
+        Execute complete workflow retry reset procedure.
+
+        Returns:
+            bool: True if reset successful, False if next_task is invalid
+        """
+        if next_task_id not in dag_instance.dag.tasks:
+            return False
+
+        clear_tasks = recovery_data.get("clear_tasks", [])
+
+        # Clear specified tasks from completed_tasks to allow re-execution
+        for clear_task in clear_tasks:
+            if clear_task in dag_instance.completed_tasks:
+                dag_instance.completed_tasks.remove(clear_task)
+                logger.debug(f"Cleared task {clear_task} from completed tasks")
+
+            # Reset task state to pending
+            if clear_task in dag_instance.task_states:
+                dag_instance.task_states[clear_task] = {
+                    "status": "pending",
+                    "started_at": None,
+                    "completed_at": None,
+                    "result": None,
+                    "error": None
+                }
+
+            # Reset the operator if it exists
+            if clear_task in dag_instance.dag.tasks:
+                task_operator = dag_instance.dag.tasks[clear_task]
+                if hasattr(task_operator, 'reset'):
+                    task_operator.reset()
+                    logger.debug(f"Reset operator state for task {clear_task}")
+
+        # Setup next_task as current task
+        dag_instance.current_task = next_task_id
+        dag_instance.task_states[next_task_id] = {
+            "status": "pending",
+            "started_at": None,
+            "completed_at": None,
+            "result": None,
+            "error": None
+        }
+
+        # Remove next_task from completed and failed tasks
+        if next_task_id in dag_instance.completed_tasks:
+            dag_instance.completed_tasks.remove(next_task_id)
+        if next_task_id in dag_instance.failed_tasks:
+            dag_instance.failed_tasks.remove(next_task_id)
+
+        # Preserve retry context history
+        if "retries" not in dag_instance.context:
+            dag_instance.context["retries"] = []
+
+        # Create retry snapshot
+        retry_entry = {
+            "attempt": len(dag_instance.context["retries"]) + 1,
+            "timestamp": datetime.utcnow().isoformat(),
+            "failed_task": failed_task_id,
+            "next_task": next_task_id,
+            "reason": recovery_data.get("message", "Retry initiated"),
+            "recovery_action": recovery_action,
+            "context_snapshot": {k: v for k, v in dag_instance.context.items() if k != "retries"}
+        }
+        dag_instance.context["retries"].append(retry_entry)
+
+        # Update context with recovery information
+        dag_instance.context.update(recovery_data)
+
+        logger.info(f"Workflow recovery completed: jumping to {next_task_id} - instance: {instance_id}, recovery_action: {recovery_action}")
+
+        # Configure upstream dependencies as completed
+        if hasattr(dag_instance.dag, 'graph'):
+            upstream_tasks = list(dag_instance.dag.graph.predecessors(next_task_id))
+            for upstream in upstream_tasks:
+                if upstream not in dag_instance.completed_tasks:
+                    dag_instance.completed_tasks.add(upstream)
+                    if upstream in dag_instance.task_states:
+                        dag_instance.task_states[upstream]["status"] = "completed"
+                        dag_instance.task_states[upstream]["completed_at"] = datetime.utcnow()
+
+            # Reset ALL downstream tasks reachable from next_task
+            import networkx as nx
+            all_downstream_tasks = set(nx.descendants(dag_instance.dag.graph, next_task_id))
+            all_downstream_tasks.add(next_task_id)  # Include next_task itself
+
+            for task_to_reset in all_downstream_tasks:
+                # Remove from completed/failed sets
+                if task_to_reset in dag_instance.completed_tasks:
+                    dag_instance.completed_tasks.remove(task_to_reset)
+                if task_to_reset in dag_instance.failed_tasks:
+                    dag_instance.failed_tasks.remove(task_to_reset)
+
+                # Reset task state
+                dag_instance.task_states[task_to_reset] = {
+                    "status": "pending",
+                    "started_at": None,
+                    "completed_at": None,
+                    "result": None,
+                    "error": None
+                }
+
+            # Clean context keys for ALL tasks being reset
+            # Limpiar cualquier clave que contenga cualquier tarea que estamos reseteando
+            context_keys_to_remove = [
+                key for key in dag_instance.context.keys()
+                if any(task in key for task in all_downstream_tasks)
+            ]
+
+            # Also clean WorkflowStartOperator global context keys
+            workflow_start_global_keys = [
+                "child_instance_id", "child_workflow_id", "child_status",
+                "waiting_for", "child_failure_count", "completed_at", "message"
+            ]
+            for key in workflow_start_global_keys:
+                if key in dag_instance.context:
+                    context_keys_to_remove.append(key)
+
+            for key in context_keys_to_remove:
+                del dag_instance.context[key]
+
+        # Save state to database
+        await self._save_instance_state(dag_instance, db_instance, instance_id)
+        return True
+
     async def _execution_loop(self):
         """Background execution loop - process queue continuously"""
         logger.info("🔄 Execution loop started (optimized with event-driven approach)")

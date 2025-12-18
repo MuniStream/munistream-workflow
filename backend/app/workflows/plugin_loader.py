@@ -20,7 +20,6 @@ import json
 
 from ..services.workflow_service import workflow_service
 from .dag import DAG
-from ..themes.theme_loader import theme_manager
 
 
 class WorkflowPlugin:
@@ -418,10 +417,7 @@ class WorkflowPluginManager:
         print(f"Unique workflow IDs: {len(workflow_ids_loaded)}")
         print(f"{'='*60}")
 
-        # Now that all repositories are cloned, load themes and visualizers from both local config and plugin repos
-        print(f"\n📦 Loading themes...")
-        self._load_themes(self._stored_config)
-
+        # Now that all repositories are cloned, load visualizers from both local config and plugin repos
         print(f"\n🎨 Loading visualizers...")
         self._load_visualizers()
         print(f"{'='*60}\n")
@@ -471,40 +467,6 @@ class WorkflowPluginManager:
             for plugin in self.plugins
         ]
 
-    def _load_themes(self, config: Dict[str, Any]):
-        """Load theme configurations from plugin config"""
-        # Use PLUGIN_DIR environment variable which points to the plugin directory
-        base_path = os.getenv("PLUGIN_DIR", "/app/plugins")
-        total_theme_count = 0
-
-        print(f"   Loading themes from base path: {base_path}")
-
-        # Load themes from local config first
-        theme_count = theme_manager.load_plugin_themes(config, base_path)
-        total_theme_count += theme_count
-
-        # Also load themes from each GitHub repository plugin
-        print(f"   Loading themes from {len(self.plugins)} GitHub repository plugins...")
-        for plugin in self.plugins:
-            if plugin.local_path:
-                plugin_config_path = os.path.join(plugin.local_path, "plugin.yaml")
-                if os.path.exists(plugin_config_path):
-                    try:
-                        import yaml
-                        with open(plugin_config_path, 'r') as f:
-                            plugin_config = yaml.safe_load(f)
-
-                        if plugin_config and "themes" in plugin_config:
-                            print(f"   📦 Loading themes from plugin: {plugin.name}")
-                            plugin_theme_count = theme_manager.load_plugin_themes(plugin_config, plugin.local_path)
-                            total_theme_count += plugin_theme_count
-                            if plugin_theme_count > 0:
-                                print(f"      ✅ Loaded {plugin_theme_count} theme(s) from {plugin.name}")
-                    except Exception as e:
-                        print(f"      ⚠️ Error loading themes from {plugin.name}: {e}")
-
-        if total_theme_count > 0:
-            print(f"   ✅ Total themes loaded: {total_theme_count}")
 
     def _load_visualizers(self):
         """Load visualizers from all plugins"""

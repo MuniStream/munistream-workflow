@@ -388,6 +388,35 @@ class WorkflowService:
         """Stop the DAG executor"""
         await self.executor.stop()
 
+    def find_first_task(self, workflow_id: str) -> Optional[str]:
+        """
+        Find the first task in a workflow (task with no upstream dependencies).
+
+        Args:
+            workflow_id: ID of the workflow
+
+        Returns:
+            Task ID of the first task, or None if not found
+        """
+        try:
+            dag = self.dag_bag.get_dag(workflow_id)
+            if not dag or not hasattr(dag, 'tasks'):
+                logger.warning(f"Could not find workflow definition or tasks, workflow_id={workflow_id}")
+                return None
+
+            # Find task with no upstream dependencies
+            for task_id, task in dag.tasks.items():
+                if not hasattr(task, 'upstream_tasks') or not task.upstream_tasks:
+                    logger.debug(f"Found first task, task_id={task_id}, workflow_id={workflow_id}")
+                    return task_id
+
+            logger.warning(f"No task without upstream dependencies found, workflow_id={workflow_id}, tasks={list(dag.tasks.keys())}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error finding first task, workflow_id={workflow_id}, error={str(e)}")
+            return None
+
 
 # Global workflow service instance
 workflow_service = WorkflowService()
