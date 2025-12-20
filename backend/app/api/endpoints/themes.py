@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from ...themes.theme_loader import theme_manager
 from ...themes.models import Theme, ThemeConfig
 from ...core.config import settings
-from ...auth.dependencies import get_current_tenant
+from ...auth.provider import get_current_tenant
 
 router = APIRouter()
 
