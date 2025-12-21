@@ -14,10 +14,22 @@ from .document import DocumentModel
 from .category import WorkflowCategory
 from .customer import Customer, CustomerStatus
 from .legal_entity import EntityType, LegalEntity, EntityRelationship
+from .catalog import (
+    Catalog,
+    CatalogData,
+    SourceType,
+    CatalogStatus,
+    ColumnType,
+    ColumnSchema,
+    SourceConfig,
+    PermissionRule,
+    CacheConfig,
+    SyncResult
+)
 
 __all__ = [
     "WorkflowStep",
-    "WorkflowDefinition", 
+    "WorkflowDefinition",
     "StepExecution",
     "WorkflowInstance",
     "ApprovalRequest",
@@ -30,5 +42,15 @@ __all__ = [
     "CustomerStatus",
     "EntityType",
     "LegalEntity",
-    "EntityRelationship"
+    "EntityRelationship",
+    "Catalog",
+    "CatalogData",
+    "SourceType",
+    "CatalogStatus",
+    "ColumnType",
+    "ColumnSchema",
+    "SourceConfig",
+    "PermissionRule",
+    "CacheConfig",
+    "SyncResult"
 ]
