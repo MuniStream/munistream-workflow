@@ -152,28 +152,28 @@ class FileConversionService:
         thumbnail: bool = False
     ) -> bytes:
         """Convert image to specified format and size"""
-        def _process():
+        def _process(image_data, format_str, width_param, thumb_flag):
             try:
                 # Open image
-                image = Image.open(io.BytesIO(image_bytes))
+                image = Image.open(io.BytesIO(image_data))
 
                 # Convert to RGB if needed (for PNG output)
-                if output_format.lower() == 'png' and image.mode in ('RGBA', 'LA', 'P'):
+                if format_str.lower() == 'png' and image.mode in ('RGBA', 'LA', 'P'):
                     # Keep transparency for PNG
                     pass
                 elif image.mode not in ('RGB', 'L'):
                     image = image.convert('RGB')
 
                 # Resize if requested
-                resize_width = max_width
-                if thumbnail:
-                    resize_width = max_width or 200
+                resize_width = width_param
+                if thumb_flag:
+                    resize_width = width_param or 200
                 if resize_width:
                     image = self._resize_image(image, max_width=resize_width)
 
                 # Convert to bytes
                 output_buffer = io.BytesIO()
-                image.save(output_buffer, format=output_format.upper())
+                image.save(output_buffer, format=format_str.upper())
                 return output_buffer.getvalue()
 
             except Exception as e:
@@ -181,7 +181,7 @@ class FileConversionService:
                 raise
 
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, _process)
+        return await loop.run_in_executor(self.executor, _process, image_bytes, output_format, max_width, thumbnail)
 
     async def _convert_pdf_to_images(
         self,
