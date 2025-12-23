@@ -24,6 +24,7 @@ from .context_explorer_validator import ContextExplorerValidator
 from .selfie_operator import SelfieOperator
 from .id_capture_operator import IDCaptureOperator
 from .facial_verification_operator import FacialVerificationOperator
+from .catalog_selector_operator import CatalogSelectorOperator
 
 __all__ = [
     # Base classes
@@ -68,6 +69,9 @@ __all__ = [
 
     # Context exploration operators
     "ContextExplorerValidator",
+
+    # Catalog operators
+    "CatalogSelectorOperator",
 
     # Selfie operators
     "SelfieOperator",
