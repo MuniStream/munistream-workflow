@@ -176,30 +176,35 @@ class ContextExplorerValidator(BaseOperator):
             if user_section:
                 form_config["sections"].append(user_section)
 
-        # Section 2: Selected Entities
+        # Section 2: Catalog Selections
+        catalog_section = self._build_catalog_selections_section(target_context)
+        if catalog_section:
+            form_config["sections"].append(catalog_section)
+
+        # Section 3: Selected Entities
         if self.show_selected_entities:
             entities_section = await self._build_selected_entities_section(target_context)
             if entities_section:
                 form_config["sections"].append(entities_section)
 
-        # Section 3: Form Data
+        # Section 4: Form Data
         if self.show_form_data:
             form_section = self._build_form_data_section(target_context)
             if form_section:
                 form_config["sections"].append(form_section)
 
-        # Section 4: S3 Uploaded Files
+        # Section 5: S3 Uploaded Files
         if self.show_s3_uploads:
             s3_section = await self._build_s3_uploads_section(target_context)
             if s3_section:
                 form_config["sections"].append(s3_section)
 
-        # Section 5: Validation Results
+        # Section 6: Validation Results
         validation_section = self._build_validation_results_section(target_context)
         if validation_section:
             form_config["sections"].append(validation_section)
 
-        # Section 6: Raw Context (optional)
+        # Section 7: Raw Context (optional)
         if self.show_raw_context:
             context_section = self._build_raw_context_section(target_context)
             if context_section:
@@ -283,6 +288,41 @@ class ContextExplorerValidator(BaseOperator):
             "title": "👤 User Information",
             "type": "info_display",
             "data": user_info
+        }
+
+    def _build_catalog_selections_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Build catalog selections section showing selected catalog data"""
+
+        catalog_selections = {}
+
+        # Find all catalog selection patterns in context
+        for key, value in target_context.items():
+            # Look for patterns like 'selected_*' that contain dict data
+            if key.startswith('selected_') and isinstance(value, dict) and value:
+                # Extract catalog name from key
+                catalog_name = key.replace('selected_', '').replace('_', ' ').title()
+
+                # Filter out system/internal fields and keep only relevant data
+                filtered_data = {}
+                for field_key, field_value in value.items():
+                    if (not field_key.startswith('_') and
+                        field_value is not None and
+                        field_key not in ['instance_id', 'workflow_id', 'task_instance']):
+                        filtered_data[field_key] = field_value
+
+                if filtered_data:
+                    catalog_selections[key] = {
+                        "catalog_name": catalog_name,
+                        "fields": filtered_data
+                    }
+
+        if not catalog_selections:
+            return None
+
+        return {
+            "title": "📊 Catalog Selections",
+            "type": "catalog_selections_display",
+            "data": catalog_selections
         }
 
     async def _build_selected_entities_section(
@@ -452,7 +492,7 @@ class ContextExplorerValidator(BaseOperator):
 
         return {
             "title": "📁 Uploaded Files",
-            "type": "s3_files_display",
+            "type": "files_display_with_viewer",
             "data": s3_uploads
         }
 
@@ -482,13 +522,17 @@ class ContextExplorerValidator(BaseOperator):
 
             # Prepare the result with proper field mapping for frontend
             result = {
-                'url': file_url,
+                'url': file_url,  # Original MinIO URL for internal use
                 'filename': upload_result.get('filename', 'unknown'),
                 's3_key': upload_result.get('s3_key'),
                 'source_task': task_name,
                 'size': upload_result.get('size'),
                 'bucket': upload_result.get('bucket'),
             }
+
+            # Add proxy download URL for secure access
+            if upload_result.get('s3_key'):
+                result['download_url'] = f"/api/v1/files/download/{upload_result.get('s3_key')}"
 
             # Map conversion result fields to frontend expectations
             if conversion_result:
@@ -505,12 +549,18 @@ class ContextExplorerValidator(BaseOperator):
 
         except Exception as e:
             logger.warning(f"Could not process S3 file from {source_key}: {e}")
-            return {
+            result = {
                 'url': upload_result.get('url', ''),
                 'filename': upload_result.get('filename', 'unknown'),
                 'source_task': source_key.replace('_s3_result', '').replace('_s3_upload', '').replace('_result', ''),
                 'error': str(e)
             }
+
+            # Add proxy download URL even in error case if s3_key exists
+            if upload_result.get('s3_key'):
+                result['download_url'] = f"/api/v1/files/download/{upload_result.get('s3_key')}"
+
+            return result
 
     def _build_validation_results_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Build validation results section for SelfieOperator and IDCaptureOperator"""
