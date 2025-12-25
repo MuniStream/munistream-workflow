@@ -157,8 +157,9 @@ class EntityCreationOperator(BaseOperator):
                 if entity_name is not None:
                     print(f"   Found entity name in context: {entity_name}")
                 else:
-                    entity_name = self.name_source  # Use as static string
-                    print(f"   Using static entity name: {entity_name}")
+                    # Resolve template variables like {{selected_clave.clave_catastral}}
+                    entity_name = self._resolve_template_string(context, self.name_source)
+                    print(f"   Resolved entity name: {entity_name}")
 
             # For async operations, we'll handle this in execute_async
             # Store the parameters for async execution
@@ -328,6 +329,27 @@ class EntityCreationOperator(BaseOperator):
             return value
 
         return None
+
+    def _resolve_template_string(self, context: Dict[str, Any], template: str) -> str:
+        """Resolve template variables like {{selected_clave.clave_catastral}} in strings"""
+        if not isinstance(template, str):
+            return template
+
+        resolved_template = template
+        import re
+
+        # Find all template variables in the format {{variable.path}}
+        template_vars = re.findall(r'\{\{([^}]+)\}\}', template)
+
+        for var_path in template_vars:
+            var_path = var_path.strip()
+            # Get the value from context using dot notation
+            value = self._extract_value_from_context(context, var_path)
+            if value is not None:
+                # Replace the template variable with the actual value
+                resolved_template = resolved_template.replace(f'{{{{{var_path}}}}}', str(value))
+
+        return resolved_template
 
 
 class EntityValidationOperator(BaseOperator):
