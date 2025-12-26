@@ -412,6 +412,13 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         max_count = requirement.get("max_count", min_count)
         auto_select = requirement.get("auto_select", False)
 
+        # Rule 0: Never auto-select optional entities (min_count=0) - user must explicitly choose
+        if min_count == 0:
+            logger.debug("Optional entity requirement - user selection required",
+                        entity_type=entity_type,
+                        available=len(entities))
+            return False
+
         # Rule 1: Perfect match (exactly one entity needed and available)
         if len(entities) == 1 and min_count == 1 and max_count == 1:
             logger.debug("Perfect match detected - single entity for single requirement",
@@ -755,6 +762,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
         for req in requirements:
             entity_type = req["entity_type"]
+            min_count = req.get("min_count", 1)
             # Use store_as as the key, consistent with _discover_available_entities
             req_key = req.get("store_as", f"{entity_type}_entities")
             entities = requirement_entities.get(req_key, [])
@@ -762,8 +770,6 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             # Only skip if there are no entities AND it's a required field
             if not entities and min_count > 0:
                 continue
-
-            min_count = req.get("min_count", 1)
             max_count = req.get("max_count", min_count)
             display_title = req.get("display_title", f"Select {entity_type.title()}")
             display_fields = req.get("display_fields", ["name"])
