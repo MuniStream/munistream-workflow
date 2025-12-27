@@ -64,7 +64,6 @@ class SignerOperator(BaseOperator):
             "certificate_field": "digital_signature_certificate",
             "private_key_field": "digital_signature_private_key",
             "password_field": "digital_signature_password",
-            "document_type": "DOCUMENTO_OFICIAL",
             "fields": [
                 {
                     "name": "digital_signature_certificate",
@@ -281,7 +280,8 @@ class SignerOperator(BaseOperator):
                     "waiting_for": "signature",
                     "form_config": self.form_config,
                     "required_fields": self.required_fields,
-                    "data_hash": signable_data.get("data_hash")  # Just hash for verification
+                    "data_hash": signable_data.get("data_hash"),  # Hash for verification
+                    "signable_data": signable_data  # Full context for display
                 },
                 retry_delay=60  # Check for signature every minute
             )
