@@ -501,18 +501,18 @@ class S3UploadOperator(BaseOperator):
                 return TaskResult(
                     status="failed",
                     error=f"All {len(failed_uploads)} uploads failed",
-                    data=upload_summary
+                    data={task_specific_key: upload_summary}
                 )
             elif failed_uploads:
                 return TaskResult(
                     status="continue",
-                    data=upload_summary,
+                    data={task_specific_key: upload_summary},
                     metadata={"warning": f"{len(failed_uploads)} uploads failed"}
                 )
             else:
                 return TaskResult(
                     status="continue",
-                    data=upload_summary
+                    data={task_specific_key: upload_summary}
                 )
 
         except Exception as e:
