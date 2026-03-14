@@ -158,11 +158,19 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         # Get user ID from context
         user_id = context.get("user_id")
         if not user_id:
+            action_needed = None
+            action_url = None
+            display_name = metadata.get("display_name")
+            if workflow_id:
+                action_needed = f"Completar {display_name}" if display_name else "Completar requisito"
+                action_url = f"/services/{workflow_id}"
             return RequirementStatus(
                 requirement_id=requirement.requirement_id,
                 fulfilled=False,
                 message="No user context available",
-                details={"error": "missing_user_id"}
+                details={"error": "missing_user_id"},
+                action_needed=action_needed,
+                action_url=action_url
             )
 
         try:
@@ -201,7 +209,11 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             # For optional documents (min_count = 0), always show action to allow uploading
             if not fulfilled or min_count == 0:
                 if not fulfilled:
-                    action_needed = f"Upload {min_count - len(entities)} more {entity_type}(s)"
+                    display_name = metadata.get("display_name")
+                    if display_name:
+                        action_needed = f"Completar {display_name}"
+                    else:
+                        action_needed = f"Upload {min_count - len(entities)} more {entity_type}(s)"
                 else:
                     action_needed = f"Upload {entity_type} (optional)"
 
