@@ -144,6 +144,9 @@ class WorkflowStep(Document):
     requires_citizen_input: bool = Field(default=False, description="Whether this step requires citizen input")
     input_form: Dict[str, Any] = Field(default_factory=dict, description="Form configuration for citizen input")
     
+    # Group label for portal views
+    group: Optional[str] = Field(None, description="Group label for collapsing steps in portal views")
+
     # Operator details
     operator_class: Optional[str] = Field(None, description="Actual operator class name (e.g., UserInputOperator, AdminInputOperator)")
     

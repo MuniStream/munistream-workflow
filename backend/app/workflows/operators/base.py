@@ -122,15 +122,19 @@ class BaseOperator(ABC):
     Each operator only knows about its own task, not the workflow structure.
     """
     
-    def __init__(self, task_id: str, **kwargs):
+    def __init__(self, task_id: str, name: Optional[str] = None, group: Optional[str] = None, **kwargs):
         """
         Initialize base operator.
-        
+
         Args:
             task_id: Unique identifier for this task
+            name: Human-readable display name (defaults to task_id formatted as title)
+            group: Group label for collapsing steps in portal views
             **kwargs: Additional configuration parameters
         """
         self.task_id = task_id
+        self.name = name or task_id.replace("_", " ").title()
+        self.group = group
         self.downstream_tasks: List['BaseOperator'] = []
         self.upstream_tasks: List['BaseOperator'] = []
         self.state = TaskState()

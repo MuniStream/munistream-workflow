@@ -25,6 +25,7 @@ from .selfie_operator import SelfieOperator
 from .id_capture_operator import IDCaptureOperator
 from .facial_verification_operator import FacialVerificationOperator
 from .catalog_selector_operator import CatalogSelectorOperator
+from .assertion_operator import AssertionOperator
 
 __all__ = [
     # Base classes
@@ -80,5 +81,8 @@ __all__ = [
     "IDCaptureOperator",
 
     # Facial verification operators
-    "FacialVerificationOperator"
+    "FacialVerificationOperator",
+
+    # Assertion operators
+    "AssertionOperator",
 ]

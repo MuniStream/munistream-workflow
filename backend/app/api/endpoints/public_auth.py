@@ -383,14 +383,21 @@ async def track_instance(
             if status_val == "completed":
                 completed_steps += 1
 
-            step_progress.append({
+            task_obj = dag_instance.dag.tasks.get(task_id)
+            task_name = getattr(task_obj, 'name', None) or task_id.replace("_", " ").title()
+            task_group = getattr(task_obj, 'group', None)
+
+            step_info = {
                 "step_id": task_id,
-                "name": task_id.replace("_", " ").title(),
+                "name": task_name,
                 "description": f"Step {task_id}",
                 "status": status_val,
                 "started_at": state.get("started_at"),
                 "completed_at": state.get("completed_at")
-            })
+            }
+            if task_group:
+                step_info["group"] = task_group
+            step_progress.append(step_info)
 
     progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
 

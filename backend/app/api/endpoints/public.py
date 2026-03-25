@@ -905,22 +905,22 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         
         # Get steps from DAG
         for task_id, task in dag.tasks.items():
-            # Use custom name from kwargs if provided, otherwise generate from task_id
-            task_name = task.kwargs.get('name') if hasattr(task, 'kwargs') and 'name' in task.kwargs else task_id.replace("_", " ").title()
-
             step_data = {
                 "id": task_id,
-                "name": task_name,
+                "name": task.name,
                 "type": task.__class__.__name__
             }
+            if task.group:
+                step_data["group"] = task.group
+
             # Add description if available
             if hasattr(task, 'description'):
                 step_data["description"] = task.description
-            
+
             # Add form_config for UserInputOperator
             if hasattr(task, 'form_config') and task.form_config:
                 step_data["form_config"] = task.form_config
-            
+
             # Add any other operator-specific configuration
             if hasattr(task, 'kwargs') and task.kwargs:
                 # Check for specific kwargs that should be exposed

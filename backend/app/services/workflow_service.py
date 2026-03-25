@@ -54,13 +54,10 @@ class WorkflowService:
             # Dynamic step type mapping - categorize operators into broader types
             step_type = self._get_step_type_from_operator(task)
             
-            # Use custom name from kwargs if provided, otherwise generate from task_id
-            task_name = task.kwargs.get('name', task_id.replace("_", " ").title())
-
             step = WorkflowStep(
                 step_id=task_id,
                 workflow_id=dag.dag_id,
-                name=task_name,
+                name=task.name,
                 step_type=step_type,
                 description=f"{task.__class__.__name__} operation",
                 required_inputs=[],
@@ -69,7 +66,8 @@ class WorkflowService:
                 configuration=task.kwargs,
                 requires_citizen_input=hasattr(task, 'form_config'),
                 input_form=getattr(task, 'form_config', {}),
-                operator_class=task.__class__.__name__,  # Store the actual operator class name
+                group=task.group,
+                operator_class=task.__class__.__name__,
                 created_by=created_by
             )
             await step.insert()
