@@ -13,6 +13,7 @@ import logging
 
 from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
+from ...core.i18n import t as translate
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +385,11 @@ async def track_instance(
                 completed_steps += 1
 
             task_obj = dag_instance.dag.tasks.get(task_id)
-            task_name = getattr(task_obj, 'name', None) or task_id.replace("_", " ").title()
+            task_name = getattr(task_obj, 'name', None)
+            if not task_name:
+                i18n_key = f"steps.{task_id}"
+                translated = translate(i18n_key, locale="es")
+                task_name = translated if translated != i18n_key else task_id.replace("_", " ").title()
             task_group = getattr(task_obj, 'group', None)
 
             step_info = {

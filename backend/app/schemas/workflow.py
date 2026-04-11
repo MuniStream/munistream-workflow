@@ -80,6 +80,7 @@ class WorkflowDiagram(BaseModel):
 class WorkflowExecuteRequest(BaseModel):
     workflow_id: str
     initial_context: Dict[str, Any] = Field(default_factory=dict)
+    on_behalf_of_user_id: Optional[str] = Field(None, description="Admin/manager can create instance on behalf of another user")
 
 
 class InstanceStatus(str, Enum):

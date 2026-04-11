@@ -96,14 +96,24 @@ async def create_workflow_instance(
 ):
     """Create and execute a new workflow instance using DAG architecture"""
     try:
-        # Always use authenticated user's ID for security
         user_id = str(current_user.get("sub"))
-        
-        # Create DAG instance with authenticated user
+
+        # Allow admin/manager to create on behalf of another user
+        if request.on_behalf_of_user_id:
+            user_roles = current_user.get("roles", [])
+            if "admin" not in user_roles and "manager" not in user_roles:
+                raise HTTPException(status_code=403, detail="Only admin/manager can create instances on behalf of another user")
+            user_id = request.on_behalf_of_user_id
+
+        # Create DAG instance
+        initial_data = request.initial_context or {}
+        if request.on_behalf_of_user_id:
+            initial_data["created_by_admin"] = str(current_user.get("sub"))
+
         dag_instance = await workflow_service.create_instance(
             workflow_id=request.workflow_id,
             user_id=user_id,
-            initial_data=request.initial_context or {}
+            initial_data=initial_data
         )
         
         # Start execution
@@ -116,7 +126,7 @@ async def create_workflow_instance(
             status=dag_instance.status.value,
             user_id=dag_instance.user_id,
             context=dag_instance.context,
-            step_results={},  # Initialize empty step results
+            step_results={},
             current_step=dag_instance.current_task,
             created_at=dag_instance.created_at,
             updated_at=dag_instance.updated_at,

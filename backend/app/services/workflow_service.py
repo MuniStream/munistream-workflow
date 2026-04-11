@@ -29,31 +29,47 @@ class WorkflowService:
         self.logger = logging.getLogger(__name__)
     
     async def register_dag(self, dag: DAG, created_by: str = None) -> WorkflowDefinition:
-        """Register a DAG and create corresponding database records"""
+        """Register a DAG and create corresponding database records (upsert)"""
         # Add DAG to bag
         self.dag_bag.add_dag(dag)
-        
-        # Create workflow definition record
-        workflow_def = WorkflowDefinition(
-            workflow_id=dag.dag_id,
-            name=dag.description or dag.dag_id,
-            description=dag.description,
-            version=dag.version,
-            status="active" if dag.status.value == "active" else "draft",
-            start_step_id=dag.get_root_tasks()[0].task_id if dag.get_root_tasks() else None,
-            category="automated",
-            tags=dag.tags,
-            metadata=dag.metadata,
-            created_by=created_by
-        )
-        
-        await workflow_def.insert()
-        
-        # Create step records for API compatibility
+
+        # Check if workflow already exists in DB
+        existing = await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == dag.dag_id)
+        root_tasks = dag.get_root_tasks()
+        start_step_id = root_tasks[0].task_id if root_tasks else None
+
+        if existing:
+            existing.name = dag.description or dag.dag_id
+            existing.description = dag.description
+            existing.version = dag.version
+            existing.start_step_id = start_step_id
+            existing.tags = dag.tags
+            existing.metadata = dag.metadata
+            existing.updated_at = datetime.utcnow()
+            await existing.save()
+            workflow_def = existing
+        else:
+            workflow_def = WorkflowDefinition(
+                workflow_id=dag.dag_id,
+                name=dag.description or dag.dag_id,
+                description=dag.description,
+                version=dag.version,
+                status="active" if dag.status.value == "active" else "draft",
+                start_step_id=start_step_id,
+                category="automated",
+                tags=dag.tags,
+                metadata=dag.metadata,
+                created_by=created_by
+            )
+            await workflow_def.insert()
+
+        # Upsert step records for API compatibility
+        # Remove old steps and recreate from current DAG definition
+        await WorkflowStep.find(WorkflowStep.workflow_id == dag.dag_id).delete()
+
         for task_id, task in dag.tasks.items():
-            # Dynamic step type mapping - categorize operators into broader types
-            step_type = self._get_step_type_from_operator(task)
-            
+            step_type = self.get_step_type_from_operator(task)
+
             step = WorkflowStep(
                 step_id=task_id,
                 workflow_id=dag.dag_id,
@@ -71,10 +87,10 @@ class WorkflowService:
                 created_by=created_by
             )
             await step.insert()
-        
+
         return workflow_def
     
-    def _get_step_type_from_operator(self, operator: BaseOperator) -> str:
+    def get_step_type_from_operator(self, operator: BaseOperator) -> str:
         """
         Dynamically determine step type from operator class.
         Maps any operator to one of the broad step type categories.
@@ -128,25 +144,33 @@ class WorkflowService:
         skip: int = 0,
         limit: int = 20
     ) -> List[WorkflowDefinition]:
-        """List workflow definitions from DAGBag (code) not database"""
-        # Get all DAGs from the DAGBag (loaded from code/plugins)
+        """List workflow definitions from DAGBag, using DB status when available"""
+        # Get DB status for all workflows to respect admin toggle
+        dag_ids = list(self.dag_bag.dags.keys())
+        db_workflows = await WorkflowDefinition.find(
+            {"workflow_id": {"$in": dag_ids}}
+        ).to_list() if dag_ids else []
+        db_status_map = {w.workflow_id: w.status for w in db_workflows}
+
         all_workflows = []
-        
+
         for dag_id, dag in self.dag_bag.dags.items():
-            # Create a WorkflowDefinition object from the DAG
+            # Use DB status if available, otherwise default to active
+            dag_status = db_status_map.get(dag_id, "active")
+
             workflow_def = WorkflowDefinition(
                 workflow_id=dag.dag_id,
                 name=dag.name if hasattr(dag, 'name') else dag.dag_id,
                 description=dag.description or "",
                 category=dag.category if hasattr(dag, 'category') else "general",
-                status="active",  # DAGs in DAGBag are always active
+                status=dag_status,
                 workflow_type=dag.workflow_type if hasattr(dag, 'workflow_type') else WorkflowType.PROCESS,
                 tags=dag.tags if hasattr(dag, 'tags') else [],
                 metadata=dag.metadata if hasattr(dag, 'metadata') else {},
                 created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
                 updated_at=dag.updated_at if hasattr(dag, 'updated_at') else datetime.utcnow()
             )
-            
+
             # Apply filters
             if status and workflow_def.status != status:
                 continue
@@ -154,9 +178,9 @@ class WorkflowService:
                 continue
             if workflow_type and dag.workflow_type.value != workflow_type:
                 continue
-                
+
             all_workflows.append(workflow_def)
-        
+
         # Apply pagination
         return all_workflows[skip:skip + limit] if limit else all_workflows[skip:]
     

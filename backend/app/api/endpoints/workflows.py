@@ -37,23 +37,24 @@ async def get_user_accessible_workflows(user: dict) -> List[str]:
     return [w.workflow_id for w in workflows]
 
 
+def step_to_schema(step: WorkflowStep) -> StepSchema:
+    """Convert a WorkflowStep DB model to a StepSchema"""
+    return StepSchema(
+        step_id=step.step_id,
+        name=step.name,
+        step_type=step.step_type,
+        description=step.description,
+        required_inputs=step.required_inputs,
+        optional_inputs=step.optional_inputs,
+        next_steps=step.next_steps,
+        operator_class=step.operator_class or step.step_type
+    )
+
+
 async def convert_workflow_to_response(workflow: WorkflowDefinition) -> WorkflowResponse:
     """Convert database WorkflowDefinition to API response"""
-    # Get steps for this workflow
     steps = await WorkflowStep.find(WorkflowStep.workflow_id == workflow.workflow_id).to_list()
-    
-    step_schemas = []
-    for step in steps:
-        step_schemas.append(StepSchema(
-            step_id=step.step_id,
-            name=step.name,
-            step_type=step.step_type,  # Pass the string directly
-            description=step.description,
-            required_inputs=step.required_inputs,
-            optional_inputs=step.optional_inputs,
-            next_steps=step.next_steps,
-            operator_class=step.step_type  # Store the actual operator class
-        ))
+    step_schemas = [step_to_schema(s) for s in steps]
     
     return WorkflowResponse(
         workflow_id=workflow.workflow_id,
@@ -97,40 +98,51 @@ async def list_workflows(
     status: Optional[WorkflowStatus] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    """List workflows with pagination, filtered by user's team assignments"""
-    # Get workflows accessible to the user
-    accessible_workflow_ids = await get_user_accessible_workflows(current_user)
-    
-    # Build query
-    query = {}
-    if status:
-        query["status"] = status
-    
-    # Filter by accessible workflows (unless admin/manager sees all)
+    """List workflows from DAGBag with DB status, with pagination"""
+    from ...services.workflow_service import workflow_service
+
+    # Get all workflows from DAGBag (source of truth for available workflows)
+    all_workflows = await workflow_service.list_workflow_definitions(
+        status=status.value if status else None,
+        limit=0  # no limit, we paginate below
+    )
+
+    # Filter by accessible workflows for non-admin users
     user_roles = current_user.get("roles", [])
     if "admin" not in user_roles and "manager" not in user_roles:
-        if not accessible_workflow_ids:
-            # User has no team assignments, return empty list
-            return WorkflowListResponse(
-                workflows=[],
-                total=0,
-                page=page,
-                page_size=page_size
-            )
-        query["workflow_id"] = {"$in": accessible_workflow_ids}
-    
-    # Get total count
-    total = await WorkflowDefinition.find(query).count()
-    
-    # Get paginated results
+        accessible_ids = set(await get_user_accessible_workflows(current_user))
+        if not accessible_ids:
+            return WorkflowListResponse(workflows=[], total=0, page=page, page_size=page_size)
+        all_workflows = [w for w in all_workflows if w.workflow_id in accessible_ids]
+
+    total = len(all_workflows)
     skip = (page - 1) * page_size
-    workflows = await WorkflowDefinition.find(query).sort(-WorkflowDefinition.created_at).skip(skip).limit(page_size).to_list()
-    
-    # Convert to response format
+    page_workflows = all_workflows[skip:skip + page_size]
+
+    # Batch-fetch all steps for this page in one query
+    page_wf_ids = [wf.workflow_id for wf in page_workflows]
+    all_steps = await WorkflowStep.find({"workflow_id": {"$in": page_wf_ids}}).to_list() if page_wf_ids else []
+    steps_by_wf: dict = {}
+    for step in all_steps:
+        steps_by_wf.setdefault(step.workflow_id, []).append(step_to_schema(step))
+
+    valid_statuses = {s.value for s in WorkflowStatus}
     workflow_responses = []
-    for workflow in workflows:
-        workflow_responses.append(await convert_workflow_to_response(workflow))
-    
+    for wf in page_workflows:
+        wf_status = WorkflowStatus(wf.status) if wf.status in valid_statuses else WorkflowStatus.ACTIVE
+        workflow_responses.append(WorkflowResponse(
+            workflow_id=wf.workflow_id,
+            name=wf.name,
+            description=wf.description,
+            metadata=wf.metadata,
+            version=wf.version,
+            status=wf_status,
+            steps=steps_by_wf.get(wf.workflow_id, []),
+            start_step_id=getattr(wf, 'start_step_id', None),
+            created_at=wf.created_at,
+            updated_at=wf.updated_at
+        ))
+
     return WorkflowListResponse(
         workflows=workflow_responses,
         total=total,
@@ -141,12 +153,32 @@ async def list_workflows(
 
 @router.get("/{workflow_id}", response_model=WorkflowResponse)
 async def get_workflow(workflow_id: str):
-    """Get a specific workflow"""
+    """Get a specific workflow with steps from DB or DAGBag fallback"""
     workflow = await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    return await convert_workflow_to_response(workflow)
+
+    response = await convert_workflow_to_response(workflow)
+
+    # If no steps in DB, try to build them from DAGBag
+    if not response.steps:
+        from ...services.workflow_service import workflow_service
+        dag = await workflow_service.get_dag(workflow_id)
+        if dag:
+            for task_id, task in dag.tasks.items():
+                step_type = workflow_service.get_step_type_from_operator(task)
+                response.steps.append(StepSchema(
+                    step_id=task_id,
+                    name=task.name,
+                    step_type=step_type,
+                    description=f"{task.__class__.__name__} operation",
+                    required_inputs=[],
+                    optional_inputs=[],
+                    next_steps=[t.task_id for t in task.downstream_tasks],
+                    operator_class=task.__class__.__name__
+                ))
+
+    return response
 
 
 @router.put("/{workflow_id}", response_model=WorkflowResponse)
