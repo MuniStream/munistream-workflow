@@ -139,7 +139,8 @@ async def create_workflow_instance(
 
 @router.get("/{instance_id}", response_model=InstanceResponse)
 async def get_instance(
-    db_instance: WorkflowInstance = Depends(require_instance_access)
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get DAG instance details with role-based access control"""
     instance_id = db_instance.instance_id
