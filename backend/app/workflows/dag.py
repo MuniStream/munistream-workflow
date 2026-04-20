@@ -233,6 +233,7 @@ class DAGInstance:
         self.task_states: Dict[str, Any] = {}
         self.completed_tasks: Set[str] = set()
         self.failed_tasks: Set[str] = set()
+        self.skipped_tasks: Set[str] = set()
         
         # Timestamps
         self.created_at = datetime.utcnow()
@@ -253,17 +254,23 @@ class DAGInstance:
     def get_executable_tasks(self) -> List[str]:
         """
         Get tasks that can be executed now.
-        
+
+        A task is executable when all its upstream predecessors are resolved
+        (completed or skipped) and at least one upstream completed. Tasks whose
+        upstreams are ALL skipped are themselves skipped via propagate_skips().
+
         Returns:
             List of task IDs ready for execution
         """
         executable = []
-        
+
         for task_id in self.dag.tasks.keys():
-            # Skip if already completed or failed
-            if task_id in self.completed_tasks or task_id in self.failed_tasks:
+            # Skip if already completed, failed, or short-circuited
+            if (task_id in self.completed_tasks
+                    or task_id in self.failed_tasks
+                    or task_id in self.skipped_tasks):
                 continue
-            
+
             # Skip if currently executing (but NOT if waiting - waiting tasks can be resumed)
             if self.task_states[task_id]["status"] == "executing":
                 continue
@@ -273,18 +280,59 @@ class DAGInstance:
                 executable.append(task_id)
                 continue
 
-            # Check if all upstream dependencies are completed (not waiting!)
             upstream_tasks = list(self.dag.graph.predecessors(task_id))
-            # All upstream tasks must be completed AND not currently waiting
-            all_upstream_done = all(
-                upstream in self.completed_tasks and
+
+            # All upstream tasks must be resolved (completed or skipped) and
+            # none of them currently waiting.
+            all_upstream_resolved = all(
+                (upstream in self.completed_tasks or upstream in self.skipped_tasks) and
                 self.task_states.get(upstream, {}).get("status") != "waiting"
                 for upstream in upstream_tasks
             )
-            if all_upstream_done:
+            # At least one upstream must have completed (avoid running a task
+            # that only has skipped upstreams — those cascade-skip via propagate_skips).
+            any_upstream_completed = (
+                not upstream_tasks
+                or any(u in self.completed_tasks for u in upstream_tasks)
+            )
+            if all_upstream_resolved and any_upstream_completed:
                 executable.append(task_id)
-        
+
         return executable
+
+    def propagate_skips(self) -> Set[str]:
+        """
+        Cascade skip status: a task whose direct upstreams are ALL skipped
+        (and has at least one upstream) is itself marked skipped.
+
+        Iterates until no more cascades are found so long chains of skipped
+        branches are fully collapsed in one call.
+
+        Returns:
+            Set of task IDs that were newly skipped in this call.
+        """
+        newly_skipped: Set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for task_id in self.dag.tasks.keys():
+                if (task_id in self.completed_tasks
+                        or task_id in self.failed_tasks
+                        or task_id in self.skipped_tasks):
+                    continue
+                status = self.task_states.get(task_id, {}).get("status")
+                if status in ("executing", "waiting"):
+                    continue
+                upstream_tasks = list(self.dag.graph.predecessors(task_id))
+                if not upstream_tasks:
+                    continue
+                if all(u in self.skipped_tasks for u in upstream_tasks):
+                    self.skipped_tasks.add(task_id)
+                    self.task_states[task_id]["status"] = "skipped"
+                    self.task_states[task_id]["completed_at"] = datetime.utcnow()
+                    newly_skipped.add(task_id)
+                    changed = True
+        return newly_skipped
     
     def update_task_status(
         self,
@@ -332,20 +380,25 @@ class DAGInstance:
         elif status == "failed":
             self.task_states[task_id]["completed_at"] = datetime.utcnow()
             self.failed_tasks.add(task_id)
-    
+
+        elif status == "skipped":
+            self.task_states[task_id]["completed_at"] = datetime.utcnow()
+            self.skipped_tasks.add(task_id)
+
     def is_completed(self) -> bool:
-        """Check if all tasks are completed"""
-        return len(self.completed_tasks) == len(self.dag.tasks)
+        """Check if all tasks are resolved (completed or skipped)."""
+        return (len(self.completed_tasks) + len(self.skipped_tasks)) == len(self.dag.tasks)
     
     def has_failed(self) -> bool:
         """Check if any task has failed"""
         return len(self.failed_tasks) > 0
     
     def get_progress_percentage(self) -> float:
-        """Get completion percentage"""
+        """Get completion percentage (completed + skipped count as finished)."""
         if not self.dag.tasks:
             return 0.0
-        return (len(self.completed_tasks) / len(self.dag.tasks)) * 100
+        resolved = len(self.completed_tasks) + len(self.skipped_tasks)
+        return (resolved / len(self.dag.tasks)) * 100
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert instance to dictionary"""

@@ -276,6 +276,7 @@ class WorkflowInstance(Document):
     # Progress tracking
     completed_steps: List[str] = Field(default_factory=list, description="List of completed step IDs")
     failed_steps: List[str] = Field(default_factory=list, description="List of failed step IDs")
+    skipped_steps: List[str] = Field(default_factory=list, description="List of skipped step IDs (short-circuit or cascaded)")
     pending_approvals: List[str] = Field(default_factory=list, description="Steps waiting for approval")
     task_states: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Individual task state data including output_data")
     

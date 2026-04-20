@@ -198,8 +198,9 @@ class DAGExecutor:
             # Restore task states from database
             dag_instance.completed_tasks = set(db_instance.completed_steps or [])
             dag_instance.failed_tasks = set(db_instance.failed_steps or [])
+            dag_instance.skipped_tasks = set(getattr(db_instance, "skipped_steps", None) or [])
             dag_instance.current_task = db_instance.current_step
-            
+
             # Initialize task states for all tasks
             for task_id in dag.tasks.keys():
                 if task_id == db_instance.current_step and task_id not in dag_instance.completed_tasks:
@@ -209,6 +210,8 @@ class DAGExecutor:
                     dag_instance.task_states[task_id] = {"status": "completed"}
                 elif task_id in dag_instance.failed_tasks:
                     dag_instance.task_states[task_id] = {"status": "failed"}
+                elif task_id in dag_instance.skipped_tasks:
+                    dag_instance.task_states[task_id] = {"status": "skipped"}
                 else:
                     dag_instance.task_states[task_id] = {"status": "pending"}
             
@@ -219,6 +222,7 @@ class DAGExecutor:
             # Instance exists in memory, but we need to sync task states with database
             dag_instance.completed_tasks = set(db_instance.completed_steps or [])
             dag_instance.failed_tasks = set(db_instance.failed_steps or [])
+            dag_instance.skipped_tasks = set(getattr(db_instance, "skipped_steps", None) or [])
             dag_instance.current_task = db_instance.current_step
 
             # Update task states for waiting tasks
@@ -403,6 +407,18 @@ class DAGExecutor:
                     print(f"[EXECUTOR] Task failure error: {getattr(task._last_result, 'error', 'No error message')}")
                 dag_instance.update_task_status(task_id, "failed")
                 break  # Stop processing, task failed
+            elif result == TaskStatus.SKIP:
+                # Short-circuit: this task and its skip-only descendants drop out
+                # of the run. Downstream tasks that also have a completed upstream
+                # still execute (convergence), so this implements Airflow-like
+                # trigger semantics for ShortCircuitOperator branching.
+                dag_instance.update_task_status(task_id, "skipped")
+                newly_skipped = dag_instance.propagate_skips()
+                if newly_skipped:
+                    logger.info(
+                        f"Cascaded skip from {task_id} to descendants: {sorted(newly_skipped)}",
+                        extra={"instance_id": instance_id, "source_task": task_id},
+                    )
             elif result == TaskStatus.RETRY:
                 # Handle workflow recovery logic if next_task is specified
                 if hasattr(task, '_last_result') and task._last_result and hasattr(task._last_result, 'next_task') and task._last_result.next_task:
@@ -545,6 +561,7 @@ class DAGExecutor:
         db_instance.current_step = dag_instance.current_task
         db_instance.completed_steps = list(dag_instance.completed_tasks)
         db_instance.failed_steps = list(dag_instance.failed_tasks)
+        db_instance.skipped_steps = list(dag_instance.skipped_tasks)
         db_instance.updated_at = datetime.utcnow()
 
         if new_status:
@@ -568,11 +585,14 @@ class DAGExecutor:
 
         clear_tasks = recovery_data.get("clear_tasks", [])
 
-        # Clear specified tasks from completed_tasks to allow re-execution
+        # Clear specified tasks from completed/skipped to allow re-execution
         for clear_task in clear_tasks:
             if clear_task in dag_instance.completed_tasks:
                 dag_instance.completed_tasks.remove(clear_task)
                 logger.debug(f"Cleared task {clear_task} from completed tasks")
+            if clear_task in dag_instance.skipped_tasks:
+                dag_instance.skipped_tasks.remove(clear_task)
+                logger.debug(f"Cleared task {clear_task} from skipped tasks")
 
             # Reset task state to pending
             if clear_task in dag_instance.task_states:
@@ -601,11 +621,13 @@ class DAGExecutor:
             "error": None
         }
 
-        # Remove next_task from completed and failed tasks
+        # Remove next_task from completed, failed, and skipped tasks
         if next_task_id in dag_instance.completed_tasks:
             dag_instance.completed_tasks.remove(next_task_id)
         if next_task_id in dag_instance.failed_tasks:
             dag_instance.failed_tasks.remove(next_task_id)
+        if next_task_id in dag_instance.skipped_tasks:
+            dag_instance.skipped_tasks.remove(next_task_id)
 
         # Preserve retry context history
         if "retries" not in dag_instance.context:
@@ -644,11 +666,13 @@ class DAGExecutor:
             all_downstream_tasks.add(next_task_id)  # Include next_task itself
 
             for task_to_reset in all_downstream_tasks:
-                # Remove from completed/failed sets
+                # Remove from completed/failed/skipped sets
                 if task_to_reset in dag_instance.completed_tasks:
                     dag_instance.completed_tasks.remove(task_to_reset)
                 if task_to_reset in dag_instance.failed_tasks:
                     dag_instance.failed_tasks.remove(task_to_reset)
+                if task_to_reset in dag_instance.skipped_tasks:
+                    dag_instance.skipped_tasks.remove(task_to_reset)
 
                 # Reset task state
                 dag_instance.task_states[task_to_reset] = {
