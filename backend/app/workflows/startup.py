@@ -44,6 +44,12 @@ async def initialize_workflow_system():
         print("✅ DAG executor started successfully")
         logger.info("DAG executor started successfully")
 
+        # Wire notification dispatcher to the running event manager
+        from ..notifier.hook import register_notification_dispatcher
+
+        await register_notification_dispatcher(workflow_service.executor.event_manager)
+        print("✅ Notification dispatcher registered")
+
         print("✅ Workflow system initialization completed")
         logger.info("Workflow system initialization completed")
         

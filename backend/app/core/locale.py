@@ -17,7 +17,7 @@ def get_locale_from_request(
     1. Query parameter ?locale=es or ?lang=es
     2. User preference from database (if authenticated)
     3. Accept-Language header
-    4. Default locale (en)
+    4. Default locale (es)
     
     Args:
         request: FastAPI request object

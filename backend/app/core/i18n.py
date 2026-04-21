@@ -17,7 +17,7 @@ class TranslationService:
     
     def __init__(self):
         self.translations: Dict[str, Dict[str, str]] = {}
-        self.default_locale = "en"
+        self.default_locale = "es"
         self.supported_locales = ["en", "es"]
         self.load_translations()
     

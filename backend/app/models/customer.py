@@ -9,6 +9,8 @@ from enum import Enum
 from pydantic import BaseModel, Field, EmailStr
 from beanie import Document, Indexed
 
+from ..notifier.models import NotificationPreferences
+
 
 class CustomerStatus(str, Enum):
     """Customer account status"""
@@ -39,6 +41,8 @@ class Customer(Document):
     
     # Metadata
     preferences: Dict[str, Any] = Field(default_factory=dict)
+    notification_preferences: NotificationPreferences = Field(default_factory=NotificationPreferences)
+    preferred_language: str = Field(default="es", description="Locale for notifications and portal UI")
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
     # Timestamps

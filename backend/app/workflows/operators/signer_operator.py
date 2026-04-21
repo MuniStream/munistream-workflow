@@ -38,7 +38,7 @@ class SignerOperator(BaseOperator):
         signature_metadata: Optional[Dict[str, Any]] = None,
         hash_algorithm: str = "SHA256",
         required_cert_type: Optional[str] = None,  # "personal" or "organizational"
-        timeout_minutes: int = 30,
+        timeout_minutes: int = None,
         **kwargs
     ):
         """

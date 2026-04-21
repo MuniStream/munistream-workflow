@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     TESSERACT_CMD: Optional[str] = None  # Path to tesseract executable
     OCR_LANGUAGES: str = "eng+spa"  # English and Spanish
 
+    # Notifications
+    REDIS_URL: str = "redis://redis:6379"
+    NOTIFICATION_SECRET_KEY: Optional[str] = None
+    BAILEYS_BASE_URL: Optional[str] = None
+    BAILEYS_API_KEY: Optional[str] = None
+    NOTIFICATION_RATE_LIMIT_PER_HOUR: int = 10
+    NOTIFICATION_MAX_ATTEMPTS: int = 5
+
     # Wallet Configuration
     APPLE_TEAM_ID: Optional[str] = None
     APPLE_PASS_TYPE_ID: Optional[str] = None

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, assignments, admin_users, admin_teams, admin_sync, signatures, verify, wallet, catalogs, admin_catalogs, files
+from .endpoints import workflows, instances, documents, admin, auth_keycloak, public, plugins, categories, teams, assignments, admin_users, admin_teams, admin_sync, signatures, verify, wallet, catalogs, admin_catalogs, files, notifications, me, me_profile, admin_profile_fields
 from .v1 import performance, entities
 
 api_router = APIRouter()
@@ -21,12 +21,16 @@ api_router.include_router(wallet.router, tags=["wallet"])
 api_router.include_router(assignments.router, prefix="/assignments", tags=["assignments"])
 api_router.include_router(signatures.router, prefix="/signatures", tags=["signatures"])
 api_router.include_router(files.router, prefix="/files", tags=["files"])
+api_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
+api_router.include_router(me.router, prefix="/me", tags=["citizen"])
+api_router.include_router(me_profile.router, prefix="/me/profile", tags=["citizen"])
 
 # Administrative endpoints (hidden from schema)
 api_router.include_router(admin_users.router, prefix="/admin", tags=["admin-users"])
 api_router.include_router(admin_teams.router, prefix="/admin", tags=["admin-teams"])
 api_router.include_router(admin_sync.router, prefix="/admin", tags=["admin-sync"])
 api_router.include_router(admin_catalogs.router, prefix="/admin", tags=["admin-catalogs"])
+api_router.include_router(admin_profile_fields.router, prefix="/admin", tags=["admin-profile-fields"])
 
 # Public catalog endpoints
 api_router.include_router(catalogs.router, tags=["catalogs"])

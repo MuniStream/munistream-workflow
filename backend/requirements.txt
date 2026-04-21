@@ -30,6 +30,8 @@ email-validator==2.1.0
 xmltodict==0.13.0
 lxml==4.9.3
 redis==5.0.1
+arq==0.25.0
+aiosmtplib==3.0.2
 
 # Catalog Connectors
 asyncpg==0.29.0

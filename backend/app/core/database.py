@@ -10,7 +10,9 @@ from ..models.workflow import (
     StepExecution,
     ApprovalRequest,
     WorkflowAuditLog,
-    IntegrationLog
+    IntegrationLog,
+    WorkflowEvent,
+    WorkflowHook,
 )
 from ..models.document import DocumentModel, DocumentFolderModel, DocumentShareModel
 from ..models.user import UserModel, RefreshTokenModel
@@ -20,6 +22,14 @@ from ..models.customer import Customer, CustomerSession
 from ..models.legal_entity import EntityType, LegalEntity
 from ..models.instance_log import InstanceLog
 from ..models.catalog import Catalog, CatalogData
+from ..models.profile_field_definition import ProfileFieldDefinition
+from ..models.user_profile import UserProfile
+from ..notifier.models import (
+    NotificationChannelConfig,
+    NotificationTemplate,
+    NotificationTrigger,
+    NotificationDelivery,
+)
 
 
 class Database:
@@ -46,6 +56,8 @@ async def connect_to_mongo():
             ApprovalRequest,
             WorkflowAuditLog,
             IntegrationLog,
+            WorkflowEvent,
+            WorkflowHook,
             DocumentModel,
             DocumentFolderModel,
             DocumentShareModel,
@@ -59,7 +71,13 @@ async def connect_to_mongo():
             LegalEntity,
             InstanceLog,
             Catalog,
-            CatalogData
+            CatalogData,
+            ProfileFieldDefinition,
+            UserProfile,
+            NotificationChannelConfig,
+            NotificationTemplate,
+            NotificationTrigger,
+            NotificationDelivery,
         ]
     )
     
