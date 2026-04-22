@@ -181,7 +181,15 @@ class S3UploadOperator(BaseOperator):
         This method handles the common pattern where UserInputOperator stores files
         in task output data (e.g., collect_document_data) but S3UploadOperator
         needs to access them by field name.
+
+        Supports nested paths like ``propietarios[].identificacion_files`` which
+        returns a flat list of all files (see ``_get_grouped_files_from_context``
+        when the per-item grouping is needed).
         """
+        if "[]" in file_source:
+            grouped = self._get_grouped_files_from_context(context, file_source)
+            return [f for group in grouped for f in group]
+
         # First try direct access
         files_data = context.get(file_source)
         if files_data:
@@ -204,6 +212,44 @@ class S3UploadOperator(BaseOperator):
 
         return []
 
+    def _get_grouped_files_from_context(
+        self, context: Dict[str, Any], file_source: str
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Resolve a nested path like ``propietarios[].identificacion_files`` into a
+        list of file groups, one group per item of the parent collection.
+
+        Only supports a single ``[]`` marker. Returns an empty outer list when the
+        parent collection cannot be found.
+        """
+        parent_key, _, child_key = file_source.partition("[]")
+        parent_key = parent_key.rstrip(".")
+        child_key = child_key.lstrip(".")
+
+        parent_value = context.get(parent_key)
+        if parent_value is None:
+            for key, value in context.items():
+                if key.endswith("_data") and isinstance(value, dict) and parent_key in value:
+                    parent_value = value[parent_key]
+                    break
+
+        if not isinstance(parent_value, list):
+            return []
+
+        groups: List[List[Dict[str, Any]]] = []
+        for item in parent_value:
+            if not isinstance(item, dict):
+                groups.append([])
+                continue
+            files = item.get(child_key) if child_key else item
+            if files is None:
+                groups.append([])
+            elif isinstance(files, list):
+                groups.append(files)
+            else:
+                groups.append([files])
+        return groups
+
     def _clean_base64_from_context(self, context: Dict[str, Any]) -> None:
         """
         Remove base64 and content fields from context after successful upload.
@@ -212,31 +258,44 @@ class S3UploadOperator(BaseOperator):
         Args:
             context: Execution context to clean
         """
+        def strip(file_data: Any) -> None:
+            if isinstance(file_data, list):
+                for f in file_data:
+                    strip(f)
+            elif isinstance(file_data, dict):
+                file_data.pop('base64', None)
+                file_data.pop('content', None)
+
+        if "[]" in self.file_source:
+            parent_key, _, child_key = self.file_source.partition("[]")
+            parent_key = parent_key.rstrip(".")
+            child_key = child_key.lstrip(".")
+
+            def clean_parent(parent_value: Any) -> None:
+                if not isinstance(parent_value, list):
+                    return
+                for item in parent_value:
+                    if isinstance(item, dict) and child_key in item:
+                        strip(item[child_key])
+
+            clean_parent(context.get(parent_key))
+            for key, value in context.items():
+                if key.endswith('_data') and isinstance(value, dict) and parent_key in value:
+                    clean_parent(value[parent_key])
+            # Also clean the raw submitted _input payload if still present
+            for key, value in context.items():
+                if key.endswith('_input') and isinstance(value, dict) and parent_key in value:
+                    clean_parent(value[parent_key])
+            return
+
         # Clean direct file source
         if self.file_source in context:
-            files_data = context[self.file_source]
-            if isinstance(files_data, list):
-                for file_data in files_data:
-                    if isinstance(file_data, dict):
-                        file_data.pop('base64', None)
-                        file_data.pop('content', None)
-            elif isinstance(files_data, dict):
-                files_data.pop('base64', None)
-                files_data.pop('content', None)
+            strip(context[self.file_source])
 
         # Clean task output data (from UserInputOperator)
         for key, value in context.items():
-            if key.endswith('_data') and isinstance(value, dict):
-                if self.file_source in value:
-                    file_data = value[self.file_source]
-                    if isinstance(file_data, list):
-                        for f in file_data:
-                            if isinstance(f, dict):
-                                f.pop('base64', None)
-                                f.pop('content', None)
-                    elif isinstance(file_data, dict):
-                        file_data.pop('base64', None)
-                        file_data.pop('content', None)
+            if key.endswith('_data') and isinstance(value, dict) and self.file_source in value:
+                strip(value[self.file_source])
 
     def _upload_file_to_s3(
         self,
@@ -441,9 +500,15 @@ class S3UploadOperator(BaseOperator):
             self.executor = ThreadPoolExecutor(max_workers=5)
 
             # Get files from context - support nested keys for task output data
-            files_data = self._get_files_from_context(context, self.file_source)
-            if not isinstance(files_data, list):
-                files_data = [files_data]
+            is_grouped = "[]" in self.file_source
+            if is_grouped:
+                grouped_files = self._get_grouped_files_from_context(context, self.file_source)
+                files_data = [f for group in grouped_files for f in group]
+            else:
+                grouped_files = None
+                files_data = self._get_files_from_context(context, self.file_source)
+                if not isinstance(files_data, list):
+                    files_data = [files_data]
 
             if not files_data:
                 error_msg = f"No files found in context key '{self.file_source}'. Expected files for upload but none were provided."
@@ -481,6 +546,19 @@ class S3UploadOperator(BaseOperator):
             if successful_uploads:
                 upload_summary["s3_urls"] = [f["url"] for f in successful_uploads]
                 upload_summary["s3_keys"] = [f["s3_key"] for f in successful_uploads]
+
+            if is_grouped and grouped_files is not None:
+                grouped_urls: List[List[str]] = []
+                cursor = 0
+                for group in grouped_files:
+                    group_urls: List[str] = []
+                    for _ in group:
+                        r = results[cursor] if cursor < len(results) else None
+                        cursor += 1
+                        if r and r.get("success"):
+                            group_urls.append(r["url"])
+                    grouped_urls.append(group_urls)
+                upload_summary["s3_urls_by_group"] = grouped_urls
 
             # Also store with task-specific key to prevent conflicts when multiple S3 operators are used
             task_specific_key = f"{self.task_id}_result"
