@@ -24,7 +24,8 @@ from ...models.workflow import (
     WorkflowStep,
     ApprovalRequest as ApprovalModel,
     AssignmentStatus,
-    AssignmentType
+    AssignmentType,
+    EventType,
 )
 from ...core.database import get_database
 from ...workflows.dag import DAGInstance, InstanceStatus
@@ -1974,7 +1975,25 @@ async def request_modifications_by_reviewer(
         )
     
     await instance.save()
-    
+
+    try:
+        await workflow_service.executor.event_manager.publish_event(
+            event_type=EventType.MODIFICATION_REQUESTED,
+            workflow_id=instance.workflow_id,
+            instance_id=instance_id,
+            user_id=instance.user_id,
+            event_data={
+                "current_step": instance.current_step,
+                "modifications": modifications,
+                "comments": comments,
+                "requested_by": user_id,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to publish MODIFICATION_REQUESTED for instance %s", instance_id
+        )
+
     return {
         "success": True,
         "message": "Modifications requested from citizen",

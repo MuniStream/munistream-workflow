@@ -557,8 +557,11 @@ class DAGExecutor:
         dag_instance.context["instance_id"] = instance_id
         dag_instance.context["workflow_id"] = dag_instance.dag.dag_id
 
+        previous_step = db_instance.current_step
+        new_step = dag_instance.current_task
+
         db_instance.context = dag_instance.context
-        db_instance.current_step = dag_instance.current_task
+        db_instance.current_step = new_step
         db_instance.completed_steps = list(dag_instance.completed_tasks)
         db_instance.failed_steps = list(dag_instance.failed_tasks)
         db_instance.skipped_steps = list(dag_instance.skipped_tasks)
@@ -571,6 +574,23 @@ class DAGExecutor:
             db_instance.completed_at = dag_instance.completed_at
 
         await db_instance.save()
+
+        if new_step and new_step != previous_step:
+            try:
+                await self.event_manager.publish_event(
+                    event_type=EventType.STEP_ADVANCED,
+                    workflow_id=db_instance.workflow_id,
+                    instance_id=instance_id,
+                    user_id=db_instance.user_id,
+                    event_data={
+                        "previous_step": previous_step,
+                        "current_step": new_step,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to publish STEP_ADVANCED for instance %s", instance_id
+                )
 
     async def _execute_retry_workflow_reset(self, dag_instance, db_instance, instance_id,
                                           next_task_id, failed_task_id, recovery_data, recovery_action):

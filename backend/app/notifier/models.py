@@ -23,10 +23,24 @@ class DeliveryStatus(str, Enum):
     SKIPPED_OPT_OUT = "skipped_opt_out"
 
 
+class NotificationChannelToggle(BaseModel):
+    """Per-notification opt-in flags, one bit per channel."""
+    email: bool = True
+    whatsapp: bool = True
+
+
 class NotificationPreferences(BaseModel):
-    """Embedded in Customer. Defaults opt everyone in; the citizen can opt out."""
+    """Embedded in Customer. Defaults opt everyone in; the citizen can opt out.
+
+    `email_enabled` / `whatsapp_enabled` act as master switches: when off, the
+    whole channel is blocked regardless of per-notification toggles.
+    `per_notification` stores granular overrides keyed by `template_key`
+    (for system notifications the key matches the `SystemNotification.key`).
+    Absence means opt-in by default.
+    """
     email_enabled: bool = True
     whatsapp_enabled: bool = True
+    per_notification: Dict[str, NotificationChannelToggle] = Field(default_factory=dict)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -101,7 +115,10 @@ class NotificationTrigger(Document):
     """Binds a workflow event (optionally scoped to a step) to a template + channels."""
 
     tenant_id: str = _tenant_id_field()
-    workflow_id: str
+    workflow_id: Optional[str] = Field(
+        default=None,
+        description="When None, the trigger fires for any workflow (system wildcard)",
+    )
     step_id: Optional[str] = Field(
         default=None,
         description="When None, the trigger fires regardless of step",
@@ -113,6 +130,10 @@ class NotificationTrigger(Document):
     template_key: str
     channels: List[NotificationChannel] = Field(default_factory=list)
     active: bool = True
+    is_system: bool = Field(
+        default=False,
+        description="System-seeded trigger. Admin can toggle `active` but should not delete.",
+    )
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -129,6 +150,7 @@ class NotificationTrigger(Document):
                 ("active", 1),
             ]),
             IndexModel([("tenant_id", 1), ("workflow_id", 1)]),
+            IndexModel([("tenant_id", 1), ("is_system", 1), ("event_type", 1)]),
         ]
 
 
@@ -177,6 +199,7 @@ class NotificationDelivery(Document):
 __all__ = [
     "NotificationChannel",
     "DeliveryStatus",
+    "NotificationChannelToggle",
     "NotificationPreferences",
     "NotificationChannelConfig",
     "NotificationTemplate",

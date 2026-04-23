@@ -55,6 +55,8 @@ class EventType(str, Enum):
     ENTITY_CREATED = "entity_created"
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_COMPLETED = "approval_completed"
+    STEP_ADVANCED = "step_advanced"
+    MODIFICATION_REQUESTED = "modification_requested"
 
 
 class WorkflowHook(Document):

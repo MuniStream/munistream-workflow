@@ -50,6 +50,13 @@ async def initialize_workflow_system():
         await register_notification_dispatcher(workflow_service.executor.event_manager)
         print("✅ Notification dispatcher registered")
 
+        # Seed system-shipped notifications (idempotent, per tenant)
+        from ..core.config import settings
+        from ..notifier.seed import seed_system_notifications
+
+        await seed_system_notifications(settings.TENANT_ID)
+        print(f"✅ System notifications seeded for tenant: {settings.TENANT_ID}")
+
         print("✅ Workflow system initialization completed")
         logger.info("Workflow system initialization completed")
         

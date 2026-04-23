@@ -60,9 +60,12 @@ class NotificationDispatcher:
         triggers = await NotificationTrigger.find(
             {
                 "tenant_id": tenant_id,
-                "workflow_id": event.workflow_id,
                 "event_type": event_type_value,
                 "active": True,
+                "$or": [
+                    {"workflow_id": event.workflow_id},
+                    {"workflow_id": None},
+                ],
             }
         ).to_list()
 
@@ -88,7 +91,7 @@ class NotificationDispatcher:
                     )
                     continue
 
-                opted_in = self._citizen_opted_in(customer, channel)
+                opted_in = self._citizen_opted_in(customer, channel, trigger.template_key)
                 if not opted_in:
                     await self._persist_delivery(
                         tenant_id=tenant_id,
@@ -176,15 +179,27 @@ class NotificationDispatcher:
         return None
 
     @staticmethod
-    def _citizen_opted_in(customer: Optional[Customer], channel: NotificationChannel) -> bool:
+    def _citizen_opted_in(
+        customer: Optional[Customer],
+        channel: NotificationChannel,
+        template_key: str,
+    ) -> bool:
+        """Master switch gates the channel; then per-notification override, then default opt-in."""
         if not customer:
             return False
         prefs = customer.notification_preferences
+        if channel == NotificationChannel.EMAIL and not prefs.email_enabled:
+            return False
+        if channel == NotificationChannel.WHATSAPP and not prefs.whatsapp_enabled:
+            return False
+        override = prefs.per_notification.get(template_key)
+        if override is None:
+            return True
         if channel == NotificationChannel.EMAIL:
-            return prefs.email_enabled
+            return override.email
         if channel == NotificationChannel.WHATSAPP:
-            return prefs.whatsapp_enabled
-        return False
+            return override.whatsapp
+        return True
 
     @staticmethod
     def _build_context(event: WorkflowEvent, customer: Optional[Customer]) -> Dict[str, Any]:
