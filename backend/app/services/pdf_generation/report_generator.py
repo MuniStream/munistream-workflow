@@ -28,6 +28,7 @@ import jinja2
 from .template_engine import TemplateEngine
 from .qr_generator import QRCodeGenerator
 from .data_formatter import DataFormatter
+from .plugins import EntityContextResolverRegistry
 from ...models.legal_entity import LegalEntity
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,35 @@ class EntityReportGenerator:
             if file_previews:
                 data["file_previews"] = file_previews
 
+        # Context resolver registrado por tenant (catastro inyecta `oficio`
+        # desde su catálogo YAML; otros tenants podrán usar el mismo hook).
+        extra_context = self._resolve_tenant_context(entity)
+        if extra_context:
+            data.update(extra_context)
+
         return data
+
+    def _resolve_tenant_context(self, entity: LegalEntity) -> Optional[Dict[str, Any]]:
+        """Llama al EntityContextResolver registrado por el tenant (si aplica).
+
+        El tenant registra su resolver en `EntityContextResolverRegistry`
+        bajo la key `entity_display_config.oficio_catalog`. Retorna un dict
+        que se fusiona en el contexto del template (p. ej. `{"oficio": {...}}`).
+        """
+        display_config = getattr(entity, "entity_display_config", None) or {}
+        catalog_name = display_config.get("oficio_catalog")
+        if not catalog_name:
+            return None
+
+        resolver = EntityContextResolverRegistry.get(catalog_name)
+        if resolver is None:
+            return None
+
+        try:
+            return resolver(entity)
+        except Exception as exc:
+            logger.exception("Error en EntityContextResolver '%s': %s", catalog_name, exc)
+            return None
 
     async def _process_entity_files(self, entity) -> Dict[str, Any]:
         """Process file_url and file_metadata fields from entity to generate previews"""

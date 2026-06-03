@@ -6,7 +6,9 @@ import os
 from typing import Any, Dict, Optional
 from pathlib import Path
 import jinja2
-from jinja2 import Environment, FileSystemLoader, select_autoescape, Template
+from jinja2 import ChoiceLoader, Environment, FileSystemLoader, select_autoescape, Template
+
+from .plugins import TemplateDirRegistry
 
 
 class TemplateEngine:
@@ -29,9 +31,15 @@ class TemplateEngine:
         self.template_dir = Path(template_dir)
         self._ensure_template_dir()
 
-        # Setup Jinja2 environment
+        # Componer loader con directorios adicionales registrados por tenants.
+        # El default va primero para que los templates shared ganen a homónimos.
+        loaders = [FileSystemLoader(str(self.template_dir))]
+        for extra in TemplateDirRegistry.dirs():
+            if extra.exists():
+                loaders.append(FileSystemLoader(str(extra)))
+
         self.env = Environment(
-            loader=FileSystemLoader(str(self.template_dir)),
+            loader=ChoiceLoader(loaders) if len(loaders) > 1 else loaders[0],
             autoescape=select_autoescape(['html', 'xml']),
             trim_blocks=True,
             lstrip_blocks=True
@@ -53,6 +61,7 @@ class TemplateEngine:
         self.env.filters['format_field'] = self._format_field_name
         self.env.filters['format_value'] = self._format_value
         self.env.filters['format_date'] = self._format_date
+        self.env.filters['format_date_es'] = self._format_date_es
 
     def _format_field_name(self, field_name: str) -> str:
         """Format field name for display"""
@@ -81,6 +90,32 @@ class TemplateEngine:
         elif isinstance(date_value, str):
             return date_value.split("T")[0] if "T" in date_value else date_value
         return str(date_value)
+
+    _MESES_ES = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    ]
+
+    def _format_date_es(self, date_value) -> str:
+        """Formato institucional en español: '23 de abril de 2026'."""
+        from datetime import datetime, date
+
+        dt = None
+        if isinstance(date_value, datetime):
+            dt = date_value
+        elif isinstance(date_value, date):
+            dt = datetime(date_value.year, date_value.month, date_value.day)
+        elif isinstance(date_value, str) and date_value:
+            try:
+                dt = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+            except ValueError:
+                try:
+                    dt = datetime.strptime(date_value[:10], "%Y-%m-%d")
+                except ValueError:
+                    return date_value
+        if dt is None:
+            return str(date_value)
+        return f"{dt.day} de {self._MESES_ES[dt.month - 1]} de {dt.year}"
 
     async def render_entity(
         self,
