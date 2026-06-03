@@ -388,31 +388,59 @@ class ContextExplorerValidator(BaseOperator):
         }
 
     def _build_form_data_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Build form data section"""
+        """Build form data section, filtering metadata that ya está expuesta en otras secciones."""
 
-        form_data = {}
+        # Campos pre-llenados desde el perfil del ciudadano que ya se muestran en la
+        # sección de información de usuario; no se repiten en form data.
+        profile_fields_to_skip = {"direccion", "rfc", "curp", "email", "phone",
+                                  "telefono", "nombre", "name", "customer_id",
+                                  "customer_email", "customer_name", "user_id"}
 
-        # Look for common form data patterns
+        def _is_file_metadata(value: Any) -> bool:
+            """Detecta dicts que son metadata de archivos (los archivos se muestran en S3 Uploads)."""
+            return (
+                isinstance(value, dict)
+                and "filename" in value
+                and ("content_type" in value or "size" in value or "url" in value)
+            )
+
+        def _clean(payload: Dict[str, Any]) -> Dict[str, Any]:
+            cleaned: Dict[str, Any] = {}
+            for k, v in payload.items():
+                if k in profile_fields_to_skip:
+                    continue
+                if k.endswith("_file") and _is_file_metadata(v):
+                    continue
+                if _is_file_metadata(v):
+                    continue
+                cleaned[k] = v
+            return cleaned
+
+        form_data: Dict[str, Any] = {}
+
         form_patterns = [
             ("collect_concession_data_data", "Concession Data"),
             ("collect_property_data_data", "Property Data"),
             ("collect_permit_data_data", "Permit Data"),
             ("form_data", "Form Data"),
-            ("user_input", "User Input")
+            ("user_input", "User Input"),
         ]
 
         for pattern_key, pattern_label in form_patterns:
             if pattern_key in target_context:
                 data = target_context[pattern_key]
                 if isinstance(data, dict) and data:
-                    form_data[pattern_label] = data
+                    cleaned = _clean(data)
+                    if cleaned:
+                        form_data[pattern_label] = cleaned
 
-        # Also look for any field ending with '_data'
         for key, value in target_context.items():
-            if key.endswith('_data') and isinstance(value, dict) and value:
+            if key.endswith("_data") and isinstance(value, dict) and value:
                 if key not in [p[0] for p in form_patterns]:
-                    label = key.replace('_', ' ').title()
-                    form_data[label] = value
+                    cleaned = _clean(value)
+                    if cleaned:
+                        label = key.replace("_", " ").title()
+                        form_data[label] = cleaned
 
         if not form_data:
             return None
@@ -420,7 +448,7 @@ class ContextExplorerValidator(BaseOperator):
         return {
             "title": "📝 Form Submission Data",
             "type": "form_data_display",
-            "data": form_data
+            "data": form_data,
         }
 
     def _build_raw_context_section(self, target_context: Dict[str, Any]) -> Dict[str, Any]:
@@ -453,12 +481,16 @@ class ContextExplorerValidator(BaseOperator):
         # Find all S3 upload results in context
         for key, value in target_context.items():
 
-            # Look for S3 upload patterns
+            # Look for S3 upload patterns. Soporta keys en inglés (upload_*, *_s3_*) y
+            # en español usadas por tenants como Catastro (subir_*_result).
             pattern_matches = [pattern for pattern in ['_s3_result', '_s3_upload', '_result'] if pattern in key]
-            has_upload_or_s3 = 'upload' in key or 's3' in key.lower()
+            has_upload_marker = (
+                'upload' in key
+                or 's3' in key.lower()
+                or key.startswith('subir_')
+            )
 
-
-            if pattern_matches and has_upload_or_s3:
+            if pattern_matches and has_upload_marker:
 
                 if isinstance(value, dict) and 'url' in value:
                     # Process single upload

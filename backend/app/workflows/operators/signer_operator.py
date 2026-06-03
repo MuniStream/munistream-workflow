@@ -210,32 +210,42 @@ class SignerOperator(BaseOperator):
                 # Real validation would require crypto libraries
                 print(f"   ✅ Signature validation completed")
 
+                # Resolver identidad real del firmante: preferimos el nombre
+                # real del usuario autenticado que procesó la firma (reviewer /
+                # funcionario) sobre la cadena genérica "Client Certificate".
+                signer_name = await self._resolve_signer_name(context, signature_data)
+                signature_str = self._extract_signature_chain(context, signature_data)
+                cert_subject = self._extract_cert_subject(context, signature_data)
+
                 # Handle signature data - could be string or dict
                 if isinstance(signature_data, str):
-                    # Simple string signature
                     output_data = {
                         f"{self.task_id}_signature_valid": True,
-                        f"{self.task_id}_signer": "Client Certificate",
+                        f"{self.task_id}_signer": signer_name or "Funcionario autorizado",
                         f"{self.task_id}_signed_at": datetime.utcnow().isoformat(),
-                        f"{self.task_id}_algorithm": "RSA-SHA256"
+                        f"{self.task_id}_algorithm": "RSA-SHA256",
                     }
                     log_details = {
                         "signature_length": len(signature_data),
-                        "signature_type": "base64_string"
+                        "signature_type": "base64_string",
                     }
                 else:
-                    # Dict signature with metadata
                     output_data = {
                         f"{self.task_id}_signature_valid": True,
-                        f"{self.task_id}_signer": signature_data.get("certificate_info", {}).get("subject", "Unknown"),
+                        f"{self.task_id}_signer": signer_name or signature_data.get("certificate_info", {}).get("subject", "Funcionario autorizado"),
                         f"{self.task_id}_signed_at": signature_data.get("timestamp"),
-                        f"{self.task_id}_algorithm": signature_data.get("algorithm", "Unknown")
+                        f"{self.task_id}_algorithm": signature_data.get("algorithm", "Unknown"),
                     }
                     log_details = {
-                        "signer": signature_data.get("certificate_info", {}).get("subject"),
+                        "signer": output_data[f"{self.task_id}_signer"],
                         "signed_at": signature_data.get("timestamp"),
-                        "algorithm": signature_data.get("algorithm")
+                        "algorithm": signature_data.get("algorithm"),
                     }
+
+                if signature_str:
+                    output_data[f"{self.task_id}_signature_chain"] = signature_str
+                if cert_subject:
+                    output_data[f"{self.task_id}_cert_subject"] = cert_subject
 
                 self.state.output_data = output_data
 
@@ -357,6 +367,108 @@ class SignerOperator(BaseOperator):
                 status=TaskStatus.FAILED,
                 error=error_msg
             )
+
+    async def _resolve_signer_name(self, context: Dict[str, Any], signature_data: Any) -> Optional[str]:
+        """Resuelve el nombre real del firmante.
+
+        Preferencia:
+          1. Nombre en `signature_data` (dict con `signer_name` o
+             `certificate_info.subject_common_name`).
+          2. full_name del usuario autenticado que procesó la tarea (context
+             tiene `{task_id}_input.__user_id` o `user_id` del assignment).
+          3. Common Name extraído del certificado PEM en contexto.
+        """
+        # (1) signature_data como dict
+        if isinstance(signature_data, dict):
+            cand = signature_data.get("signer_name") or signature_data.get("signerName")
+            if cand:
+                return cand
+            cn = signature_data.get("certificate_info", {}).get("subject_common_name")
+            if cn:
+                return cn
+
+        # (2) Usuario autenticado que completó la tarea
+        candidate_ids = []
+        task_input = context.get(f"{self.task_id}_input") or {}
+        if isinstance(task_input, dict):
+            for k in ("__user_id", "_user_id", "user_id", "signed_by", "reviewer_user_id"):
+                v = task_input.get(k)
+                if v:
+                    candidate_ids.append(v)
+        for k in ("assignee_user_id", "reviewer_user_id", "approver_user_id"):
+            v = context.get(k)
+            if v:
+                candidate_ids.append(v)
+
+        for uid in candidate_ids:
+            name = await self._lookup_user_full_name(uid)
+            if name:
+                return name
+
+        # (3) CN del certificado PEM
+        pem = context.get("digital_signature_certificate") or (
+            task_input.get("digital_signature_certificate") if isinstance(task_input, dict) else None
+        )
+        if pem:
+            cn = self._extract_cn_from_pem(pem)
+            if cn:
+                return cn
+        return None
+
+    async def _lookup_user_full_name(self, user_id: str) -> Optional[str]:
+        try:
+            from ...models.user import UserModel
+            user = await UserModel.find_one({"user_id": user_id})
+            if not user:
+                user = await UserModel.get(user_id)
+            if user and getattr(user, "full_name", None):
+                return user.full_name
+        except Exception:
+            return None
+        return None
+
+    def _extract_signature_chain(self, context: Dict[str, Any], signature_data: Any) -> Optional[str]:
+        """Retorna la 'cadena' de la firma (string base64) para evidencia visual."""
+        if isinstance(signature_data, str):
+            return signature_data
+        if isinstance(signature_data, dict):
+            for k in ("signature", "signature_value", "value", "signatureString", "signature_chain"):
+                v = signature_data.get(k)
+                if isinstance(v, str) and v:
+                    return v
+        # Fallback: buscar en contexto
+        for k in ("digital_signature", f"{self.task_id}_signature"):
+            v = context.get(k)
+            if isinstance(v, str) and v:
+                return v
+        return None
+
+    def _extract_cert_subject(self, context: Dict[str, Any], signature_data: Any) -> Optional[str]:
+        if isinstance(signature_data, dict):
+            cert_info = signature_data.get("certificate_info") or {}
+            subj = cert_info.get("subject")
+            if subj and subj != "Parsed on backend":
+                return subj
+        pem = context.get("digital_signature_certificate")
+        if pem:
+            return self._extract_cn_from_pem(pem)
+        return None
+
+    def _extract_cn_from_pem(self, pem: str) -> Optional[str]:
+        """Extrae el Common Name del subject de un certificado PEM.
+
+        Usa `cryptography` si está disponible; si no, retorna None.
+        """
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.backends import default_backend
+            cert = x509.load_pem_x509_certificate(pem.encode("utf-8"), default_backend())
+            for attr in cert.subject:
+                if attr.oid._name in ("commonName", "CN"):
+                    return attr.value
+        except Exception:
+            return None
+        return None
 
 
 class SignatureStatus:

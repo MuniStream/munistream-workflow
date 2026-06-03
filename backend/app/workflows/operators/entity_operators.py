@@ -201,6 +201,11 @@ class EntityCreationOperator(BaseOperator):
                 }
             )
             
+            # Inyectar metadatos de oficio (N° oficio, fecha emisión, fecha de
+            # solicitud, área firmante) cuando el entity_display_config referencia
+            # un catálogo de oficios.
+            await self._inject_oficio_metadata(self._entity_params, context)
+
             print(f"   Creating entity with async executor...")
             try:
                 entity = await EntityService.create_entity(**self._entity_params)
@@ -306,6 +311,35 @@ class EntityCreationOperator(BaseOperator):
         
         # If regular execute didn't need async, return its result
         return result
+
+    async def _inject_oficio_metadata(
+        self, entity_params: Dict[str, Any], context: Dict[str, Any]
+    ) -> None:
+        """Dispatch a un MetadataInjector registrado por el tenant (si aplica).
+
+        El hook vive en el plugin del tenant y se registra bajo la key
+        `entity_display_config.oficio_catalog` (p. ej. "catastro"). El engine
+        sólo dispatcha; no sabe nada del formato específico del oficio.
+        """
+        display_config = entity_params.get("entity_display_config") or {}
+        catalog_name = display_config.get("oficio_catalog")
+        if not catalog_name:
+            return
+
+        try:
+            from ...services.pdf_generation.plugins import MetadataInjectorRegistry
+        except ImportError as exc:
+            print(f"   ⚠️ No se pudo cargar plugin registry: {exc}")
+            return
+
+        injector = MetadataInjectorRegistry.get(catalog_name)
+        if injector is None:
+            return
+
+        try:
+            await injector(entity_params, context)
+        except Exception as exc:
+            print(f"   ⚠️ MetadataInjector '{catalog_name}' falló: {exc}")
 
     def _extract_value_from_context(self, context: Dict[str, Any], key: str) -> Any:
         """Extract value from context using dot notation (e.g., 'collect_data.field_name')"""

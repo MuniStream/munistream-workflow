@@ -265,6 +265,9 @@ class S3UploadOperator(BaseOperator):
             elif isinstance(file_data, dict):
                 file_data.pop('base64', None)
                 file_data.pop('content', None)
+                file_data.pop('image_data', None)
+                file_data.pop('front_image', None)
+                file_data.pop('back_image', None)
 
         if "[]" in self.file_source:
             parent_key, _, child_key = self.file_source.partition("[]")
@@ -296,6 +299,24 @@ class S3UploadOperator(BaseOperator):
         for key, value in context.items():
             if key.endswith('_data') and isinstance(value, dict) and self.file_source in value:
                 strip(value[self.file_source])
+
+        # Clean raw _input payloads that capture operators leave behind. The
+        # citizen portal submits {field: {base64, filename, content_type}} dicts
+        # under "<task>_input"; without this sweep the original base64 stays in
+        # the instance forever and can push the doc past Mongo's 16 MB BSON cap.
+        for key, value in context.items():
+            if key.endswith('_input') and isinstance(value, dict):
+                for field_value in value.values():
+                    strip(field_value)
+
+        # Capture operators publish aggregate keys with image/document blobs at
+        # well-known paths (selfie_capture, captured_document, etc.). Strip the
+        # raw image fields from those too — downstream consumers that need the
+        # binary should read it from the S3 URL stored in *_s3_result.
+        for aggregate_key in ("captured_document", "selfie_capture"):
+            aggregate = context.get(aggregate_key)
+            if isinstance(aggregate, dict):
+                strip(aggregate)
 
     def _upload_file_to_s3(
         self,
