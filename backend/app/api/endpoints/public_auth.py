@@ -426,7 +426,7 @@ async def track_instance(
         "requires_input": requires_input,
         "input_form": input_form,
         "waiting_for": waiting_for,
-        "estimated_completion": None,  # Could calculate based on average step time
+        "estimated_completion": None,
         "message": f"Workflow {db_instance.status}"
     }
 

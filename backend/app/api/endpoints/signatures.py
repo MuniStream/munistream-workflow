@@ -357,10 +357,14 @@ async def get_entity_pdf(
         from app.core.config import settings
         base_url = settings.FRONTEND_BASE_URL
 
+        # Merge entity_display_config para que `template` y otros ajustes
+        # tenant-specific lleguen al visualizer.
+        pdf_config = {**(entity.entity_display_config or {}), "include_signatures": include_signatures, "base_url": base_url}
+
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
             visualizer_type=visualizer,
-            config={"include_signatures": include_signatures, "base_url": base_url}
+            config=pdf_config,
         )
 
         if not pdf_visualizer:
@@ -414,10 +418,14 @@ async def get_entity_preview(
         from app.core.config import settings
         base_url = settings.FRONTEND_BASE_URL
 
+        # Merge entity_display_config para que `template` y otros ajustes
+        # tenant-specific lleguen al visualizer.
+        preview_config = {**(entity.entity_display_config or {}), "base_url": base_url}
+
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
             visualizer_type=visualizer,
-            config={"base_url": base_url}
+            config=preview_config,
         )
 
         if not pdf_visualizer:
@@ -473,10 +481,14 @@ async def get_entity_html(
         from app.core.config import settings
         base_url = settings.FRONTEND_BASE_URL
 
+        # Merge entity_display_config para que `template` y otros ajustes
+        # tenant-specific lleguen al visualizer.
+        html_config = {**(entity.entity_display_config or {}), "base_url": base_url}
+
         # Get visualizer
         entity_visualizer = VisualizerFactory.get_visualizer(
             visualizer_type=visualizer,
-            config={"base_url": base_url}
+            config=html_config,
         )
 
         if not entity_visualizer:

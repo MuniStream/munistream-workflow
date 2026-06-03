@@ -217,11 +217,24 @@ async def test_channel(
         NotificationChannelConfig.tenant_id == tenant_id,
         NotificationChannelConfig.channel == channel,
     )
-    if not cfg:
+
+    creds: Dict[str, Any] = {}
+    if cfg and cfg.credentials_encrypted:
+        creds = decrypt_credentials(cfg.credentials_encrypted)
+
+    # WhatsApp usa Baileys como infraestructura del backend; base_url/api_key
+    # vienen de env vars del tenant backend, no del config per-tenant.
+    if channel == NotificationChannel.WHATSAPP:
+        if settings.BAILEYS_BASE_URL:
+            creds.setdefault("base_url", settings.BAILEYS_BASE_URL)
+        if settings.BAILEYS_API_KEY:
+            creds.setdefault("api_key", settings.BAILEYS_API_KEY)
+        if not creds.get("base_url"):
+            raise HTTPException(status_code=503, detail="BAILEYS_BASE_URL no configurado en el backend")
+    elif not cfg:
         raise HTTPException(status_code=404, detail="Canal no configurado")
 
-    creds = decrypt_credentials(cfg.credentials_encrypted) if cfg.credentials_encrypted else {}
-    recipient = payload.recipient or cfg.test_recipient
+    recipient = payload.recipient or (cfg.test_recipient if cfg else None)
     if not recipient:
         raise HTTPException(status_code=400, detail="Recipient de prueba no definido")
 
@@ -236,7 +249,7 @@ async def test_channel(
         recipient=recipient,
         subject=subject,
         body=body,
-        from_address=cfg.from_address,
+        from_address=cfg.from_address if cfg else None,
         channel_credentials=creds,
         tenant_id=tenant_id,
     )
