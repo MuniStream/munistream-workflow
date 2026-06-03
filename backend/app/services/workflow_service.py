@@ -402,6 +402,157 @@ class WorkflowService:
             
             await workflow_instance.save()
     
+    async def rewind_instance_to_task(
+        self,
+        instance_id: str,
+        to_task_id: str,
+    ) -> WorkflowInstance:
+        """
+        Rebobinar una instancia a un paso anterior del DAG.
+
+        Marca el paso destino y todos sus descendientes como pendientes, restaura el
+        contexto al snapshot tomado justo antes de que el paso destino se ejecutara
+        por primera vez, borra los snapshots de los descendientes (se regenerarán),
+        elimina sus StepExecution y reactiva la instancia. Incrementa además un
+        contador interno asociado al paso desde el cual se solicitó el rewind
+        (típicamente un ConfirmationOperator).
+
+        Args:
+            instance_id: ID de la instancia a rebobinar.
+            to_task_id: task_id destino (debe existir en el DAG y tener snapshot).
+
+        Returns:
+            WorkflowInstance actualizada y persistida.
+
+        Raises:
+            ValueError: si la instancia no existe, el DAG no existe, el task no
+                pertenece al DAG, o no hay snapshot disponible para ese task.
+        """
+        db_instance = await WorkflowInstance.find_one(
+            WorkflowInstance.instance_id == instance_id
+        )
+        if not db_instance:
+            raise ValueError(f"Instance {instance_id} not found")
+
+        dag = self.dag_bag.get_dag(db_instance.workflow_id)
+        if not dag:
+            raise ValueError(f"DAG {db_instance.workflow_id} not found")
+
+        if to_task_id not in dag.tasks:
+            raise ValueError(
+                f"Task {to_task_id} not found in workflow {db_instance.workflow_id}"
+            )
+
+        snapshots = db_instance.pre_task_context_snapshots or {}
+        if to_task_id not in snapshots:
+            raise ValueError(
+                f"No pre-task snapshot available for task {to_task_id}; cannot rewind"
+            )
+
+        affected = self._collect_descendants(dag, to_task_id, include_self=True)
+
+        triggered_from = db_instance.current_step
+
+        # Preservar metadatos `_meta_*` (contadores de rewind, etc.) que no deben
+        # ser sobrescritos por el snapshot anterior al paso destino.
+        meta_keys = {
+            k: v
+            for k, v in (db_instance.context or {}).items()
+            if isinstance(k, str) and k.startswith("_meta_")
+        }
+
+        new_context: Dict[str, Any] = dict(snapshots[to_task_id])
+        new_context.update(meta_keys)
+
+        if triggered_from:
+            counter_key = f"_meta_rewind_count_{triggered_from}"
+            try:
+                current_count = int(new_context.get(counter_key) or 0)
+            except (TypeError, ValueError):
+                current_count = 0
+            new_context[counter_key] = current_count + 1
+
+        db_instance.context = new_context
+
+        db_instance.completed_steps = [
+            s for s in (db_instance.completed_steps or []) if s not in affected
+        ]
+        db_instance.failed_steps = [
+            s for s in (db_instance.failed_steps or []) if s not in affected
+        ]
+        db_instance.skipped_steps = [
+            s for s in (db_instance.skipped_steps or []) if s not in affected
+        ]
+
+        new_task_states = dict(db_instance.task_states or {})
+        for tid in affected:
+            new_task_states[tid] = {
+                "status": "pending",
+                "started_at": None,
+                "completed_at": None,
+                "result": None,
+                "error": None,
+            }
+        db_instance.task_states = new_task_states
+
+        # Conservar el snapshot del paso destino (permite re-rewind al mismo punto);
+        # eliminar snapshots de los descendientes para que se regeneren.
+        cleaned_snapshots = dict(snapshots)
+        for tid in affected:
+            if tid != to_task_id:
+                cleaned_snapshots.pop(tid, None)
+        db_instance.pre_task_context_snapshots = cleaned_snapshots
+
+        db_instance.current_step = to_task_id
+        db_instance.status = "running"
+        db_instance.completed_at = None
+        db_instance.terminal_status = None
+        db_instance.terminal_message = None
+        db_instance.updated_at = datetime.utcnow()
+
+        # Eliminar StepExecution de los pasos afectados para que la reconstrucción
+        # los marque como pendientes correctamente.
+        try:
+            await StepExecution.find(
+                StepExecution.instance_id == instance_id,
+                In(StepExecution.step_id, list(affected)),
+            ).delete()
+        except Exception as exc:
+            self.logger.warning(
+                f"No se pudieron eliminar StepExecution durante rewind de {instance_id}: {exc}"
+            )
+
+        await db_instance.save()
+
+        self.logger.info(
+            f"Rewind aplicado en instancia {instance_id}: from={triggered_from} "
+            f"to={to_task_id} affected={sorted(affected)}"
+        )
+
+        # Reactivar la ejecución para que el paso destino vuelva a estar waiting/executing.
+        self.executor.resume_instance(instance_id)
+
+        return db_instance
+
+    def _collect_descendants(
+        self,
+        dag: DAG,
+        task_id: str,
+        include_self: bool = True,
+    ) -> set:
+        """Devuelve el conjunto de descendientes transitivos de `task_id` en el grafo."""
+        visited: set = set()
+        if include_self:
+            visited.add(task_id)
+        stack = [task_id]
+        while stack:
+            current = stack.pop()
+            for child in dag.graph.successors(current):
+                if child not in visited:
+                    visited.add(child)
+                    stack.append(child)
+        return visited
+
     async def start_executor(self):
         """Start the DAG executor"""
         await self.executor.start()

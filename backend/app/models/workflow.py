@@ -281,7 +281,15 @@ class WorkflowInstance(Document):
     skipped_steps: List[str] = Field(default_factory=list, description="List of skipped step IDs (short-circuit or cascaded)")
     pending_approvals: List[str] = Field(default_factory=list, description="Steps waiting for approval")
     task_states: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Individual task state data including output_data")
-    
+
+    # Rewind support: snapshots of `context` taken just before each task transitions to executing.
+    # Keyed by task_id. Used by ConfirmationOperator to allow citizens to edit upstream data,
+    # restoring context to the state right before the target task started.
+    pre_task_context_snapshots: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Pre-execution context snapshots per task_id, used to support rewind to upstream tasks"
+    )
+
     # Timing
     started_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = Field(None, description="When instance completed")

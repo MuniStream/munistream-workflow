@@ -27,6 +27,71 @@ router = APIRouter()
 router.include_router(auth_router)
 
 
+@router.post("/instances/{instance_id}/rewind")
+async def rewind_instance(
+    instance_id: str,
+    payload: Dict[str, Any],
+    current_customer: Customer = Depends(get_current_customer),
+):
+    """
+    Rebobinar la instancia a un paso anterior del DAG.
+
+    Solo permitido cuando la instancia está actualmente en un paso de confirmación
+    (`waiting_for == "confirmation"`) y `to_task_id` está dentro del conjunto de
+    `rewindable_task_ids` declarados por ese paso. Restaura el contexto previo a
+    la ejecución del paso destino y limpia los descendientes.
+    """
+    db_instance = await WorkflowInstance.find_one(
+        WorkflowInstance.instance_id == instance_id
+    )
+    if not db_instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    if db_instance.user_id != str(current_customer.id):
+        raise HTTPException(status_code=403, detail="Not authorized to access this instance")
+
+    to_task_id = (payload or {}).get("to_task_id")
+    if not to_task_id or not isinstance(to_task_id, str):
+        raise HTTPException(status_code=400, detail="Missing 'to_task_id' in request body")
+
+    # Verificar que el paso actual es una confirmación. El campo persistente confiable
+    # es `db_instance.context["waiting_for"]`, que el executor merge desde el output del
+    # operator cada vez que retorna WAITING. La reconstrucción en memoria del DAG pierde
+    # este dato, así que leemos directamente del documento de Mongo.
+    current_step = db_instance.current_step
+    if not current_step:
+        raise HTTPException(status_code=400, detail="Instance has no current step")
+
+    persisted_context = db_instance.context or {}
+    if persisted_context.get("waiting_for") != "confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail="Rewind is only allowed when the instance is on a confirmation step",
+        )
+
+    form_config = persisted_context.get("form_config") or {}
+    rewindable_ids = set(form_config.get("rewindable_task_ids") or [])
+    if to_task_id not in rewindable_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task '{to_task_id}' is not rewindable from the current confirmation step",
+        )
+
+    try:
+        updated = await workflow_service.rewind_instance_to_task(instance_id, to_task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "success": True,
+        "instance_id": instance_id,
+        "from_task_id": current_step,
+        "to_task_id": to_task_id,
+        "current_step": updated.current_step,
+        "status": updated.status,
+    }
+
+
 @router.post("/instances/{instance_id}/submit-data")
 async def submit_data(
     instance_id: str, 

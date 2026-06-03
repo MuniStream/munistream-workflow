@@ -2,6 +2,7 @@
 Simplified DAG Executor that always uses database as source of truth.
 No in-memory instance caching - always fetch fresh from database.
 """
+import copy
 from typing import Optional
 from datetime import datetime
 import asyncio
@@ -16,6 +17,62 @@ from .event_manager import WorkflowEventManager
 from ..core.logging_config import set_workflow_context, clear_workflow_context
 
 logger = logging.getLogger(__name__)
+
+
+# Heuristic threshold above which a string in the context is considered an
+# oversized blob and a candidate for stripping. 100 KB is well above any
+# reasonable id, URL, JSON payload or transcript we persist legitimately, and
+# small enough that the cumulative budget across keys stays clear of the 16 MB
+# Mongo BSON cap.
+_OVERSIZED_BLOB_THRESHOLD = 100 * 1024
+
+# Magic prefixes (in raw bytes after base64-decoding the start of the string)
+# that mark a string as an image/PDF blob. base64 encodes 3 bytes into 4
+# characters so we only need a few characters of the string to detect the
+# format reliably.
+_BASE64_IMAGE_PREFIXES = (
+    "/9j/",      # JPEG
+    "iVBORw0",   # PNG
+    "R0lGOD",    # GIF
+    "UklGR",     # WebP
+    "JVBERi0",   # PDF
+    "data:",     # data URL wrapper
+)
+
+
+def _looks_like_image_base64(value: str) -> bool:
+    """Cheap check: does this string start with a known image/PDF base64 prefix?"""
+    if len(value) < _OVERSIZED_BLOB_THRESHOLD:
+        return False
+    head = value.lstrip()[:16]
+    return any(head.startswith(prefix) for prefix in _BASE64_IMAGE_PREFIXES)
+
+
+def _strip_oversized_base64_blobs(node, _depth: int = 0) -> None:
+    """Recursively remove oversized image/PDF base64 strings from a context tree.
+
+    Mutates the input in place. Bounded recursion depth keeps us safe against
+    pathological structures.
+    """
+    if _depth > 8 or node is None:
+        return
+
+    if isinstance(node, dict):
+        for key in list(node.keys()):
+            value = node[key]
+            if isinstance(value, str) and _looks_like_image_base64(value):
+                del node[key]
+                continue
+            _strip_oversized_base64_blobs(value, _depth + 1)
+        return
+
+    if isinstance(node, list):
+        for i in range(len(node) - 1, -1, -1):
+            value = node[i]
+            if isinstance(value, str) and _looks_like_image_base64(value):
+                del node[i]
+                continue
+            _strip_oversized_base64_blobs(value, _depth + 1)
 
 
 class ExecutorStatus(str, Enum):
@@ -285,9 +342,26 @@ class DAGExecutor:
                     # Clear the retry timestamp, we can proceed
                     task._retry_after = None
 
+            # Snapshot context BEFORE this task starts producing output, so we can rewind to it
+            # later if a downstream confirmation step requests editing this task's data.
+            # Only snapshot the first time we transition into executing (subsequent re-entries
+            # for waiting → continue should not overwrite the snapshot).
+            if db_instance.pre_task_context_snapshots is None:
+                db_instance.pre_task_context_snapshots = {}
+            if task_id not in db_instance.pre_task_context_snapshots:
+                snapshot = copy.deepcopy(dag_instance.context)
+                # The snapshot is kept so that a downstream confirmation step
+                # can rewind to this point. We strip oversized image blobs from
+                # it: by the time a rewind happens the binaries already live in
+                # S3, and keeping the base64 in every snapshot multiplies a
+                # single image's footprint by the number of remaining tasks and
+                # blows past Mongo's 16 MB BSON cap.
+                _strip_oversized_base64_blobs(snapshot)
+                db_instance.pre_task_context_snapshots[task_id] = snapshot
+
             # Execute task with current context
             dag_instance.update_task_status(task_id, "executing")
-            
+
             # Run the task
 
             # Set step context for task execution logging
@@ -559,6 +633,18 @@ class DAGExecutor:
 
         previous_step = db_instance.current_step
         new_step = dag_instance.current_task
+
+        # Defensive sweep: capture/upload operators have a long history of
+        # leaving multiple aliases of the same base64 blob in the context
+        # (raw _input payload, _<image>.content, captured_document.*, etc.).
+        # Cumulatively those copies can push a single instance past Mongo's
+        # 16 MB BSON cap, after which findAndModify fails and the instance
+        # gets stuck. Strip image/PDF base64 strings before every save so
+        # we never depend on every operator remembering to clean up.
+        _strip_oversized_base64_blobs(dag_instance.context)
+        if db_instance.pre_task_context_snapshots:
+            for snapshot in db_instance.pre_task_context_snapshots.values():
+                _strip_oversized_base64_blobs(snapshot)
 
         db_instance.context = dag_instance.context
         db_instance.current_step = new_step
