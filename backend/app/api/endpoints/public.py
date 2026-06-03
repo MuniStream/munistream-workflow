@@ -1045,6 +1045,7 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         "category": category,
         "icon": metadata.get("icon") or _get_workflow_icon(category),
         "estimatedDuration": metadata.get("estimatedTime") or metadata.get("estimated_duration") or _calculate_duration(len(steps)),
+        "cost": metadata.get("cost"),
         "steps": steps,
         "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, locale),
         "entity_requirements": _extract_entity_requirements(dag) if dag else [],
