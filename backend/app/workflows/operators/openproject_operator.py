@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
 from .base import BaseOperator, TaskResult, TaskStatus
+from ..polling_strategy import PollingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,9 @@ class OpenProjectAssignmentOperator(BaseOperator):
 
         # State key for persistence (following Airflow pattern)
         self._state_key = f"openproject_{task_id}_state"
+
+    def get_polling_config(self) -> PollingConfig:
+        return PollingConfig.polling(interval_seconds=self.poll_interval_seconds)
 
     def _waiting_result(self, message: str, **metadata) -> TaskResult:
         """Create a waiting TaskResult with state preservation."""

@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     NOTIFICATION_RATE_LIMIT_PER_HOUR: int = 10
     NOTIFICATION_MAX_ATTEMPTS: int = 5
 
+    # Executor scheduling
+    EXECUTOR_SAFETY_NET_SECONDS: int = 300
+    EXECUTOR_RUNNING_THROTTLE_SECONDS: float = 0.5
+
     # Wallet Configuration
     APPLE_TEAM_ID: Optional[str] = None
     APPLE_PASS_TYPE_ID: Optional[str] = None

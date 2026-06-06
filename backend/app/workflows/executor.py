@@ -11,9 +11,10 @@ from enum import Enum
 
 from .dag import InstanceStatus
 from .operators.base import TaskStatus
-from ..models.instance_log import InstanceLog, LogLevel, LogType
+from .polling_strategy import OperatorPollingStrategy
 from ..models.workflow import WorkflowInstance, EventType
 from .event_manager import WorkflowEventManager
+from ..core.config import settings
 from ..core.logging_config import set_workflow_context, clear_workflow_context
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,6 @@ class DAGExecutor:
         # Throttling: prevent continuous execution without delays
         self.throttled_queue: dict[str, float] = {}  # Instance ID -> next allowed execution time
         self._instance_next_execution_time: dict[str, float] = {}  # Track next allowed execution per instance
-        self.THROTTLE_DELAY_SECONDS = 3.0  # Minimum seconds between executions per instance
         # Performance metrics
         self._task_execution_times: dict[str, list[float]] = {}
         self._last_execution_time: dict[str, datetime] = {}
@@ -258,17 +258,20 @@ class DAGExecutor:
             dag_instance.skipped_tasks = set(getattr(db_instance, "skipped_steps", None) or [])
             dag_instance.current_task = db_instance.current_step
 
-            # Initialize task states for all tasks
+            # Initialize task states for all tasks. Terminal states
+            # (completed/skipped/failed) win over the "current_step waiting"
+            # heuristic — a skipped gate must stay skipped, not be
+            # resurrected as waiting just because it was the last step the
+            # previous save persisted as current.
             for task_id in dag.tasks.keys():
-                if task_id == db_instance.current_step and task_id not in dag_instance.completed_tasks:
-                    # Current task that's not completed must be waiting
-                    dag_instance.task_states[task_id] = {"status": "waiting"}
-                elif task_id in dag_instance.completed_tasks:
+                if task_id in dag_instance.completed_tasks:
                     dag_instance.task_states[task_id] = {"status": "completed"}
                 elif task_id in dag_instance.failed_tasks:
                     dag_instance.task_states[task_id] = {"status": "failed"}
                 elif task_id in dag_instance.skipped_tasks:
                     dag_instance.task_states[task_id] = {"status": "skipped"}
+                elif task_id == db_instance.current_step:
+                    dag_instance.task_states[task_id] = {"status": "waiting"}
                 else:
                     dag_instance.task_states[task_id] = {"status": "pending"}
             
@@ -282,8 +285,16 @@ class DAGExecutor:
             dag_instance.skipped_tasks = set(getattr(db_instance, "skipped_steps", None) or [])
             dag_instance.current_task = db_instance.current_step
 
-            # Update task states for waiting tasks
-            if db_instance.current_step and db_instance.current_step not in dag_instance.completed_tasks:
+            # Only force the current step back to "waiting" when it's still
+            # pending. Skipping this guard meant a skipped gate task
+            # (current_step recorded by the previous save) was mis-marked as
+            # waiting, leaving the instance stuck in PAUSED forever.
+            if (
+                db_instance.current_step
+                and db_instance.current_step not in dag_instance.completed_tasks
+                and db_instance.current_step not in dag_instance.skipped_tasks
+                and db_instance.current_step not in dag_instance.failed_tasks
+            ):
                 if dag_instance.task_states.get(db_instance.current_step):
                     dag_instance.task_states[db_instance.current_step]["status"] = "waiting"
 
@@ -292,13 +303,13 @@ class DAGExecutor:
         logger.debug(f"Loaded context for {instance_id}: {list(dag_instance.context.keys())}")
         
         # Log execution start
-        await InstanceLog.log(
-            instance_id=instance_id,
-            workflow_id=dag_instance.dag.dag_id,
-            level=LogLevel.INFO,
-            log_type=LogType.SYSTEM,
-            message=f"Starting execution cycle",
-            details={"status": dag_instance.status.value if hasattr(dag_instance.status, 'value') else str(dag_instance.status)}
+        logger.debug(
+            "Starting execution cycle",
+            extra={
+                "instance_id": instance_id,
+                "workflow_id": dag_instance.dag.dag_id,
+                "status": dag_instance.status.value if hasattr(dag_instance.status, 'value') else str(dag_instance.status),
+            },
         )
 
         # Publish workflow started event if this is the first execution
@@ -319,15 +330,16 @@ class DAGExecutor:
         executable_tasks = dag_instance.get_executable_tasks()
         logger.info(f"Instance {instance_id} has {len(executable_tasks)} executable tasks: {executable_tasks}")
         
-        await InstanceLog.log(
-            instance_id=instance_id,
-            workflow_id=dag_instance.dag.dag_id,
-            level=LogLevel.DEBUG,
-            log_type=LogType.SYSTEM,
-            message=f"Found {len(executable_tasks)} executable tasks",
-            details={"tasks": executable_tasks}
+        logger.debug(
+            "Found %d executable tasks",
+            len(executable_tasks),
+            extra={
+                "instance_id": instance_id,
+                "workflow_id": dag_instance.dag.dag_id,
+                "tasks": executable_tasks,
+            },
         )
-        
+
         for task_id in executable_tasks:
             task = dag_instance.dag.tasks.get(task_id)
             if not task:
@@ -375,15 +387,6 @@ class DAGExecutor:
                 "tenant": getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
             })
 
-            await InstanceLog.log(
-                instance_id=instance_id,
-                workflow_id=dag_instance.dag.dag_id,
-                level=LogLevel.INFO,
-                log_type=LogType.TASK_START,
-                task_id=task_id,
-                message=f"Starting task execution: {task_id}"
-            )
-            
             try:
                 # Set instance and workflow IDs on the task for logging
                 task._instance_id = instance_id
@@ -415,14 +418,15 @@ class DAGExecutor:
                 # DEBUG: Log result handling
                 logger.info(f"DEBUG: Task {task_id} returned result = '{result}'")
 
-                await InstanceLog.log(
-                    instance_id=instance_id,
-                    workflow_id=dag_instance.dag.dag_id,
-                    level=LogLevel.INFO,
-                    log_type=LogType.TASK_COMPLETE if result == TaskStatus.CONTINUE else LogType.TASK_FAILED,
-                    task_id=task_id,
-                    message=f"Task completed with status: {result}",
-                    details={"result": result, "output": task.get_output() if hasattr(task, 'get_output') else None}
+                logger.info(
+                    "Task %s completed with status: %s",
+                    task_id, result,
+                    extra={
+                        "instance_id": instance_id,
+                        "workflow_id": dag_instance.dag.dag_id,
+                        "task_id": task_id,
+                        "result": str(result),
+                    },
                 )
             except Exception as e:
 
@@ -437,15 +441,6 @@ class DAGExecutor:
                     "tenant": getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
                 })
 
-                await InstanceLog.log(
-                    instance_id=instance_id,
-                    workflow_id=dag_instance.dag.dag_id,
-                    level=LogLevel.ERROR,
-                    log_type=LogType.ERROR,
-                    task_id=task_id,
-                    message=f"Task execution failed",
-                    error=e
-                )
                 result = TaskStatus.FAILED
             
             # Update task status based on result
@@ -579,7 +574,34 @@ class DAGExecutor:
             dag_instance.status = InstanceStatus.PAUSED
         else:
             dag_instance.status = InstanceStatus.RUNNING
-        
+
+        # If this instance just transitioned to a terminal state and it is a
+        # child workflow, wake the parent so it can advance past its
+        # WorkflowStartOperator without polling.
+        terminal_states = (
+            InstanceStatus.COMPLETED, InstanceStatus.FAILED, InstanceStatus.CANCELLED
+        )
+        if (
+            old_instance_status != dag_instance.status
+            and dag_instance.status in terminal_states
+        ):
+            parent_id = (
+                getattr(db_instance, "parent_instance_id", None)
+                or dag_instance.context.get("parent_instance_id")
+            )
+            if parent_id:
+                logger.info(
+                    "Child workflow %s reached %s; resuming parent %s",
+                    instance_id, dag_instance.status.value, parent_id,
+                )
+                try:
+                    self.resume_instance(parent_id)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to resume parent %s from child %s: %s",
+                        parent_id, instance_id, e,
+                    )
+
         # Save everything back to database
         old_status = db_instance.status
         new_status = self._map_status(dag_instance.status)
@@ -588,30 +610,102 @@ class DAGExecutor:
         
         # Log status change
         if old_status != new_status:
-            await InstanceLog.log(
-                instance_id=instance_id,
-                workflow_id=dag_instance.dag.dag_id,
-                level=LogLevel.INFO,
-                log_type=LogType.STATUS_CHANGE,
-                message=f"Instance status changed from {old_status} to {new_status}",
-                details={
-                    "old_status": old_status,
-                    "new_status": new_status,
+            logger.info(
+                "Instance status changed from %s to %s",
+                old_status, new_status,
+                extra={
+                    "instance_id": instance_id,
+                    "workflow_id": dag_instance.dag.dag_id,
+                    "old_status": str(old_status),
+                    "new_status": str(new_status),
                     "completed_tasks": list(dag_instance.completed_tasks),
-                    "failed_tasks": list(dag_instance.failed_tasks)
-                }
+                    "failed_tasks": list(dag_instance.failed_tasks),
+                },
             )
         
-        # Return whether instance can continue processing
-        # PAUSED instances need to continue for polling waiting tasks
+        # Return whether instance can continue processing.
+        # RUNNING -> more executable tasks; the loop will keep advancing.
+        # PAUSED  -> at least one waiting task. The scheduling loop inspects
+        # each waiting operator's PollingConfig to decide whether to re-queue
+        # for polling or sit idle until resume_instance() is called.
         return dag_instance.status in [InstanceStatus.RUNNING, InstanceStatus.PAUSED]
-    
+
     def _has_waiting_tasks(self, instance) -> bool:
         """Check if instance has any waiting tasks"""
         for state in instance.task_states.values():
             if state.get("status") in ["waiting", "waiting_input", "waiting_approval"]:
                 return True
         return False
+
+    def _get_instance_polling_decision(self, dag_instance) -> Optional[float]:
+        """Decide when to wake this PAUSED instance again.
+
+        Returns:
+            None  -> No waiting task needs polling. The instance will only be
+                    revived by resume_instance() (or by the safety net sweep).
+            float -> Seconds until the next wake-up. Equals the minimum
+                    polling interval declared across all POLLING waiting
+                    tasks of the instance.
+        """
+        waiting_intervals = []
+        for task_id, state in dag_instance.task_states.items():
+            if state.get("status") not in ("waiting", "waiting_input", "waiting_approval"):
+                continue
+            task = dag_instance.dag.tasks.get(task_id)
+            if task is None:
+                continue
+            cfg = task.get_polling_config()
+            if cfg.strategy == OperatorPollingStrategy.POLLING:
+                waiting_intervals.append(cfg.polling_interval_seconds)
+        if not waiting_intervals:
+            return None
+        return float(min(waiting_intervals))
+
+    def _schedule_next_wakeup(self, instance_id: str) -> None:
+        """Decide where (and when) to re-queue an instance after it executed.
+
+        RUNNING instances get a short throttle to avoid hot-looping inside
+        a single tick. PAUSED instances are routed by their waiting tasks'
+        PollingConfig:
+          - All EVENT_DRIVEN -> wait for resume_instance(); safety net
+                                catches orphans every EXECUTOR_SAFETY_NET_SECONDS.
+          - Any POLLING       -> wake up at the minimum declared interval.
+        """
+        import time as _time
+        dag_instance = self.workflow_service.dag_bag.get_instance(instance_id)
+        is_paused = (
+            dag_instance is not None
+            and dag_instance.status == InstanceStatus.PAUSED
+        )
+
+        if not is_paused:
+            throttle = settings.EXECUTOR_RUNNING_THROTTLE_SECONDS
+            next_exec_time = _time.time() + throttle
+            self._instance_next_execution_time[instance_id] = next_exec_time
+            self.throttled_queue[instance_id] = next_exec_time
+            return
+
+        poll_delay = self._get_instance_polling_decision(dag_instance)
+        if poll_delay is None:
+            safety_net = settings.EXECUTOR_SAFETY_NET_SECONDS
+            if safety_net > 0:
+                self.waiting_queue[instance_id] = _time.time() + safety_net
+                logger.debug(
+                    "Instance %s event-driven; awaiting resume_instance "
+                    "(safety net %ds)",
+                    instance_id, safety_net,
+                )
+            else:
+                logger.debug(
+                    "Instance %s event-driven; awaiting resume_instance (no safety net)",
+                    instance_id,
+                )
+            return
+
+        self.waiting_queue[instance_id] = _time.time() + poll_delay
+        logger.debug(
+            "Instance %s scheduled to poll in %.1fs", instance_id, poll_delay
+        )
     
     def _map_status(self, dag_status) -> str:
         """Map DAG status to database status string"""
@@ -816,7 +910,6 @@ class DAGExecutor:
         """Background execution loop - process queue continuously"""
         logger.info("🔄 Execution loop started (optimized with event-driven approach)")
         import time
-        import random
 
         while not self._should_stop:
             try:
@@ -867,21 +960,12 @@ class DAGExecutor:
                     self._task_execution_times[instance_id].append(execution_time)
                     self._last_execution_time[instance_id] = datetime.utcnow()
 
-                    # Set next allowed execution time with random delay (2-5 seconds)
-                    random_delay = random.uniform(2.0, 5.0)
-                    self._instance_next_execution_time[instance_id] = time.time() + random_delay
-                    logger.debug(f"Instance {instance_id} throttled for {random_delay:.1f}s")
-
                     if execution_time > 1.0:  # Log slow executions
                         logger.warning(f"⚠️ Slow execution detected for {instance_id}: {execution_time:.2f}s")
 
-                    # Re-queue if still running or waiting
+                    # Re-queue based on the instance's current scheduling profile.
                     if can_continue:
-                        # ALL instances get throttled the same way - 3 seconds minimum between executions
-                        next_exec_time = self._instance_next_execution_time[instance_id]
-                        self.throttled_queue[instance_id] = next_exec_time
-                        wait_time = next_exec_time - current_time
-                        logger.debug(f"⏰ Instance {instance_id} will execute again in {wait_time:.1f}s")
+                        self._schedule_next_wakeup(instance_id)
 
                 # Check waiting queue for instances ready to retry
                 elif self.waiting_queue:
@@ -911,6 +995,18 @@ class DAGExecutor:
                         # Signal work available if we added to active queue
                         if self.active_queue:
                             self._work_available.set()
+                    else:
+                        # No instance ready yet. Sleep until the earliest one is
+                        # due, or until resume_instance() signals new work.
+                        next_due = min(self.waiting_queue.values())
+                        sleep_for = max(0.05, min(next_due - current_time, 1.0))
+                        try:
+                            await asyncio.wait_for(
+                                self._work_available.wait(), timeout=sleep_for
+                            )
+                            self._work_available.clear()
+                        except asyncio.TimeoutError:
+                            pass
 
                 # Fallback to legacy queue processing
                 elif self.execution_queue:
@@ -931,16 +1027,8 @@ class DAGExecutor:
                     can_continue = await self.execute_instance(instance_id)
                     execution_time = time.time() - start_time
 
-                    # Apply random throttling for next execution (2-5 seconds)
-                    random_delay = random.uniform(2.0, 5.0)
-                    self._instance_next_execution_time[instance_id] = time.time() + random_delay
-                    logger.debug(f"Legacy instance {instance_id} throttled for {random_delay:.1f}s")
-
                     if can_continue:
-                        # Re-queue with throttling
-                        next_exec_time = self._instance_next_execution_time[instance_id]
-                        self.throttled_queue[instance_id] = next_exec_time
-                        logger.debug(f"⏰ Legacy instance {instance_id} throttled for next execution")
+                        self._schedule_next_wakeup(instance_id)
 
                 # Check if there are throttled instances waiting
                 elif self.throttled_queue:
@@ -978,34 +1066,37 @@ class DAGExecutor:
     
     def resume_instance(self, instance_id: str):
         """
-        Resume a paused instance - execute immediately and add to queue.
-        The fresh context will be loaded from database when executed.
+        Resume a paused instance: drop any pending wait timers and prioritize
+        the instance at the front of the active queue. The execution loop wakes
+        up via _work_available.set() and runs it on the next tick.
 
-        Args:
-            instance_id: Instance to resume
+        We deliberately do NOT spawn an extra asyncio task to execute right
+        now — the loop is already running and will process the instance
+        immediately. A parallel immediate task creates a race where two
+        executions of the same instance can clobber each other's Mongo writes.
         """
         logger.info(f"Resume requested for instance {instance_id}")
 
-        # Remove from waiting queue if present
+        # Drop any pending wait timers; this instance has new work.
         if instance_id in self.waiting_queue:
             del self.waiting_queue[instance_id]
             logger.debug(f"Removed {instance_id} from waiting queue")
+        if instance_id in self.throttled_queue:
+            del self.throttled_queue[instance_id]
+            logger.debug(f"Removed {instance_id} from throttled queue")
+        # Resume bypasses the RUNNING throttle: clear any pending deadline so
+        # the active-queue branch executes this instance straight away.
+        self._instance_next_execution_time.pop(instance_id, None)
 
-        # Execute immediately without waiting for the loop
-        asyncio.create_task(self._execute_immediate(instance_id))
-
-        # Add to active queue for high priority processing
         if instance_id not in self.active_queue:
-            # Insert at beginning for priority processing
             self.active_queue.insert(0, instance_id)
-            # Legacy support
             if instance_id not in self.execution_queue:
                 self.execution_queue.insert(0, instance_id)
-            # Signal work available immediately
-            self._work_available.set()
-            logger.info(f"Instance {instance_id} executing immediately and prioritized in active queue")
+            logger.info(f"Instance {instance_id} prioritized in active queue")
         else:
-            logger.info(f"Instance {instance_id} executing immediately (already in queue)")
+            logger.info(f"Instance {instance_id} already in active queue")
+
+        self._work_available.set()
 
     async def _execute_immediate(self, instance_id: str):
         """Execute an instance immediately without waiting for the loop"""
@@ -1086,16 +1177,17 @@ class DAGExecutor:
             "active_queue": self.active_queue[:10],
             "waiting_instances": list(self.waiting_queue.keys())[:10],
             "throttled_instances": throttled_info,
-            "throttle_delay": "2-5s (random)",
+            "running_throttle_seconds": settings.EXECUTOR_RUNNING_THROTTLE_SECONDS,
+            "safety_net_seconds": settings.EXECUTOR_SAFETY_NET_SECONDS,
             "performance_metrics": {
                 "slow_instances": dict(slow_instances),
                 "total_instances_tracked": len(self._task_execution_times)
             },
             "optimizations": {
-                "event_driven": True,
+                "event_driven_scheduling": True,
                 "separate_queues": True,
-                "throttling_enabled": True,
-                "throttle_delay": "2-5s random per instance",
+                "running_throttle_seconds": settings.EXECUTOR_RUNNING_THROTTLE_SECONDS,
+                "paused_safety_net_seconds": settings.EXECUTOR_SAFETY_NET_SECONDS,
                 "non_blocking": "No sleeps, timestamp-based checks"
             }
         }

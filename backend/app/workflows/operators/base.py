@@ -8,6 +8,11 @@ from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
 import uuid
+import logging
+
+from ..polling_strategy import PollingConfig
+
+logger = logging.getLogger(__name__)
 
 
 class OperatorRequirement(BaseModel):
@@ -121,7 +126,13 @@ class BaseOperator(ABC):
     Base operator class - self-contained and agnostic to other steps.
     Each operator only knows about its own task, not the workflow structure.
     """
-    
+
+    # Default scheduling: the executor only re-runs this operator after
+    # resume_instance() is called (e.g. via /submit-workflow-data or
+    # /approve-step). Subclasses that wait on an external system without a
+    # callback override get_polling_config() to declare a polling interval.
+    polling_config: PollingConfig = PollingConfig.event_driven()
+
     def __init__(self, task_id: str, name: Optional[str] = None, group: Optional[str] = None, **kwargs):
         """
         Initialize base operator.
@@ -176,6 +187,18 @@ class BaseOperator(ABC):
             List of OperatorRequirement objects describing what this operator needs
         """
         return []
+
+    def get_polling_config(self) -> PollingConfig:
+        """
+        Return how the executor should schedule re-runs of this operator
+        while it is in a WAITING state.
+
+        Override only when the polling decision depends on instance state
+        (e.g. an interval coming from a constructor argument). Operators
+        that wait for a user/API event do not override this — the default
+        EVENT_DRIVEN config is correct for them.
+        """
+        return self.polling_config
 
     async def check_requirement(self,
                                requirement: OperatorRequirement,
@@ -394,59 +417,27 @@ class BaseOperator(ABC):
         """Reset the operator state for re-execution"""
         self.state = TaskState()
     
+    def _log_extra(self, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Build structured logging context for the standard (GELF) logger."""
+        return {
+            "instance_id": self._instance_id,
+            "workflow_id": self._workflow_id,
+            "task_id": self.task_id,
+            **(details or {})
+        }
+
     async def log_info(self, message: str, details: Optional[Dict[str, Any]] = None):
         """Log an info message from the operator"""
-        if self._instance_id and self._workflow_id:
-            from ...models.instance_log import InstanceLog, LogLevel, LogType
-            await InstanceLog.log(
-                instance_id=self._instance_id,
-                workflow_id=self._workflow_id,
-                level=LogLevel.INFO,
-                log_type=LogType.USER_ACTION,  # Operator logs are user actions
-                message=message,
-                task_id=self.task_id,
-                details=details or {}
-            )
-    
+        logger.info(message, extra=self._log_extra(details))
+
     async def log_error(self, message: str, error: Optional[Exception] = None, details: Optional[Dict[str, Any]] = None):
         """Log an error message from the operator"""
-        if self._instance_id and self._workflow_id:
-            from ...models.instance_log import InstanceLog, LogLevel, LogType
-            await InstanceLog.log(
-                instance_id=self._instance_id,
-                workflow_id=self._workflow_id,
-                level=LogLevel.ERROR,
-                log_type=LogType.ERROR,
-                message=message,
-                task_id=self.task_id,
-                details=details or {},
-                error=error
-            )
-    
+        logger.error(message, exc_info=error, extra=self._log_extra(details))
+
     async def log_warning(self, message: str, details: Optional[Dict[str, Any]] = None):
         """Log a warning message from the operator"""
-        if self._instance_id and self._workflow_id:
-            from ...models.instance_log import InstanceLog, LogLevel, LogType
-            await InstanceLog.log(
-                instance_id=self._instance_id,
-                workflow_id=self._workflow_id,
-                level=LogLevel.WARNING,
-                log_type=LogType.USER_ACTION,
-                message=message,
-                task_id=self.task_id,
-                details=details or {}
-            )
-    
+        logger.warning(message, extra=self._log_extra(details))
+
     async def log_debug(self, message: str, details: Optional[Dict[str, Any]] = None):
         """Log a debug message from the operator"""
-        if self._instance_id and self._workflow_id:
-            from ...models.instance_log import InstanceLog, LogLevel, LogType
-            await InstanceLog.log(
-                instance_id=self._instance_id,
-                workflow_id=self._workflow_id,
-                level=LogLevel.DEBUG,
-                log_type=LogType.USER_ACTION,
-                message=message,
-                task_id=self.task_id,
-                details=details or {}
-            )
+        logger.debug(message, extra=self._log_extra(details))

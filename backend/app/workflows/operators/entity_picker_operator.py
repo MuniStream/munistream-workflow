@@ -6,6 +6,7 @@ Extends MultiEntityRequirementOperator to add selection interface for found enti
 """
 from typing import Dict, Any, List
 import logging
+from types import SimpleNamespace
 
 from .base import BaseOperator, TaskResult, OperatorRequirement, RequirementStatus, TaskStatus
 from .entity_operators import MultiEntityRequirementOperator
@@ -316,6 +317,8 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
     def _validate_user_selections(self, context: Dict[str, Any]) -> TaskResult:
         """Validate user-submitted selections and return CONTINUE or WAITING"""
+        # Drop any cached discovery so a re-prompt re-queries fresh state.
+        self._invalidate_discovery_cache(context)
         return self._validate_selections(context)
 
     def _prepare_for_entity_discovery(self, context: Dict[str, Any]) -> TaskResult:
@@ -332,6 +335,49 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             status=TaskStatus.WAITING,
             data={}
         )
+
+    @property
+    def _discovery_cache_key(self) -> str:
+        return f"{self.task_id}_discovery_cache"
+
+    def _serialize_entity(self, entity: Any) -> Dict[str, Any]:
+        """Capture the attributes downstream code reads from a LegalEntity."""
+        if hasattr(entity, "dict"):
+            try:
+                return entity.dict()
+            except Exception:
+                pass
+        snapshot: Dict[str, Any] = {}
+        for attr in ("entity_id", "entity_type", "name", "data"):
+            if hasattr(entity, attr):
+                snapshot[attr] = getattr(entity, attr)
+        return snapshot
+
+    def _hydrate_cached_entity(self, raw: Dict[str, Any]) -> SimpleNamespace:
+        """Rebuild a lightweight entity proxy from a serialized snapshot."""
+        return SimpleNamespace(**raw)
+
+    def _store_discovery_cache(
+        self,
+        context: Dict[str, Any],
+        requirement_entities: Dict[str, List],
+    ) -> None:
+        context[self._discovery_cache_key] = {
+            key: [self._serialize_entity(e) for e in entities]
+            for key, entities in requirement_entities.items()
+        }
+
+    def _load_cached_discovery(self, context: Dict[str, Any]) -> Dict[str, List]:
+        cached = context.get(self._discovery_cache_key)
+        if cached is None:
+            return None
+        return {
+            key: [self._hydrate_cached_entity(raw) for raw in entities]
+            for key, entities in cached.items()
+        }
+
+    def _invalidate_discovery_cache(self, context: Dict[str, Any]) -> None:
+        context.pop(self._discovery_cache_key, None)
 
     async def _discover_available_entities(self, requirements: List[Dict[str, Any]], user_id: str) -> Dict[str, List]:
         """Find all entities that match each requirement"""
@@ -669,11 +715,19 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             if hasattr(self, '_check_params') and self._check_params:
                 params = self._check_params
 
-                # Step 1: Discover available entities
-                requirement_entities = await self._discover_available_entities(
-                    params["requirements"],
-                    params["user_id"]
-                )
+                # Discover entities, reusing a cached snapshot if a previous
+                # execution already paid for the Mongo queries. The cache lives
+                # in context so it survives across executor wake-ups (safety
+                # net, polling) without re-querying.
+                requirement_entities = self._load_cached_discovery(context)
+                if requirement_entities is None:
+                    requirement_entities = await self._discover_available_entities(
+                        params["requirements"],
+                        params["user_id"]
+                    )
+                    self._store_discovery_cache(context, requirement_entities)
+                else:
+                    logger.debug("Reusing cached entity discovery snapshot")
 
                 # Step 2: Make decision based on discovery results
                 return await self._determine_next_action(requirement_entities, params["requirements"], context)

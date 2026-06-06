@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from base64 import b64encode
 
 from .base import BaseOperator, TaskResult, TaskStatus
+from ..polling_strategy import PollingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ class AirflowOperator(BaseOperator):
         self.timeout_minutes = timeout_minutes
         self.poll_interval_seconds = poll_interval_seconds
         self._state_key = f"airflow_{task_id}_state"
+
+    def get_polling_config(self) -> PollingConfig:
+        return PollingConfig.polling(interval_seconds=self.poll_interval_seconds)
 
     def _waiting_result(self, message: str, **metadata) -> TaskResult:
         """Create a waiting TaskResult with state preservation."""
