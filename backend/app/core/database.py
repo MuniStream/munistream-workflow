@@ -20,7 +20,6 @@ from ..models.category import WorkflowCategory
 from ..models.team import TeamModel
 from ..models.customer import Customer, CustomerSession
 from ..models.legal_entity import EntityType, LegalEntity
-from ..models.instance_log import InstanceLog
 from ..models.catalog import Catalog, CatalogData
 from ..models.profile_field_definition import ProfileFieldDefinition
 from ..models.user_profile import UserProfile
@@ -69,7 +68,6 @@ async def connect_to_mongo():
             CustomerSession,
             EntityType,
             LegalEntity,
-            InstanceLog,
             Catalog,
             CatalogData,
             ProfileFieldDefinition,
