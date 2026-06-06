@@ -134,12 +134,40 @@ class DAG:
     
     def build_graph(self) -> 'DAG':
         """Build graph from task connections"""
-        for task_id, task in self.tasks.items():
+        for task_id, task in list(self.tasks.items()):
             for downstream_task in task.downstream_tasks:
                 if downstream_task.task_id not in self.tasks:
                     self.add_task(downstream_task)
                 self.graph.add_edge(task_id, downstream_task.task_id)
+        self._order_tasks_by_execution()
         return self
+
+    def _order_tasks_by_execution(self) -> None:
+        """Reorder self.tasks into topological (execution) order.
+
+        Step lists shown to citizens/admins and DAGInstance.task_states are all
+        derived from the iteration order of self.tasks. Without this, they follow
+        source-code instantiation order, which can place a step (e.g. a
+        confirmation step built by a helper after the validation step was
+        declared) out of its execution position. Reordering here propagates the
+        correct order to every consumer at a single point.
+
+        No-op on any failure (e.g. a cycle) so insertion order is preserved and
+        validate() can still report the cycle. Does not touch self.graph or
+        affect execution, which is driven by upstream/downstream edges.
+        """
+        try:
+            order = list(nx.topological_sort(self.graph))
+        except Exception:
+            return
+        ordered_set = set(order)
+        # Keep any task not present in the topological order (safety) at the end,
+        # preserving its current relative order.
+        remaining = [tid for tid in self.tasks if tid not in ordered_set]
+        new_order = [tid for tid in order if tid in self.tasks] + remaining
+        reordered = {tid: self.tasks[tid] for tid in new_order}
+        self.tasks.clear()
+        self.tasks.update(reordered)
     
     def validate(self) -> bool:
         """Validate DAG structure"""
