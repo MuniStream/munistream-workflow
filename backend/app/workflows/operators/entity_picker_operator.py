@@ -379,6 +379,82 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
     def _invalidate_discovery_cache(self, context: Dict[str, Any]) -> None:
         context.pop(self._discovery_cache_key, None)
 
+    def _entity_data_snapshot(self, entity: Any) -> Dict[str, Any]:
+        """Build a context-friendly dict with an entity's data plus metadata.
+
+        Metadata keys are underscore-prefixed so downstream operators (e.g.
+        EntityCreationOperator._should_include_field) skip them automatically.
+        """
+        data = getattr(entity, "data", None)
+        snapshot: Dict[str, Any] = dict(data) if isinstance(data, dict) else {}
+        snapshot["_entity_id"] = getattr(entity, "entity_id", None)
+        snapshot["_entity_name"] = getattr(entity, "name", None)
+        snapshot["_entity_type"] = getattr(entity, "entity_type", None)
+        return snapshot
+
+    def _build_selected_entities_data(
+        self,
+        selected_entities_group: Dict[str, List[str]],
+        entities_by_id: Dict[str, Any],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Map selected entity IDs to their full data for downstream steps.
+
+        Mirrors ``selected_entities`` (keyed by ``store_as``, list-valued) but
+        stores each entity's data dict instead of just its ID, so later
+        operators can resolve requirement fields via dot-paths like
+        ``selected_entities_data.<store_as>.0.<field>`` without re-asking the
+        citizen for data already present in a selected requirement entity.
+        """
+        selected_data: Dict[str, List[Dict[str, Any]]] = {}
+        for store_as, entity_ids in selected_entities_group.items():
+            items: List[Dict[str, Any]] = []
+            for entity_id in entity_ids:
+                entity = entities_by_id.get(entity_id)
+                if entity is not None:
+                    items.append(self._entity_data_snapshot(entity))
+            selected_data[store_as] = items
+        return selected_data
+
+    async def _hydrate_selected_entities_data(
+        self,
+        selected_entities_group: Dict[str, List[str]],
+        context: Dict[str, Any],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch full entity data for user-selected IDs (one DB lookup per ID).
+
+        Used on the user-selection path, where only the chosen IDs are known
+        (the discovery cache was invalidated before validation).
+        """
+        user_id = context.get("user_id")
+        entities_by_id: Dict[str, Any] = {}
+        for entity_ids in selected_entities_group.values():
+            for entity_id in entity_ids:
+                if entity_id in entities_by_id:
+                    continue
+                entity = await EntityService.get_entity(entity_id, user_id)
+                if entity is not None:
+                    entities_by_id[entity_id] = entity
+        return self._build_selected_entities_data(selected_entities_group, entities_by_id)
+
+    async def _attach_selected_entities_data(
+        self, result: TaskResult, context: Dict[str, Any]
+    ) -> None:
+        """Enrich a CONTINUE result from user selection with the entities' data."""
+        data = result.data or {}
+        selected_entities_group = data.get("selected_entities")
+        if not selected_entities_group:
+            return
+        if "_selected_entities_data" in data:
+            return  # already populated (e.g. auto-select path)
+        selected_entities_data = await self._hydrate_selected_entities_data(
+            selected_entities_group, context
+        )
+        data["_selected_entities_data"] = selected_entities_data
+        result.data = data
+        # Keep operator state in sync for tracking/snapshots.
+        if isinstance(self.state.output_data, dict):
+            self.state.output_data["_selected_entities_data"] = selected_entities_data
+
     async def _discover_available_entities(self, requirements: List[Dict[str, Any]], user_id: str) -> Dict[str, List]:
         """Find all entities that match each requirement"""
         logger.info("Starting entity discovery for all requirements",
@@ -524,8 +600,26 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                        selected_count=len(selected_ids),
                        entity_ids=selected_ids[:3])  # Log first 3 IDs
 
-        # Only store the grouped selected entities
-        auto_selection_data = {"selected_entities": selected_entities_group}
+        # Also persist the full data of the selected entities so downstream
+        # steps can read requirement fields without re-asking the user. Here we
+        # already hold the discovered entity objects, so no extra DB query.
+        entities_by_id = {
+            entity.entity_id: entity
+            for entities in requirement_entities.values()
+            for entity in entities
+        }
+        selected_entities_data = self._build_selected_entities_data(
+            selected_entities_group, entities_by_id
+        )
+
+        # Store the grouped selected entities (IDs) and their data. The data lives
+        # under an underscore-prefixed key so EntityCreationOperator's auto-collect
+        # (which flattens top-level dicts) never copies full entity payloads into
+        # output entities; downstream steps reference it explicitly by dot-path.
+        auto_selection_data = {
+            "selected_entities": selected_entities_group,
+            "_selected_entities_data": selected_entities_data,
+        }
 
         # Update state for tracking
         self.state.output_data = auto_selection_data
@@ -707,9 +801,11 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             # First run the regular execute to prepare parameters
             result = self.execute(context)
 
-            # If validation passed (status=TaskStatus.CONTINUE), return that result immediately
+            # If validation passed (status=TaskStatus.CONTINUE), enrich it with the
+            # selected entities' data (so downstream steps need not re-ask), then return.
             if result.status == TaskStatus.CONTINUE:
                 logger.info("Validation passed, returning continue result from execute_async")
+                await self._attach_selected_entities_data(result, context)
                 return result
 
             if hasattr(self, '_check_params') and self._check_params:

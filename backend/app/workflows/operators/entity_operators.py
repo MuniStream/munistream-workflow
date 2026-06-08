@@ -12,6 +12,37 @@ from ...models.legal_entity import LegalEntity
 from ...services.visualizers.visualizer_factory import VisualizerFactory
 
 
+def _resolve_context_path(context: Any, path: str) -> Any:
+    """Resolve a dot-path against context, supporting numeric list indices.
+
+    Mirrors ConfirmationOperator._resolve_path so paths such as
+    '_selected_entities_data.embarcacion_ids.0.nombre' resolve into a list of
+    selected-entity snapshots. Descends dicts by key and lists by integer index.
+    Returns None if any segment fails to resolve.
+    """
+    if not path:
+        return None
+    current: Any = context
+    for part in path.split("."):
+        if isinstance(current, list):
+            try:
+                idx = int(part)
+            except (TypeError, ValueError):
+                return None
+            if 0 <= idx < len(current):
+                current = current[idx]
+            else:
+                return None
+        elif isinstance(current, dict):
+            if part in current:
+                current = current[part]
+            else:
+                return None
+        else:
+            return None
+    return current
+
+
 class EntityCreationOperator(BaseOperator):
     """
     Operator that creates a new legal entity during workflow execution.
@@ -134,16 +165,12 @@ class EntityCreationOperator(BaseOperator):
                 elif value is not None and not isinstance(value, (list, dict)):
                     entity_data[key] = value
 
-            # Apply explicit mapping overrides if provided
+            # Apply explicit mapping overrides if provided. Paths support dict keys
+            # and numeric list indices, so they can pull fields from a selected
+            # requirement entity (e.g. "_selected_entities_data.embarcacion_ids.0.nombre").
             if self.data_mapping:
                 for context_key, data_field in self.data_mapping.items():
-                    value = context
-                    for key_part in context_key.split("."):
-                        if isinstance(value, dict):
-                            value = value.get(key_part)
-                            if value is None:
-                                break
-
+                    value = _resolve_context_path(context, context_key)
                     if value is not None:
                         entity_data[data_field] = value
 
@@ -350,17 +377,9 @@ class EntityCreationOperator(BaseOperator):
         if key in context:
             return context[key]
 
-        # Try nested key with dot notation
+        # Try nested key with dot notation (supports numeric list indices)
         if '.' in key:
-            value = context
-            for key_part in key.split('.'):
-                if isinstance(value, dict):
-                    value = value.get(key_part)
-                    if value is None:
-                        break
-                else:
-                    return None
-            return value
+            return _resolve_context_path(context, key)
 
         return None
 
