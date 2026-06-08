@@ -6,6 +6,8 @@ import os
 import boto3
 import hashlib
 import mimetypes
+import re
+import unicodedata
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .base import BaseOperator, TaskResult, TaskStatus
 from ...core.config import settings
+
+
+def _sanitize_filename(filename: str) -> str:
+    """ASCII-safe filename para S3 key y metadata headers.
+
+    S3 metadata headers (x-amz-meta-*) deben ser ASCII; nombres con acentos
+    rompen put_object. El S3 key acepta UTF-8 pero las presigned URLs son
+    más predecibles con ASCII puro.
+    """
+    if not filename:
+        return "file"
+    nfkd = unicodedata.normalize("NFKD", filename)
+    ascii_only = nfkd.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", ascii_only).strip("_")
+    return cleaned or "file"
 
 
 class S3UploadOperator(BaseOperator):
@@ -163,12 +180,13 @@ class S3UploadOperator(BaseOperator):
             path_parts.append(context["instance_id"])
 
         # Generate unique filename to prevent collisions
+        safe_name = _sanitize_filename(filename)
         file_hash = hashlib.md5(f"{filename}{now.isoformat()}".encode()).hexdigest()[:8]
-        name_parts = filename.rsplit(".", 1)
+        name_parts = safe_name.rsplit(".", 1)
         if len(name_parts) == 2:
             unique_filename = f"{name_parts[0]}_{file_hash}.{name_parts[1]}"
         else:
-            unique_filename = f"{filename}_{file_hash}"
+            unique_filename = f"{safe_name}_{file_hash}"
 
         path_parts.append(unique_filename)
 
@@ -469,10 +487,10 @@ class S3UploadOperator(BaseOperator):
             content_type, _ = mimetypes.guess_type(filename)
             content_type = content_type or "application/octet-stream"
 
-        # Prepare metadata
+        # Prepare metadata (S3 headers requieren ASCII)
         metadata = {
             **self.metadata_tags,
-            "original-filename": filename,
+            "original-filename": _sanitize_filename(filename),
             "upload-timestamp": datetime.utcnow().isoformat(),
             "instance-id": context.get("instance_id", ""),
             "user-id": context.get("user_id", context.get("customer_id", "")),
