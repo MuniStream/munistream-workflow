@@ -6,7 +6,7 @@ handles client-side X.509 certificate signing, and stores the signature
 in the context for subsequent operators to use.
 """
 from typing import Dict, Any, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, date
 import json
 import hashlib
 import base64
@@ -15,6 +15,21 @@ from pydantic import BaseModel, Field
 from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.signature.context_signer import ContextSignerService
 from ...models.workflow import WorkflowInstance
+
+
+def _json_default(obj):
+    """JSON default handler para tipos no nativos que llegan en el contexto.
+
+    El contexto persistido en Mongo trae datetimes (BSON) que llegan al
+    operador sin serializar. Sin un handler, json.dumps revienta con
+    "Object of type datetime is not JSON serializable" al calcular el hash
+    de integridad. Convertimos datetimes/dates a ISO 8601 (estable y
+    determinístico para el hash) y caemos a str() para cualquier otro
+    tipo no estándar.
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    return str(obj)
 
 
 class SignerOperator(BaseOperator):
@@ -142,7 +157,7 @@ class SignerOperator(BaseOperator):
         })
 
         # Create hash of the signable data for integrity
-        data_json = json.dumps(signable_data, sort_keys=True)
+        data_json = json.dumps(signable_data, sort_keys=True, default=_json_default)
         data_hash = hashlib.sha256(data_json.encode()).hexdigest()
         signable_data["data_hash"] = data_hash
 
