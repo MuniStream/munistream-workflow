@@ -411,6 +411,89 @@ class S3UploadOperator(BaseOperator):
                 "s3_key": s3_key
             }
 
+    async def _copy_pending_upload(
+        self,
+        file_data: Dict[str, Any],
+        tmp_s3_key: str,
+        tmp_s3_bucket: str,
+        filename: str,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Mueve un archivo pre-subido por `submit-data` (vivía en
+        `tmp/<instance>/<task>/<field>/...`) al destino final del operador.
+        Devuelve el mismo shape que `_process_file_upload` para que el
+        caller no se entere de qué rama tomó."""
+        from ...services import s3_storage
+
+        s3_key = self._generate_s3_key(filename, context)
+        content_type = self.content_type or file_data.get("content_type")
+        if not content_type:
+            content_type, _ = mimetypes.guess_type(filename)
+            content_type = content_type or "application/octet-stream"
+
+        metadata = {
+            **self.metadata_tags,
+            "original-filename": _sanitize_filename(filename),
+            "upload-timestamp": datetime.utcnow().isoformat(),
+            "instance-id": context.get("instance_id", ""),
+            "user-id": context.get("user_id", context.get("customer_id", "")),
+            "workflow-id": context.get("workflow_id", ""),
+        }
+        metadata = {k: v for k, v in metadata.items() if v}
+
+        print(f"   Copy from s3://{tmp_s3_bucket}/{tmp_s3_key}")
+        print(f"   Copy to   s3://{self.bucket_name}/{s3_key}")
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda: s3_storage.copy_object(
+                    src_bucket=tmp_s3_bucket,
+                    src_key=tmp_s3_key,
+                    dst_bucket=self.bucket_name,
+                    dst_key=s3_key,
+                    content_type=content_type,
+                    metadata=metadata,
+                ),
+            )
+        except Exception as e:
+            print(f"❌ S3 copy failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "filename": filename,
+                "success": False,
+                "error": f"S3 copy failed: {str(e)}",
+                "s3_key": tmp_s3_key,
+            }
+
+        # Best-effort cleanup del tmp; si falla no rompe el upload.
+        try:
+            await loop.run_in_executor(
+                self.executor,
+                lambda: s3_storage.delete_object(tmp_s3_bucket, tmp_s3_key),
+            )
+        except Exception as e:
+            print(f"⚠️ Could not delete tmp object {tmp_s3_key}: {e}")
+
+        if self.make_public:
+            url = f"https://{self.bucket_name}.s3.amazonaws.com/{s3_key}"
+        else:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': self.bucket_name, 'Key': s3_key},
+                ExpiresIn=604800,
+            )
+
+        return {
+            "success": True,
+            "filename": filename,
+            "s3_key": s3_key,
+            "bucket": self.bucket_name,
+            "url": url,
+            "size": file_data.get("size", 0),
+        }
+
     async def _process_file_upload(
         self,
         file_data: Dict[str, Any],
@@ -441,6 +524,22 @@ class S3UploadOperator(BaseOperator):
                 "success": False,
                 "error": error
             }
+
+        # Caso S3-first: el archivo ya está en S3 (subido por submit-data
+        # bajo tmp/<instance>/<task>/<field>/...). Hacemos copy al destino
+        # final del operador y borramos el tmp.
+        # ROLLBACK: borrar este bloque entero para volver a forzar el path
+        # base64/content/path tradicional.
+        tmp_s3_key = file_data.get("s3_key")
+        tmp_s3_bucket = file_data.get("s3_bucket")
+        if tmp_s3_key and tmp_s3_bucket:
+            return await self._copy_pending_upload(
+                file_data=file_data,
+                tmp_s3_key=tmp_s3_key,
+                tmp_s3_bucket=tmp_s3_bucket,
+                filename=filename,
+                context=context,
+            )
 
         # Get file content - check both 'content' and 'base64' keys
         file_content = file_data.get("content") or file_data.get("base64")

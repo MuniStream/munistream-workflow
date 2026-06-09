@@ -131,26 +131,26 @@ async def submit_data(
     
     # Get submitted data - handle both JSON and FormData
     content_type = request.headers.get("content-type", "")
-    
+
     if "multipart/form-data" in content_type:
-        # Handle FormData
+        # Handle FormData. Files se suben a S3 (tmp/) y solo se persiste la
+        # referencia en context — evita meter base64 en Mongo y que el strip
+        # de _save_instance_state borre uploads pendientes (>100 KB).
+        from app.services import s3_storage
         form = await request.form()
         data = {}
         for key, value in form.items():
-            # Handle file uploads separately if needed
             if hasattr(value, 'filename'):
-                # This is a file upload - read the file content
-                import base64
                 file_content = await value.read()
-                # Convert to base64 for storage
-                file_base64 = base64.b64encode(file_content).decode('utf-8')
-                
-                data[key] = {
-                    "filename": value.filename,
-                    "content_type": value.content_type,
-                    "base64": file_base64,  # Store the actual file content as base64
-                    "size": len(file_content)
-                }
+                ref = s3_storage.upload_pending_file(
+                    instance_id=instance_id,
+                    task_id=waiting_task,
+                    field_name=key,
+                    filename=value.filename,
+                    content_type=value.content_type,
+                    file_content=file_content,
+                )
+                data[key] = ref
             else:
                 data[key] = value
     else:

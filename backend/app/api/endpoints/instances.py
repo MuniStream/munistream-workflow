@@ -1252,24 +1252,22 @@ async def submit_workflow_data(
     content_type = request.headers.get("content-type", "")
 
     if "multipart/form-data" in content_type:
-        # Handle FormData
+        # Handle FormData — los files se suben a S3 y solo guardamos la
+        # referencia en context (ver app/services/s3_storage.py).
+        from app.services import s3_storage
         form = await request.form()
         data = {}
         for key, value in form.items():
-            # Handle file uploads separately if needed
             if hasattr(value, 'filename'):
-                # This is a file upload - read the file content
-                import base64
                 file_content = await value.read()
-                # Convert to base64 for storage
-                file_base64 = base64.b64encode(file_content).decode('utf-8')
-
-                data[key] = {
-                    "filename": value.filename,
-                    "content_type": value.content_type,
-                    "base64": file_base64,  # Store the actual file content as base64
-                    "size": len(file_content)
-                }
+                data[key] = s3_storage.upload_pending_file(
+                    instance_id=instance_id,
+                    task_id=waiting_task,
+                    field_name=key,
+                    filename=value.filename,
+                    content_type=value.content_type,
+                    file_content=file_content,
+                )
             else:
                 data[key] = value
     else:
