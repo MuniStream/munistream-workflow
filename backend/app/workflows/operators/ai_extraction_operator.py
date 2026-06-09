@@ -371,12 +371,15 @@ Please extract the information and return only the JSON result, no additional te
                 aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
                 endpoint_url = os.getenv("S3_ENDPOINT_URL")
 
+                # No pasar aws_access_key_id/aws_secret_access_key explícitamente.
+                # En EC2 esas env vars están definidas pero vacías y boto3 las trata
+                # como credenciales explícitas, saltándose el IAM role del instance
+                # profile y firmando con AKID vacío → AuthorizationHeaderMalformed.
+                # Sin esos params boto3 usa el default credential chain (env → IAM).
                 s3_client = boto3.client(
                     's3',
                     region_name=aws_region,
                     endpoint_url=endpoint_url,
-                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
                 )
 
                 response = s3_client.get_object(Bucket=bucket, Key=s3_key)
