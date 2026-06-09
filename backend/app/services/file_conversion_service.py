@@ -361,13 +361,16 @@ class FileConversionService:
                 bucket_name = path_parts[0]
                 s3_key = path_parts[1] if len(path_parts) > 1 else ''
 
-            # Initialize S3 client with environment configuration
+            # Initialize S3 client. No pasar aws_access_key_id/aws_secret_access_key
+            # explícitamente: en EC2 esas env vars están definidas pero vacías y
+            # boto3 las trata como credenciales explícitas, saltándose el IAM role
+            # del instance profile y firmando con AKID vacío
+            # → AuthorizationHeaderMalformed. Sin esos params boto3 usa el default
+            # credential chain (env → IAM).
             s3_client = boto3.client(
                 's3',
                 region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
                 endpoint_url=os.getenv("S3_ENDPOINT_URL"),  # For MinIO
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
             )
 
             try:

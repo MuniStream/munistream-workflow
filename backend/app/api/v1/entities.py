@@ -367,12 +367,15 @@ async def fetch_entity_file(
         s3_key = path_parts[1]
 
         # Initialize S3 client with environment configuration
+        # No pasar aws_access_key_id/aws_secret_access_key explícitamente:
+        # en EC2 esas env vars están definidas pero vacías y boto3 las trata
+        # como credenciales explícitas, saltándose el IAM role del instance
+        # profile y firmando con AKID vacío → AuthorizationHeaderMalformed.
+        # Sin esos params boto3 usa el default credential chain (env → IAM).
         s3_client = boto3.client(
             's3',
             region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
             endpoint_url=os.getenv("S3_ENDPOINT_URL"),
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
         )
 
         # Download file from S3
