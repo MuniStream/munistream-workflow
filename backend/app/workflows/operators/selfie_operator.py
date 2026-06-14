@@ -50,6 +50,7 @@ class SelfieOperator(ImageCaptureOperator):
         purpose: str = "identity_verification",
         require_face_detection: bool = True,
         require_liveness: bool = False,
+        allow_file_upload: bool = False,
         **kwargs
     ):
         """
@@ -61,12 +62,19 @@ class SelfieOperator(ImageCaptureOperator):
             purpose: Purpose of selfie capture for audit trail
             require_face_detection: Whether face detection is mandatory
             require_liveness: Whether liveness detection is required
+            allow_file_upload: Permitir subir un archivo de imagen además de la
+                cámara en vivo (omite las validaciones de captura en vivo)
         """
         # Simple form config for waiting_for="selfie" pattern
         form_config = {
             "title": "Verificación de Identidad - Selfie",
-            "description": "Toma una selfie usando la cámara de tu dispositivo para verificar tu identidad.",
+            "description": (
+                "Sube una foto o toma una selfie para verificar tu identidad."
+                if allow_file_upload else
+                "Toma una selfie usando la cámara de tu dispositivo para verificar tu identidad."
+            ),
             "capture_type": "selfie",
+            "allow_file_upload": allow_file_upload,
             "camera_settings": {
                 "facingMode": "user",  # Front camera for selfie
                 "width": {"min": 640, "ideal": 1280, "max": 1920},
@@ -79,20 +87,24 @@ class SelfieOperator(ImageCaptureOperator):
                 "auto_capture": False,  # Manual capture only
                 "preview_before_submit": True,
                 "allow_retake": True,
+                "allow_file_upload": allow_file_upload,
                 "max_file_size": 5 * 1024 * 1024,  # 5MB
-                "require_permissions": ["camera"],
+                "require_permissions": [] if allow_file_upload else ["camera"],
                 "validation_feedback": True  # Show validation results
             },
             "instructions": [
                 "Asegúrate de tener buena iluminación",
                 "Mantén tu rostro centrado en el marco",
                 "Quítate lentes de sol o elementos que oculten tu cara",
-                "La foto se tomará en tiempo real con la cámara"
+                ("Puedes subir un archivo de imagen o usar la cámara"
+                 if allow_file_upload else
+                 "La foto se tomará en tiempo real con la cámara")
             ]
         }
 
         kwargs['form_config'] = form_config
         kwargs['required_fields'] = ["selfie_image"]
+        kwargs['allow_file_upload'] = allow_file_upload
 
         # Initialize with base class (handles common parameters)
         super().__init__(task_id, **kwargs)
