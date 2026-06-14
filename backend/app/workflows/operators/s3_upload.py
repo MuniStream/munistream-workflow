@@ -62,6 +62,7 @@ class S3UploadOperator(BaseOperator):
         acl: Optional[str] = None,
         max_file_size: int = 100 * 1024 * 1024,  # 100MB default
         allowed_extensions: Optional[List[str]] = None,
+        skip_if_missing: bool = False,
         **kwargs
     ):
         """
@@ -80,11 +81,15 @@ class S3UploadOperator(BaseOperator):
             acl: S3 ACL (private, public-read, public-read-write, etc.)
             max_file_size: Maximum allowed file size in bytes
             allowed_extensions: List of allowed file extensions
+            skip_if_missing: Si es True y no hay archivo en el contexto, el paso
+                continúa sin fallar (para documentos opcionales). Por defecto False
+                mantiene el comportamiento estricto (falla si falta el archivo).
         """
         super().__init__(task_id, **kwargs)
         self.bucket_name = bucket_name or os.getenv("S3_BUCKET_NAME", "munistream-uploads")
         self.s3_prefix = s3_prefix
         self.file_source = file_source
+        self.skip_if_missing = skip_if_missing
         self.make_public = make_public
         self.metadata_tags = metadata_tags or {}
         self.content_type = content_type
@@ -649,6 +654,24 @@ class S3UploadOperator(BaseOperator):
                     files_data = [files_data]
 
             if not files_data:
+                if self.skip_if_missing:
+                    # Documento opcional ausente: continuar sin fallar.
+                    print(f"⏭️ S3UploadOperator: sin archivo en '{self.file_source}' (opcional), se omite la carga")
+                    return TaskResult(
+                        status=TaskStatus.CONTINUE,
+                        data={
+                            f"{self.task_id}_result": {
+                                "uploaded_files": [],
+                                "failed_files": [],
+                                "total_files": 0,
+                                "successful_count": 0,
+                                "failed_count": 0,
+                                "skipped": True,
+                                "bucket": self.bucket_name,
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                        }
+                    )
                 error_msg = f"No files found in context key '{self.file_source}'. Expected files for upload but none were provided."
                 print(f"❌ S3UploadOperator: {error_msg}")
                 return TaskResult(
