@@ -573,6 +573,25 @@ def _calculate_duration(num_steps: int, avg_seconds_per_step: int = 180) -> str:
         return f"{minutes}-{minutes+15} min"
 
 
+def _slim_entity_data(data: Dict[str, Any], max_bytes: int = 1024) -> Dict[str, Any]:
+    """Strip heavy values (base64 images, signable_data, certificates, etc.) from
+    entity data for LIST views. The list UI only renders short text fields, while
+    these entities can embed multi-MB base64 images — returning them all turns a
+    page load into tens of MB of JSON. Full data stays available via the entity
+    detail endpoint."""
+    if not data:
+        return {}
+    slim: Dict[str, Any] = {}
+    for key, value in data.items():
+        try:
+            size = len(value) if isinstance(value, str) else len(json.dumps(value, default=str))
+        except (TypeError, ValueError):
+            size = max_bytes + 1
+        if size <= max_bytes:
+            slim[key] = value
+    return slim
+
+
 @router.get("/entities")
 async def list_user_entities(
     current_customer: Customer = Depends(get_current_customer),
@@ -617,7 +636,7 @@ async def list_user_entities(
             "name": entity.name,
             "status": entity.status,
             "verified": entity.verified,
-            "data": entity.data,
+            "data": _slim_entity_data(entity.data),
             "created_at": entity.created_at.isoformat() if entity.created_at else None,
             "updated_at": entity.updated_at.isoformat() if entity.updated_at else None,
             "available_workflows": available_workflows,
