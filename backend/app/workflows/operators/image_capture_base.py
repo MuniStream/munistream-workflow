@@ -41,6 +41,7 @@ class ImageCaptureOperator(BaseOperator):
         timeout_minutes: int = 10,
         max_timestamp_age_seconds: int = 60,
         allow_retake: bool = True,
+        allow_file_upload: bool = False,
         **kwargs
     ):
         super().__init__(task_id, **kwargs)
@@ -49,6 +50,11 @@ class ImageCaptureOperator(BaseOperator):
         self.timeout_minutes = timeout_minutes
         self.max_timestamp_age_seconds = max_timestamp_age_seconds
         self.allow_retake = allow_retake
+        # Cuando es True, la imagen puede provenir de un archivo subido (no solo
+        # cámara en vivo): se omiten las validaciones de captura en vivo
+        # (timestamp, browser fingerprint, getUserMedia) y se conserva la
+        # evaluación de calidad de imagen.
+        self.allow_file_upload = allow_file_upload
 
     def extract_image_from_formdata(self, image_data_raw: Any) -> tuple[Union[str, bytes], Dict[str, Any]]:
         """
@@ -111,23 +117,32 @@ class ImageCaptureOperator(BaseOperator):
             if image_bytes is None:
                 return {"valid": False, "errors": ["Invalid image data format"], "reason": "invalid_format"}
 
-            # 1. Timestamp validation
-            timestamp_valid = self.validate_timestamp(metadata)
-            if not timestamp_valid['valid']:
-                errors.extend(timestamp_valid['errors'])
-            validation_details['timestamp_verified'] = timestamp_valid['valid']
+            if self.allow_file_upload:
+                # Archivo subido: no aplican las validaciones de captura en vivo
+                # (timestamp / browser fingerprint / getUserMedia). Se marcan como
+                # no aplicables y solo se evalúa la calidad de la imagen.
+                validation_details['timestamp_verified'] = None
+                validation_details['browser_fingerprint_verified'] = None
+                validation_details['live_capture_verified'] = None
+                validation_details['source'] = 'file_upload'
+            else:
+                # 1. Timestamp validation
+                timestamp_valid = self.validate_timestamp(metadata)
+                if not timestamp_valid['valid']:
+                    errors.extend(timestamp_valid['errors'])
+                validation_details['timestamp_verified'] = timestamp_valid['valid']
 
-            # 2. Browser fingerprint validation
-            fingerprint_valid = self.validate_browser_fingerprint(metadata)
-            if not fingerprint_valid['valid']:
-                errors.extend(fingerprint_valid['errors'])
-            validation_details['browser_fingerprint_verified'] = fingerprint_valid['valid']
+                # 2. Browser fingerprint validation
+                fingerprint_valid = self.validate_browser_fingerprint(metadata)
+                if not fingerprint_valid['valid']:
+                    errors.extend(fingerprint_valid['errors'])
+                validation_details['browser_fingerprint_verified'] = fingerprint_valid['valid']
 
-            # 3. Live capture validation
-            live_capture_valid = self.validate_live_capture(image_bytes, metadata)
-            if not live_capture_valid['valid']:
-                errors.extend(live_capture_valid['errors'])
-            validation_details['live_capture_verified'] = live_capture_valid['valid']
+                # 3. Live capture validation
+                live_capture_valid = self.validate_live_capture(image_bytes, metadata)
+                if not live_capture_valid['valid']:
+                    errors.extend(live_capture_valid['errors'])
+                validation_details['live_capture_verified'] = live_capture_valid['valid']
 
             # 4. Image quality assessment
             quality_result = self.assess_image_quality(image_bytes)

@@ -62,6 +62,7 @@ class IDCaptureOperator(ImageCaptureOperator):
         detect_text: bool = True,
         detect_codes: bool = True,
         validation_config: Optional[Dict] = None,
+        allow_file_upload: bool = False,
         **kwargs
     ):
         """
@@ -80,6 +81,8 @@ class IDCaptureOperator(ImageCaptureOperator):
             detect_text: Whether to detect text presence
             detect_codes: Whether to detect and decode QR/barcodes
             validation_config: Additional validation parameters
+            allow_file_upload: Permitir subir archivos de imagen (frente/reverso)
+                además de la cámara en vivo (omite validaciones de captura en vivo)
         """
         # Default instructions
         default_instructions = {
@@ -96,13 +99,20 @@ class IDCaptureOperator(ImageCaptureOperator):
         # Simple form config for waiting_for="id_capture" pattern
         form_config = {
             "title": "Captura de Documento de Identidad",
-            "description": "Captura ambos lados del documento usando la cámara de tu dispositivo.",
+            "description": (
+                "Sube los archivos o captura ambos lados del documento con la cámara."
+                if allow_file_upload else
+                "Captura ambos lados del documento usando la cámara de tu dispositivo."
+            ),
             "capture_type": "id_document",
+            "allow_file_upload": allow_file_upload,
             "instructions": [
                 "Asegúrate de tener buena iluminación",
                 "Mantén el documento plano y centrado",
                 "Verifica que todo el texto sea legible",
-                "Ambas capturas (frente y reverso) son obligatorias"
+                ("Puedes subir un archivo (INE, pasaporte, etc.) o usar la cámara"
+                 if allow_file_upload else
+                 "Ambas capturas (frente y reverso) son obligatorias")
             ],
             "camera_settings": {
                 "facingMode": "environment",  # Back camera for documents
@@ -116,8 +126,9 @@ class IDCaptureOperator(ImageCaptureOperator):
                 "auto_capture": False,
                 "preview_before_submit": True,
                 "allow_retake": allow_retake,
+                "allow_file_upload": allow_file_upload,
                 "max_file_size": 10 * 1024 * 1024,  # 10MB per image
-                "require_permissions": ["camera"],
+                "require_permissions": [] if allow_file_upload else ["camera"],
                 "validation_feedback": True,
                 "detect_edges": True,  # Document edge detection
                 "min_document_coverage": 0.7  # 70% of frame should be document
@@ -126,6 +137,7 @@ class IDCaptureOperator(ImageCaptureOperator):
 
         kwargs['form_config'] = form_config
         kwargs['required_fields'] = ["document_front", "document_back"]
+        kwargs['allow_file_upload'] = allow_file_upload
 
         # Initialize with base class (handles common parameters)
         super().__init__(task_id, **kwargs)

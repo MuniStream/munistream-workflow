@@ -12,6 +12,7 @@ from .airflow_operator import AirflowOperator
 from .s3_upload import S3UploadOperator
 from .entity_operators import (
     EntityCreationOperator,
+    EntityUpdateOperator,
     EntityValidationOperator,
     EntityRequirementOperator,
     EntityRelationshipOperator,
@@ -56,6 +57,7 @@ __all__ = [
 
     # Entity operators
     "EntityCreationOperator",
+    "EntityUpdateOperator",
     "EntityValidationOperator",
     "EntityRequirementOperator",
     "EntityRelationshipOperator",

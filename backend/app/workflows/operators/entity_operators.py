@@ -405,6 +405,124 @@ class EntityCreationOperator(BaseOperator):
         return resolved_template
 
 
+class EntityUpdateOperator(BaseOperator):
+    """Operator que actualiza una entidad existente.
+
+    Útil para trámites que modifican una entidad ya registrada (p.ej. sustituir
+    al titular de una concesión): se toma el id de la entidad de un campo de
+    contexto (típicamente la selección de un EntityPickerOperator) y se aplican
+    los cambios indicados en `data_mapping` (con soporte de paths punteados) y
+    `static_data` sobre el campo `data` de la entidad (merge).
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        entity_id_source: str,
+        data_mapping: Optional[Dict[str, str]] = None,
+        static_data: Optional[Dict[str, Any]] = None,
+        preserve_as: Optional[Dict[str, str]] = None,
+        owner_scoped: bool = False,
+        **kwargs
+    ):
+        """
+        Args:
+            entity_id_source: Clave de contexto con el id de la entidad a actualizar.
+                Si el valor es una lista (p.ej. `concesion_ids`), se usa el primero.
+            data_mapping: Mapa {ruta_en_contexto: campo_en_data} a actualizar.
+            static_data: Campos fijos a fijar en `data`.
+            preserve_as: Mapa {campo_actual_en_data: campo_destino} que copia el
+                valor ACTUAL de la entidad (antes de sobrescribir) a otro campo,
+                p.ej. {"customer_name": "titular_anterior"} para conservar el
+                titular previo al sustituirlo.
+            owner_scoped: Si es True, sólo actualiza si la entidad pertenece al
+                usuario del contexto; por defecto False (flujo validado por admin).
+        """
+        super().__init__(task_id, **kwargs)
+        self.entity_id_source = entity_id_source
+        self.data_mapping = data_mapping or {}
+        self.static_data = static_data or {}
+        self.preserve_as = preserve_as or {}
+        self.owner_scoped = owner_scoped
+
+    def _resolve_entity_id(self, context: Dict[str, Any]) -> Optional[str]:
+        value = _resolve_context_path(context, self.entity_id_source)
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+
+    def execute(self, context: Dict[str, Any]) -> TaskResult:
+        try:
+            entity_id = self._resolve_entity_id(context)
+            if not entity_id:
+                return TaskResult(
+                    status=TaskStatus.FAILED,
+                    error=f"No se encontró id de entidad en '{self.entity_id_source}'"
+                )
+
+            updates: Dict[str, Any] = dict(self.static_data)
+            for context_key, data_field in self.data_mapping.items():
+                value = _resolve_context_path(context, context_key)
+                if value is not None:
+                    updates[data_field] = value
+
+            owner_user_id = None
+            if self.owner_scoped:
+                owner_user_id = context.get("user_id") or context.get("customer_id")
+
+            self._update_params = {
+                "entity_id": entity_id,
+                "updates": {"data": updates},
+                "owner_user_id": owner_user_id,
+            }
+            return TaskResult(status=TaskStatus.PENDING_ASYNC, data={})
+        except Exception as e:
+            return TaskResult(status=TaskStatus.FAILED, error=f"Failed to prepare entity update: {str(e)}")
+
+    async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
+        result = self.execute(context)
+        if not hasattr(self, "_update_params") or not self._update_params:
+            return result
+
+        params = self._update_params
+        await self.log_info(
+            f"Actualizando entidad {params['entity_id']}",
+            details={"fields": list(params['updates'].get('data', {}).keys())}
+        )
+        try:
+            # Conservar valores actuales antes de sobrescribir (p.ej. titular anterior)
+            if self.preserve_as:
+                current = await EntityService.get_entity(params["entity_id"], params["owner_user_id"])
+                if current is not None:
+                    for src_field, target_field in self.preserve_as.items():
+                        old_value = (current.data or {}).get(src_field)
+                        if old_value is not None:
+                            params["updates"]["data"][target_field] = old_value
+
+            entity = await EntityService.update_entity(
+                params["entity_id"], params["updates"], params["owner_user_id"]
+            )
+            if entity is None:
+                return TaskResult(
+                    status=TaskStatus.FAILED,
+                    error=f"No se pudo actualizar: entidad {params['entity_id']} no encontrada"
+                )
+            await self.log_info(
+                f"Entidad {entity.entity_id} actualizada",
+                details={"entity_id": entity.entity_id, "data": entity.data}
+            )
+            output_data = {
+                f"{self.task_id}_entity_id": entity.entity_id,
+                f"{self.task_id}_entity_type": entity.entity_type,
+                f"updated_entity_{entity.entity_type}": entity.entity_id,
+            }
+            self.state.output_data = output_data
+            return TaskResult(status=TaskStatus.CONTINUE, data=output_data)
+        except Exception as e:
+            await self.log_error(f"Falló la actualización de la entidad {params['entity_id']}", error=e)
+            return TaskResult(status=TaskStatus.FAILED, error=str(e))
+
+
 class EntityValidationOperator(BaseOperator):
     """
     Simple operator that validates an entity exists and meets basic criteria.
