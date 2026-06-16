@@ -37,6 +37,11 @@ class KeycloakSyncService:
         self._admin_token = None
         self._admin_token_expires = None
 
+        # Cache for identity providers list (short TTL)
+        self._idp_cache: Optional[List[Dict[str, str]]] = None
+        self._idp_cache_expires: float = 0
+        self._idp_cache_ttl = 300  # seconds
+
         logger.info(f"KeycloakSyncService initialized for realm: {self.realm}")
 
     async def _get_admin_token(self) -> str:
@@ -110,6 +115,43 @@ class KeycloakSyncService:
                 result_data = {}
 
             return response.status_code, result_data
+
+    async def get_identity_providers(self) -> List[Dict[str, str]]:
+        """Get enabled identity providers configured for the citizen realm.
+
+        Returns a list of {alias, displayName} for each enabled provider so the
+        citizen portal can render login buttons dynamically. Cached for a short
+        TTL to avoid hitting the admin API on every page load.
+        """
+        now = datetime.utcnow().timestamp()
+        if self._idp_cache is not None and now < self._idp_cache_expires:
+            return self._idp_cache
+
+        try:
+            status_code, providers = await self._make_admin_request(
+                "GET", "/identity-provider/instances"
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch identity providers: {e}")
+            # Serve stale cache if available, otherwise empty
+            return self._idp_cache or []
+
+        if status_code != 200 or not isinstance(providers, list):
+            logger.warning(f"Identity providers request returned {status_code}")
+            return self._idp_cache or []
+
+        result = [
+            {
+                "alias": p["alias"],
+                "displayName": p.get("displayName") or p["alias"],
+            }
+            for p in providers
+            if p.get("enabled", True) and p.get("alias")
+        ]
+
+        self._idp_cache = result
+        self._idp_cache_expires = now + self._idp_cache_ttl
+        return result
 
     async def sync_user_to_keycloak(self, user: UserModel) -> bool:
         """Sync a user from MuniStream to Keycloak"""

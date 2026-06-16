@@ -27,6 +27,18 @@ router = APIRouter()
 router.include_router(auth_router)
 
 
+@router.get("/identity-providers")
+async def list_identity_providers() -> Dict[str, Any]:
+    """List enabled identity providers for the citizen realm.
+
+    Public endpoint: lets the citizen portal render login buttons (e.g. LlaveMX)
+    dynamically. Returns an empty list if none are configured.
+    """
+    from ...services.keycloak_sync import keycloak_sync_service
+    providers = await keycloak_sync_service.get_identity_providers()
+    return {"identity_providers": providers}
+
+
 @router.post("/instances/{instance_id}/rewind")
 async def rewind_instance(
     instance_id: str,
