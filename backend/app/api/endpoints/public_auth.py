@@ -373,18 +373,60 @@ async def track_instance(
             if "current_step_id" not in input_form:
                 input_form["current_step_id"] = waiting_tasks[0]
 
-    # Calculate progress
-    total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
-    completed_steps = 0
+    # Build the citizen-facing step list. Branched workflows (e.g. RNPA
+    # persona física / moral) use ShortCircuitOperator gates whose non-taken
+    # branch is marked "skipped" by propagate_skips(). We hide both the
+    # internal gates and the skipped branch so the citizen only sees their own
+    # route, and we derive the route label from the gate that actually ran.
+    from ...workflows.operators.python import ShortCircuitOperator
+
     step_progress = []
+    route_label = None
+
+    # Identify the non-taken branch so the citizen only sees their own route.
+    # A ShortCircuitOperator gate that did NOT complete means its branch was
+    # not taken. Reconstruction from the DB leaves that branch's steps as
+    # "pending" (they were never executed and have no StepExecution record), so
+    # there is no "skipped" status to rely on — we cascade from the un-taken
+    # gates instead. Convergence steps survive because they also have a
+    # completed (taken-branch) upstream, so not ALL their upstreams are dead.
+    dead_branch = set()
+    if dag_instance:
+        def _status_of(tid):
+            return dag_instance.task_states.get(tid, {}).get("status", "pending")
+
+        for tid, task in dag_instance.dag.tasks.items():
+            if isinstance(task, ShortCircuitOperator) and _status_of(tid) != "completed":
+                dead_branch.add(tid)
+
+        changed = True
+        while changed:
+            changed = False
+            for tid in dag_instance.dag.tasks.keys():
+                if tid in dead_branch or _status_of(tid) == "completed":
+                    continue
+                ups = list(dag_instance.dag.graph.predecessors(tid))
+                if ups and all(u in dead_branch for u in ups):
+                    dead_branch.add(tid)
+                    changed = True
 
     if dag_instance:
         for task_id, state in dag_instance.task_states.items():
             status_val = state.get("status", "pending")
-            if status_val == "completed":
-                completed_steps += 1
-
             task_obj = dag_instance.dag.tasks.get(task_id)
+
+            # Branch gates are internal control steps, not citizen steps. The
+            # gate that completed (rather than skipped) reveals the route taken.
+            if isinstance(task_obj, ShortCircuitOperator):
+                if status_val == "completed" and route_label is None:
+                    gate_name = getattr(task_obj, "name", None) or ""
+                    route_label = gate_name.replace("Rama ", "").strip() or None
+                continue
+
+            # Hide the non-taken branch (skipped, or pending-but-unreachable).
+            if status_val == "skipped" or task_id in dead_branch:
+                continue
+
             task_name = getattr(task_obj, 'name', None)
             if not task_name:
                 i18n_key = f"steps.{task_id}"
@@ -404,7 +446,35 @@ async def track_instance(
                 step_info["group"] = task_group
             step_progress.append(step_info)
 
+    # Progress is computed over visible steps only (skipped branches and
+    # internal gates excluded) so branched workflows report accurate progress.
+    total_steps = len(step_progress)
+    completed_steps = sum(1 for s in step_progress if s["status"] == "completed")
     progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+
+    # Resolve entities emitted by the workflow so the portal can show them
+    # inline once the trámite concludes. Keep this light: ids/types only, never
+    # entity.data (which may carry heavy base64 payloads). The portal fetches
+    # full detail on demand via GET /public/entities/{id}.
+    emitted_entities = []
+    if dag_instance:
+        ctx = dag_instance.context or {}
+        seen_entity_ids = set()
+
+        def _add_entity(entity_id, entity_type):
+            if isinstance(entity_id, str) and entity_id and entity_id not in seen_entity_ids:
+                seen_entity_ids.add(entity_id)
+                emitted_entities.append({"entity_id": entity_id, "entity_type": entity_type})
+
+        # Prefer created_entity_<type> keys (they carry the entity type).
+        for key, value in ctx.items():
+            if key.startswith("created_entity_"):
+                _add_entity(value, key[len("created_entity_"):])
+        # Then any *_entity_id outputs not already captured.
+        for key, value in ctx.items():
+            if key.endswith("_entity_id"):
+                type_key = key[:-len("_entity_id")] + "_entity_type"
+                _add_entity(value, ctx.get(type_key))
 
     # Get workflow info
     workflow = await workflow_service.get_workflow_definition(db_instance.workflow_id)
@@ -426,6 +496,8 @@ async def track_instance(
         "requires_input": requires_input,
         "input_form": input_form,
         "waiting_for": waiting_for,
+        "route_label": route_label,
+        "emitted_entities": emitted_entities,
         "estimated_completion": None,
         "message": f"Workflow {db_instance.status}"
     }
