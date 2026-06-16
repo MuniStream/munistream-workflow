@@ -989,7 +989,9 @@ def _extract_entity_requirements(dag: DAG) -> List[Dict[str, Any]]:
 async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], locale: str) -> Dict[str, Any]:
     """Extract all workflow data from definition and DAG."""
     steps = []
-    
+    branches: list = []
+    step_flow: list = []
+
     # Prefer DAG data over database data
     if dag:
         # Get workflow info from DAG (it has the most up-to-date data)
@@ -998,7 +1000,67 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         category = dag.category if hasattr(dag, 'category') else (workflow.category or "general")
         tags = dag.tags if dag.tags else (workflow.tags or [])
         metadata = dag.metadata if hasattr(dag, 'metadata') and dag.metadata else (workflow.metadata or {})
-        
+
+        # Branch detection (robust for multiple / sequential forks). Branches are
+        # ShortCircuitOperator gates; the citizen has not chosen a route yet on
+        # this preview, so each step is classified to the route of the NEAREST
+        # gate that DOMINATES it (every path to the step passes through that
+        # gate). Steps dominated by no gate are common to all routes. Dominators
+        # handle nesting/sequential forks correctly, unlike a descendants test.
+        from ...workflows.operators.python import ShortCircuitOperator
+        import networkx as nx
+        G = dag.graph
+        gate_label: Dict[str, str] = {}    # gate task_id -> route label
+        for tid, t in dag.tasks.items():
+            if isinstance(t, ShortCircuitOperator):
+                label = (getattr(t, 'name', '') or '').replace('Rama ', '').strip()
+                gate_label[tid] = label or tid
+        gate_ids = set(gate_label.keys())
+
+        step_branch: Dict[str, str] = {}   # task_id -> route label
+        step_fork: Dict[str, str] = {}     # task_id -> fork id (decision point)
+        branches: list = []
+        if gate_ids:
+            try:
+                roots = [n for n in G.nodes if G.in_degree(n) == 0]
+                if len(roots) == 1:
+                    idom = nx.immediate_dominators(G, roots[0])
+                else:
+                    GG = G.copy()
+                    GG.add_node("__start__")
+                    for r in roots:
+                        GG.add_edge("__start__", r)
+                    idom = nx.immediate_dominators(GG, "__start__")
+            except Exception:
+                idom = {}
+
+            gate_fork = {g: idom.get(g, g) for g in gate_ids}  # decision point per gate
+
+            def _nearest_gate(node):
+                cur = idom.get(node)
+                seen = set()
+                while cur is not None and cur not in seen:
+                    seen.add(cur)
+                    if cur in gate_ids:
+                        return cur
+                    nxt = idom.get(cur)
+                    if nxt == cur:
+                        break
+                    cur = nxt
+                return None
+
+            for tid in dag.tasks.keys():
+                if tid in gate_ids:
+                    continue
+                g = _nearest_gate(tid)
+                if g is not None:
+                    step_branch[tid] = gate_label[g]
+                    step_fork[tid] = gate_fork.get(g, g)
+
+            branches = list(dict.fromkeys(
+                gate_label[t] for t in dag.tasks.keys() if t in gate_ids
+            ))
+
         # Get steps from DAG
         for task_id, task in dag.tasks.items():
             step_data = {
@@ -1008,6 +1070,10 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
             }
             if task.group:
                 step_data["group"] = task.group
+
+            # Mark steps exclusive to a single branch (route)
+            if task_id in step_branch:
+                step_data["branch"] = step_branch[task_id]
 
             # Add description if available
             if hasattr(task, 'description'):
@@ -1028,6 +1094,52 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
                 step_data["requirements"] = task.requirements
 
             steps.append(step_data)
+
+        # Build step_flow: ordered segments the portal renders as an
+        # interactive stepper — runs of common steps, and "fork" zones whose
+        # routes the citizen can expand. Branch steps of a fork are contiguous
+        # in topological order between the decision point and the convergence.
+        def _slim(tid):
+            t = dag.tasks[tid]
+            s = {"id": tid, "name": t.name}
+            if t.group:
+                s["group"] = t.group
+            return s
+
+        seg = None    # current common-steps segment
+        fork = None   # current fork: {"id", "routes": {label: [..]}, "order": [labels]}
+        for tid in dag.tasks.keys():
+            if tid in gate_ids:
+                continue
+            lbl = step_branch.get(tid)
+            if lbl:
+                if seg is not None:
+                    step_flow.append(seg)
+                    seg = None
+                f = step_fork.get(tid)
+                if fork is not None and fork["id"] != f:
+                    step_flow.append({"type": "fork", "routes": [
+                        {"label": l, "steps": fork["routes"][l]} for l in fork["order"]]})
+                    fork = None
+                if fork is None:
+                    fork = {"id": f, "routes": {}, "order": []}
+                if lbl not in fork["routes"]:
+                    fork["routes"][lbl] = []
+                    fork["order"].append(lbl)
+                fork["routes"][lbl].append(_slim(tid))
+            else:
+                if fork is not None:
+                    step_flow.append({"type": "fork", "routes": [
+                        {"label": l, "steps": fork["routes"][l]} for l in fork["order"]]})
+                    fork = None
+                if seg is None:
+                    seg = {"type": "steps", "steps": []}
+                seg["steps"].append(_slim(tid))
+        if seg is not None:
+            step_flow.append(seg)
+        if fork is not None:
+            step_flow.append({"type": "fork", "routes": [
+                {"label": l, "steps": fork["routes"][l]} for l in fork["order"]]})
     else:
         # Fall back to database data if no DAG
         name = workflow.name
@@ -1078,6 +1190,8 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         "estimatedDuration": metadata.get("estimatedTime") or metadata.get("estimated_duration") or _calculate_duration(len(steps)),
         "cost": metadata.get("cost"),
         "steps": steps,
+        "branches": branches,
+        "step_flow": step_flow,
         "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, locale),
         "entity_requirements": _extract_entity_requirements(dag) if dag else [],
         "available": metadata.get("available", True) if "available" in metadata else workflow.status == "active",
