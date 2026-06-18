@@ -33,6 +33,14 @@ class Customer(Document):
     phone: Optional[str] = None
     document_number: Optional[str] = None
     keycloak_id: Optional[str] = None  # Keycloak user ID for SSO users
+
+    # Llave MX identity data (synced from Keycloak token on every login)
+    curp: Optional[str] = None
+    rfc: Optional[str] = None
+    tipo_persona: Optional[str] = None  # "fisica" | "moral"
+    llavemx_user_id: Optional[str] = None
+    # Full structured Llave MX profile (incl. personas_morales array) lives in
+    # metadata["llavemx"]; the typed fields above mirror the key scalars.
     
     # Account Status
     status: CustomerStatus = CustomerStatus.ACTIVE
@@ -55,6 +63,8 @@ class Customer(Document):
         indexes = [
             "email",
             "document_number",
+            "curp",
+            "rfc",
             "created_at"
         ]
     
@@ -69,6 +79,7 @@ class Customer(Document):
     
     def to_public_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for public API responses"""
+        llavemx = self.metadata.get("llavemx", {}) if isinstance(self.metadata, dict) else {}
         return {
             "id": str(self.id),
             "email": self.email,
@@ -78,7 +89,12 @@ class Customer(Document):
             "status": self.status,
             "email_verified": self.email_verified,
             "created_at": self.created_at,
-            "last_login_at": self.last_login_at
+            "last_login_at": self.last_login_at,
+            # Llave MX identity data
+            "curp": self.curp,
+            "rfc": self.rfc,
+            "tipo_persona": self.tipo_persona,
+            "personas_morales": llavemx.get("personas_morales", []),
         }
 
 
