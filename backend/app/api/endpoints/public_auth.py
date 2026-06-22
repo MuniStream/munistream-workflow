@@ -15,6 +15,7 @@ import logging
 from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
 from ...core.i18n import t as translate
+from ...auth.auth_callbacks import run_post_auth_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +239,10 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     _sync_llavemx_profile(customer, payload)
     customer.update_last_login()
     await customer.save()
+
+    # Run plugin-registered post-auth callbacks (e.g. tenant-specific entity sync).
+    # Runs after save so customer.id is assigned; callbacks persist their own changes.
+    await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
 
     return customer
 

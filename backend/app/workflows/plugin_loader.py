@@ -32,6 +32,7 @@ class WorkflowPlugin:
         self.version = config.get("version", "1.0.0")
         self.workflows = config.get("workflows", [])
         self.visualizers = config.get("visualizers", [])
+        self.extensions = config.get("extensions", [])
         self.local_path = None
         
     def clone_or_update(self, base_path: str = "/tmp/civicstream_plugins") -> str:
@@ -241,6 +242,71 @@ class WorkflowPlugin:
 
         return loaded_count
     
+    def load_extensions(self) -> int:
+        """Load runtime extensions from the plugin.
+
+        An extension is a module exposing a parameterless registration function
+        (``register`` by default). The function is called once at startup so the
+        plugin can wire tenant-specific runtime behavior (e.g. register a
+        post-auth callback) without the shared backend knowing about it.
+        """
+        if not self.local_path:
+            raise ValueError("Plugin not cloned yet. Call clone_or_update first.")
+
+        loaded_count = 0
+        errors = []
+
+        # Add plugin path to Python path
+        if self.local_path not in sys.path:
+            sys.path.insert(0, self.local_path)
+
+        try:
+            print(f"🔌 DEBUG: Processing {len(self.extensions)} extensions for plugin {self.name}")
+
+            for extension_info in self.extensions:
+                module_path = extension_info.get("module")
+                function_name = extension_info.get("function", "register")
+
+                if not module_path:
+                    error_msg = f"Skipping extension with missing module: {extension_info}"
+                    print(f"⚠️ {error_msg}")
+                    errors.append(error_msg)
+                    continue
+
+                try:
+                    module = importlib.import_module(module_path)
+                    register_func = getattr(module, function_name, None)
+
+                    if callable(register_func):
+                        register_func()
+                        loaded_count += 1
+                        print(f"✅ Loaded extension: {module_path}.{function_name} from {self.name}")
+                    else:
+                        error_msg = f"Module {module_path} has no callable {function_name}"
+                        print(f"❌ {error_msg}")
+                        errors.append(error_msg)
+
+                except ImportError as e:
+                    error_msg = f"Failed to import {module_path}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+                except Exception as e:
+                    error_msg = f"Error loading extension {module_path}.{function_name}: {str(e)}"
+                    print(f"❌ {error_msg}")
+                    errors.append(error_msg)
+
+        finally:
+            # Clean up sys.path
+            if self.local_path in sys.path:
+                sys.path.remove(self.local_path)
+
+        if errors:
+            print(f"⚠️ Plugin {self.name} had {len(errors)} errors during extension loading")
+            for error in errors:
+                print(f"   - {error}")
+
+        return loaded_count
+
     def _auto_discover_workflows(self) -> List[Dict[str, str]]:
         """Auto-discover workflows by scanning for DAG files"""
         discovered = []
@@ -420,6 +486,10 @@ class WorkflowPluginManager:
         # Now that all repositories are cloned, load visualizers from both local config and plugin repos
         print(f"\n🎨 Loading visualizers...")
         self._load_visualizers()
+
+        # Load runtime extensions (e.g. tenant-specific post-auth hooks)
+        print(f"\n🔌 Loading extensions...")
+        self._load_extensions()
         print(f"{'='*60}\n")
 
         return total_loaded
@@ -485,6 +555,24 @@ class WorkflowPluginManager:
 
         if total_visualizer_count > 0:
             print(f"   ✅ Total visualizers loaded: {total_visualizer_count}")
+
+    def _load_extensions(self):
+        """Load runtime extensions from all plugins"""
+        total_extension_count = 0
+
+        print(f"   Loading extensions from {len(self.plugins)} plugins...")
+        for plugin in self.plugins:
+            if plugin.extensions:
+                try:
+                    extension_count = plugin.load_extensions()
+                    total_extension_count += extension_count
+                    if extension_count > 0:
+                        print(f"   ✅ Loaded {extension_count} extension(s) from {plugin.name}")
+                except Exception as e:
+                    print(f"   ⚠️ Error loading extensions from {plugin.name}: {e}")
+
+        if total_extension_count > 0:
+            print(f"   ✅ Total extensions loaded: {total_extension_count}")
 
 
 # Example plugin configuration file (plugins.yaml):
