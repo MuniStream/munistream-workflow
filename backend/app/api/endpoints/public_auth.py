@@ -4,7 +4,8 @@ Separate from admin authentication.
 """
 
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+import json
 from fastapi import APIRouter, HTTPException, status, Header, Depends
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -14,6 +15,7 @@ import logging
 from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
 from ...core.i18n import t as translate
+from ...auth.auth_callbacks import run_post_auth_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,82 @@ def create_customer_access_token(data: dict, expires_delta: Optional[timedelta] 
     return encoded_jwt
 
 
+def _parse_personas_morales(raw: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize the `personas_morales` token claim into a list of dicts.
+
+    The shim encodes the personas morales list as a JSON string so it survives
+    the OIDC -> Keycloak -> backend hop. Keycloak may also deliver it already
+    parsed (list) depending on the mapper's jsonType. Be tolerant of both and
+    never raise on malformed input (a citizen without a persona moral logs in
+    fine with an empty list).
+    """
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else []
+        except (ValueError, TypeError):
+            logger.warning("Could not parse personas_morales claim as JSON")
+            return []
+    return []
+
+
+def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
+    """
+    Sync Llave MX identity data from the Keycloak token claims into the Customer.
+
+    Called on every authenticated request so the MuniStream profile mirrors the
+    FORCE-synced Keycloak attributes (persona física + all associated personas
+    morales). Only overwrites fields when the corresponding claim is present.
+    """
+    curp = payload.get("curp")
+    rfc = payload.get("rfc")
+    tipo_persona = payload.get("tipo_persona")
+    llavemx_user_id = payload.get("llavemx_user_id")
+    phone = payload.get("phone") or payload.get("phone_number")
+    personas_morales = _parse_personas_morales(payload.get("personas_morales"))
+
+    changed = False
+    if curp and customer.curp != curp:
+        customer.curp = curp
+        changed = True
+    if rfc and customer.rfc != rfc:
+        customer.rfc = rfc
+        changed = True
+    if tipo_persona and customer.tipo_persona != tipo_persona:
+        customer.tipo_persona = tipo_persona
+        changed = True
+    if llavemx_user_id is not None and customer.llavemx_user_id != str(llavemx_user_id):
+        customer.llavemx_user_id = str(llavemx_user_id)
+        changed = True
+    if phone and customer.phone != phone:
+        customer.phone = phone
+        changed = True
+
+    # Store the full structured Llave MX profile in metadata.
+    if not isinstance(customer.metadata, dict):
+        customer.metadata = {}
+    llavemx_meta = {
+        "curp": curp,
+        "rfc": rfc,
+        "tipo_persona": tipo_persona,
+        "llavemx_user_id": str(llavemx_user_id) if llavemx_user_id is not None else None,
+        "razon_social": payload.get("razon_social"),
+        "personas_morales": personas_morales,
+        "synced_at": datetime.utcnow().isoformat(),
+    }
+    if customer.metadata.get("llavemx") != llavemx_meta:
+        customer.metadata["llavemx"] = llavemx_meta
+        changed = True
+
+    if changed:
+        customer.updated_at = datetime.utcnow()
+
+
 async def get_current_customer(authorization: Optional[str] = Header(None)) -> Customer:
     """
     Get current authenticated customer from Keycloak token.
@@ -121,15 +199,25 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
         logger.error(f"Token verification failed: {e}")
         raise credentials_exception
 
-    # Get or create customer from Keycloak user info
-    # Use email as the unique identifier to find existing customers
+    # Resolve the customer. Prefer keycloak_id / curp to find the right record
+    # even when email is absent or changed, then fall back to email.
     email = payload.get("email", "")
-    if not email:
-        raise credentials_exception
+    curp = payload.get("curp")
 
-    customer = await Customer.find_one(Customer.email == email)
+    customer = await Customer.find_one(Customer.keycloak_id == customer_id)
+    if customer is None and curp:
+        customer = await Customer.find_one(Customer.curp == curp)
+    if customer is None and email:
+        customer = await Customer.find_one(Customer.email == email)
+
     if customer is None:
-        # Create customer from Keycloak token if doesn't exist
+        # Create customer from Keycloak token if it doesn't exist.
+        # Customer.email is required/unique; Llave MX accounts carry a correo,
+        # but fall back to a CURP-derived address if absent.
+        if not email:
+            if not curp:
+                raise credentials_exception
+            email = f"{curp}@llavemx.local"
         username = payload.get("preferred_username", email)
         name = payload.get("name", username)
 
@@ -137,14 +225,24 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
             # Don't set id - let MongoDB generate it
             email=email,
             full_name=name,
-            phone=payload.get("phone", ""),
-            document_number="",
+            phone=payload.get("phone") or payload.get("phone_number") or "",
+            document_number=curp or "",
             password_hash="",  # No password needed with Keycloak
             status=CustomerStatus.ACTIVE,
             email_verified=payload.get("email_verified", False),
             keycloak_id=customer_id  # Store Keycloak ID separately
         )
-        await customer.save()
+
+    # Keep the Keycloak link fresh and sync Llave MX data on every login.
+    if customer.keycloak_id != customer_id:
+        customer.keycloak_id = customer_id
+    _sync_llavemx_profile(customer, payload)
+    customer.update_last_login()
+    await customer.save()
+
+    # Run plugin-registered post-auth callbacks (e.g. tenant-specific entity sync).
+    # Runs after save so customer.id is assigned; callbacks persist their own changes.
+    await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
 
     return customer
 
