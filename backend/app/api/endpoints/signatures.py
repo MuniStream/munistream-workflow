@@ -329,6 +329,21 @@ async def verify_entity_signature(
         raise HTTPException(status_code=500, detail="Signature verification failed")
 
 
+def _select_entity_visualizer(entity) -> str:
+    """Select the visualizer for an entity.
+
+    Single source of truth so the downloaded PDF, the in-browser HTML view and
+    the printed output all render with the SAME template. The entity's
+    configured visualizer always wins; ``signed_pdf`` is only a fallback for
+    signed entities that have no configured visualizer.
+    """
+    if entity.entity_display_config and entity.entity_display_config.get("visualizer"):
+        return entity.entity_display_config["visualizer"]
+    if entity.data and "signature" in entity.data:
+        return "signed_pdf"
+    return "pdf_report"
+
+
 @router.get("/entities/{entity_id}/pdf")
 async def get_entity_pdf(
     entity_id: str,
@@ -344,14 +359,9 @@ async def get_entity_pdf(
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        # Determine visualizer from entity configuration only (security)
-        visualizer = "pdf_report"  # Safe default
-        if entity.entity_display_config and "visualizer" in entity.entity_display_config:
-            visualizer = entity.entity_display_config["visualizer"]
-
-        # Override for signed documents
-        if include_signatures and entity.data and "signature" in entity.data:
-            visualizer = "signed_pdf"
+        # Use the SAME visualizer selection as the HTML view so the downloaded
+        # PDF matches exactly what the citizen visualizes and prints.
+        visualizer = _select_entity_visualizer(entity)
 
         # Get base URL for frontend (citizen portal) - used for QR codes and verification links
         from app.core.config import settings
@@ -410,9 +420,8 @@ async def get_entity_preview(
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        # Determine visualizer type
-        if entity.data and "signature" in entity.data:
-            visualizer = "signed_pdf"
+        # Same visualizer selection as the PDF download and HTML view.
+        visualizer = _select_entity_visualizer(entity)
 
         # Get base URL for frontend (citizen portal) - used for QR codes and verification links
         from app.core.config import settings
@@ -471,11 +480,9 @@ async def get_entity_html(
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        # Determine visualizer type based on entity configuration
-        if entity.entity_display_config and "visualizer" in entity.entity_display_config:
-            visualizer = entity.entity_display_config["visualizer"]
-        elif entity.data and "signature" in entity.data:
-            visualizer = "signed_pdf"
+        # Same visualizer selection as the PDF download so view, print and
+        # download all share the same template.
+        visualizer = _select_entity_visualizer(entity)
 
         # Get base URL for frontend (citizen portal) - used for QR codes and verification links
         from app.core.config import settings
