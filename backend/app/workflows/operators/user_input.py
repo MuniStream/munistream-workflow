@@ -1,8 +1,21 @@
 """
 Simple, stateless User Input Operator.
 """
+import re
+from datetime import date, datetime
 from typing import Dict, Any, List, Optional
 from .base import BaseOperator, TaskResult, TaskStatus
+
+
+def _constraint(field_cfg: Dict[str, Any], key: str) -> Any:
+    """Read a constraint declared at the field root or under `validation`.
+    Root takes priority (the convention used by top-level workflow fields)."""
+    if field_cfg.get(key) is not None:
+        return field_cfg.get(key)
+    validation = field_cfg.get("validation")
+    if isinstance(validation, dict):
+        return validation.get(key)
+    return None
 
 
 def _item_field_visible(item_field: Dict[str, Any], item: Dict[str, Any]) -> bool:
@@ -105,6 +118,52 @@ class UserInputOperator(BaseOperator):
                 errors.append(f"Required field: {field}")
 
         fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
+
+        # Scalar field constraints (number min/max, text length/pattern, date minToday).
+        # These are authoritative server-side checks; the frontend mirrors them.
+        for field_cfg in fields_schema:
+            ftype = field_cfg.get("type")
+            if ftype in ("array", "file", "camera", None):
+                continue
+            name = field_cfg.get("name")
+            label = field_cfg.get("label", name)
+            value = user_input.get(name)
+            if value in (None, "", []):
+                continue
+
+            if ftype == "number":
+                try:
+                    num = float(value)
+                except (TypeError, ValueError):
+                    errors.append(f"{label} debe ser numérico")
+                    continue
+                min_v = _constraint(field_cfg, "min")
+                max_v = _constraint(field_cfg, "max")
+                if min_v is not None and num < float(min_v):
+                    errors.append(f"{label} debe ser al menos {min_v}")
+                if max_v is not None and num > float(max_v):
+                    errors.append(f"{label} no debe ser mayor que {max_v}")
+            elif ftype in ("text", "email", "phone", "textarea"):
+                text = str(value)
+                min_len = _constraint(field_cfg, "minLength")
+                max_len = _constraint(field_cfg, "maxLength")
+                pattern = _constraint(field_cfg, "pattern")
+                if min_len is not None and len(text) < int(min_len):
+                    errors.append(f"{label} debe tener al menos {min_len} caracteres")
+                if max_len is not None and len(text) > int(max_len):
+                    errors.append(f"{label} no debe tener más de {max_len} caracteres")
+                if pattern and not re.fullmatch(pattern, text):
+                    errors.append(f"{label} tiene un formato inválido")
+            elif ftype == "date":
+                if field_cfg.get("minToday"):
+                    try:
+                        selected = datetime.fromisoformat(str(value)[:10]).date()
+                    except ValueError:
+                        errors.append(f"{label} tiene una fecha inválida")
+                    else:
+                        if selected < date.today():
+                            errors.append(f"{label} no puede ser anterior a la fecha actual")
+
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "array":
                 continue
