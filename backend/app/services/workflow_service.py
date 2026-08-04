@@ -736,6 +736,51 @@ class StepExecutionService:
             StepExecution.instance_id == instance_id
         ).sort(StepExecution.started_at).to_list()
 
+    @staticmethod
+    async def upsert_step_execution(
+        instance_id: str,
+        step_id: str,
+        workflow_id: str,
+        status: str,
+        started_at: datetime,
+        completed_at: Optional[datetime] = None,
+        error_message: Optional[str] = None
+    ) -> None:
+        """Idempotently record a completed step execution.
+
+        Dedup key is (instance_id, step_id, started_at):
+        - A retried step re-runs with a fresh started_at -> a new row.
+        - Re-persisting the same transition reuses started_at -> update, no dup.
+
+        Single Mongo round-trip; used by both the executor (live) and the
+        historical backfill so there is one source of truth for the write.
+        """
+        import uuid
+
+        duration_seconds = None
+        if started_at and completed_at:
+            duration_seconds = (completed_at - started_at).total_seconds()
+
+        now = datetime.utcnow()
+        await StepExecution.get_motor_collection().update_one(
+            {"instance_id": instance_id, "step_id": step_id, "started_at": started_at},
+            {
+                "$set": {
+                    "workflow_id": workflow_id,
+                    "status": status,
+                    "completed_at": completed_at,
+                    "duration_seconds": duration_seconds,
+                    "error_message": error_message,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "execution_id": str(uuid.uuid4()),
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+
 
 class AuditService:
     """Service layer for audit logging"""
