@@ -339,7 +339,7 @@ class WorkflowService:
                     "status": execution.status,
                     "started_at": execution.started_at.isoformat() if execution.started_at else None,
                     "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
-                    "result": execution.output
+                    "result": execution.outputs
                 }
 
             # Mark completed steps
