@@ -719,7 +719,7 @@ class DAGExecutor:
         }
         return mapping.get(dag_status, "running")
 
-    async def _save_instance_state(self, dag_instance, db_instance, instance_id, new_status=None):
+    async def _save_instance_state(self, dag_instance, db_instance, instance_id, new_status=None, record_executions=True):
         """Save instance state to database"""
         # Ensure instance_id and workflow_id are always saved in context
         dag_instance.context["instance_id"] = instance_id
@@ -753,6 +753,13 @@ class DAGExecutor:
         if dag_instance.completed_at:
             db_instance.completed_at = dag_instance.completed_at
 
+        # Record total wall-clock duration once the instance reaches a terminal
+        # state (the DAG executor path otherwise never populates duration_seconds).
+        if new_status in ("completed", "failed") and db_instance.duration_seconds is None:
+            end = db_instance.completed_at or dag_instance.completed_at
+            if db_instance.started_at and end:
+                db_instance.duration_seconds = (end - db_instance.started_at).total_seconds()
+
         await db_instance.save()
 
         if new_step and new_step != previous_step:
@@ -771,6 +778,63 @@ class DAGExecutor:
                 logger.exception(
                     "Failed to publish STEP_ADVANCED for instance %s", instance_id
                 )
+
+        if record_executions:
+            await self._record_step_executions(
+                dag_instance, db_instance, instance_id, previous_step, new_step, new_status
+            )
+
+    # Task states that mean a step reached a terminal outcome worth recording,
+    # mapped to the StepExecution.status vocabulary.
+    _TERMINAL_TASK_STATUS = {
+        "completed": "completed",
+        "continue": "completed",
+        "failed": "failed",
+        "skipped": "skipped",
+    }
+
+    async def _record_step_executions(
+        self, dag_instance, db_instance, instance_id, previous_step, new_step, new_status
+    ):
+        """Persist StepExecution rows for steps that just reached a terminal state.
+
+        Runs after the instance is saved and never raises into the execution loop:
+        analytics must not be able to break or block workflow execution. Dedup by
+        (instance_id, step_id, started_at) in upsert_step_execution keeps this
+        idempotent across repeated saves of the same transition.
+        """
+        try:
+            from ..services.workflow_service import StepExecutionService
+
+            candidates = []
+            # The step we just advanced away from has finished.
+            if new_step and previous_step and new_step != previous_step:
+                candidates.append(previous_step)
+            # On a terminal instance status the final/current task does not trigger
+            # a further transition, so capture it explicitly.
+            if new_status in ("completed", "failed") and dag_instance.current_task:
+                candidates.append(dag_instance.current_task)
+
+            for step_id in candidates:
+                ts = dag_instance.task_states.get(step_id)
+                if not ts or not ts.get("started_at"):
+                    continue
+                mapped = self._TERMINAL_TASK_STATUS.get(ts.get("status"))
+                if not mapped:
+                    continue
+                await StepExecutionService.upsert_step_execution(
+                    instance_id=instance_id,
+                    step_id=step_id,
+                    workflow_id=db_instance.workflow_id,
+                    status=mapped,
+                    started_at=ts["started_at"],
+                    completed_at=ts.get("completed_at"),
+                    error_message=ts.get("error"),
+                )
+        except Exception:
+            logger.exception(
+                "Failed to record StepExecution for instance %s", instance_id
+            )
 
     async def _execute_retry_workflow_reset(self, dag_instance, db_instance, instance_id,
                                           next_task_id, failed_task_id, recovery_data, recovery_action):
@@ -902,8 +966,10 @@ class DAGExecutor:
             for key in context_keys_to_remove:
                 del dag_instance.context[key]
 
-        # Save state to database
-        await self._save_instance_state(dag_instance, db_instance, instance_id)
+        # Save state to database. Skip StepExecution recording here: the reset
+        # re-points current_task to the retry target, which is not a real forward
+        # transition and would otherwise write a spurious execution row.
+        await self._save_instance_state(dag_instance, db_instance, instance_id, record_executions=False)
         return True
 
     async def _execution_loop(self):

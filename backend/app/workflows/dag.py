@@ -387,7 +387,12 @@ class DAGInstance:
         self.updated_at = datetime.utcnow()
         
         if status == "executing":
-            self.task_states[task_id]["started_at"] = datetime.utcnow()
+            # Preserve the original start timestamp so a step that goes through a
+            # waiting/resume cycle (e.g. admin validation) reports its full dwell
+            # time instead of only the post-resume interval. Stamp started_at only
+            # the first time the task actually starts.
+            if not self.task_states[task_id]["started_at"]:
+                self.task_states[task_id]["started_at"] = datetime.utcnow()
             self.current_task = task_id
             
         elif status in ["completed", "continue"]:

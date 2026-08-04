@@ -2,6 +2,7 @@
 Performance monitoring and analytics API endpoints.
 """
 
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
@@ -9,6 +10,29 @@ from pydantic import BaseModel, Field
 from ...services.workflow_service import workflow_service
 
 router = APIRouter()
+
+
+def _median(values: List[float]) -> Optional[float]:
+    """Median of a list of numbers (None when empty)."""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    """Nearest-rank percentile of a list of numbers (None when empty)."""
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = int(round((pct / 100.0) * (len(s) - 1)))
+    return s[k]
 
 
 class StepExecutionRequest(BaseModel):
@@ -63,6 +87,256 @@ class BottleneckAnalysisResponse(BaseModel):
     external_service_bottlenecks: List[Dict[str, Any]]
     queue_bottlenecks: List[Dict[str, Any]]
     recommendations: List[str]
+
+
+class EfficiencyKPIs(BaseModel):
+    """Instance-level efficiency indicators for a workflow"""
+    total_instances: int
+    active_instances: int
+    completed_instances: int
+    failed_instances: int
+    completion_rate: float
+    avg_duration_seconds: Optional[float] = None
+    median_duration_seconds: Optional[float] = None
+    overall_efficiency: float
+
+
+class StepBottleneck(BaseModel):
+    """Per-step dwell-time bottleneck indicator"""
+    step_id: str
+    step_name: str
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[float] = None
+    execution_count: int
+    currently_stuck_count: int
+    severity: str
+
+
+class StatusCount(BaseModel):
+    """Instance count for a status value"""
+    status: str
+    count: int
+
+
+class VolumePoint(BaseModel):
+    """Daily started/completed instance counts"""
+    date: str
+    started: int
+    completed: int
+
+
+class WorkflowAnalyticsResponse(BaseModel):
+    """Consolidated analytics for a single workflow"""
+    workflow_id: str
+    generated_at: datetime
+    kpis: EfficiencyKPIs
+    bottlenecks: List[StepBottleneck]
+    status_distribution: List[StatusCount]
+    volume_over_time: List[VolumePoint]
+
+
+@router.get("/workflows/{workflow_id}/analytics", response_model=WorkflowAnalyticsResponse)
+async def get_workflow_analytics(
+    workflow_id: str,
+    days: int = Query(30, description="Time window in days for the volume series"),
+    stuck_threshold_hours: int = Query(24, description="Hours idle before an active instance counts as stuck"),
+):
+    """Consolidated analytics for a workflow: efficiency KPIs, per-step
+    bottlenecks, status distribution and volume over time. Computed from real
+    WorkflowInstance and StepExecution data via native MongoDB aggregation."""
+    from ...models.workflow import WorkflowInstance, StepExecution, WorkflowStep
+
+    dag = await workflow_service.get_dag(workflow_id)
+    if not dag:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    try:
+        now = datetime.utcnow()
+        active_statuses = ["pending", "running", "paused"]
+
+        # ---- (a) Efficiency KPIs -------------------------------------------
+        kpi_pipeline = [
+            {"$match": {"workflow_id": workflow_id}},
+            {"$addFields": {"_dur": {"$ifNull": [
+                "$duration_seconds",
+                {"$cond": [
+                    {"$and": [
+                        {"$ne": ["$completed_at", None]},
+                        {"$ne": ["$started_at", None]},
+                    ]},
+                    {"$divide": [{"$subtract": ["$completed_at", "$started_at"]}, 1000]},
+                    None,
+                ]},
+            ]}}},
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "completed": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+                "failed": {"$sum": {"$cond": [{"$eq": ["$status", "failed"]}, 1, 0]}},
+                "active": {"$sum": {"$cond": [{"$in": ["$status", active_statuses]}, 1, 0]}},
+                "avg_duration": {"$avg": "$_dur"},
+                "durations": {"$push": "$_dur"},
+            }},
+        ]
+        kpi_rows = await WorkflowInstance.aggregate(kpi_pipeline).to_list()
+        if kpi_rows:
+            row = kpi_rows[0]
+            total = row.get("total", 0)
+            completed = row.get("completed", 0)
+            failed = row.get("failed", 0)
+            active = row.get("active", 0)
+            durations = [d for d in row.get("durations", []) if d is not None]
+            median_duration = _median(durations)
+            avg_duration = row.get("avg_duration")
+        else:
+            total = completed = failed = active = 0
+            median_duration = None
+            avg_duration = None
+
+        completion_rate = (completed / total * 100) if total else 0.0
+        efficiency_denom = completed + failed
+        overall_efficiency = (completed / efficiency_denom * 100) if efficiency_denom else 0.0
+
+        kpis = EfficiencyKPIs(
+            total_instances=total,
+            active_instances=active,
+            completed_instances=completed,
+            failed_instances=failed,
+            completion_rate=round(completion_rate, 2),
+            avg_duration_seconds=round(avg_duration, 2) if avg_duration is not None else None,
+            median_duration_seconds=round(median_duration, 2) if median_duration is not None else None,
+            overall_efficiency=round(overall_efficiency, 2),
+        )
+
+        # ---- (b) Per-step bottlenecks --------------------------------------
+        step_pipeline = [
+            {"$match": {"workflow_id": workflow_id, "duration_seconds": {"$ne": None}}},
+            {"$group": {
+                "_id": "$step_id",
+                "execution_count": {"$sum": 1},
+                "avg_duration": {"$avg": "$duration_seconds"},
+                "durations": {"$push": "$duration_seconds"},
+            }},
+        ]
+        step_rows = await StepExecution.aggregate(step_pipeline).to_list()
+
+        stuck_pipeline = [
+            {"$match": {
+                "workflow_id": workflow_id,
+                "status": {"$in": active_statuses},
+                "current_step": {"$ne": None},
+                "updated_at": {"$lt": now - timedelta(hours=stuck_threshold_hours)},
+            }},
+            {"$group": {"_id": "$current_step", "count": {"$sum": 1}}},
+        ]
+        stuck_rows = await WorkflowInstance.aggregate(stuck_pipeline).to_list()
+        stuck_by_step = {r["_id"]: r["count"] for r in stuck_rows if r.get("_id")}
+
+        step_defs = await WorkflowStep.find(WorkflowStep.workflow_id == workflow_id).to_list()
+        name_by_step = {s.step_id: s.name for s in step_defs}
+
+        metrics_by_step: Dict[str, Dict[str, Any]] = {}
+        for r in step_rows:
+            sid = r["_id"]
+            durs = [d for d in r.get("durations", []) if d is not None]
+            metrics_by_step[sid] = {
+                "execution_count": r.get("execution_count", 0),
+                "avg_duration": r.get("avg_duration"),
+                "p95": _percentile(durs, 95),
+            }
+
+        # Union of steps with executions and steps holding stuck instances.
+        all_step_ids = set(metrics_by_step) | set(stuck_by_step)
+
+        # Severity by dwell ranking; escalate any step with stuck instances.
+        ranked = sorted(
+            [sid for sid in all_step_ids if metrics_by_step.get(sid, {}).get("avg_duration") is not None],
+            key=lambda s: metrics_by_step[s]["avg_duration"],
+            reverse=True,
+        )
+        severity_by_step: Dict[str, str] = {}
+        n = len(ranked)
+        for idx, sid in enumerate(ranked):
+            if idx == 0:
+                severity_by_step[sid] = "high"
+            elif idx < max(1, n // 4):
+                severity_by_step[sid] = "medium"
+            else:
+                severity_by_step[sid] = "low"
+
+        bottlenecks: List[StepBottleneck] = []
+        for sid in all_step_ids:
+            m = metrics_by_step.get(sid, {})
+            stuck = stuck_by_step.get(sid, 0)
+            severity = severity_by_step.get(sid, "none")
+            if stuck > 0 and severity != "high":
+                severity = "high"
+            avg = m.get("avg_duration")
+            p95 = m.get("p95")
+            bottlenecks.append(StepBottleneck(
+                step_id=sid,
+                step_name=name_by_step.get(sid) or sid.replace("_", " ").title(),
+                avg_duration_seconds=round(avg, 2) if avg is not None else None,
+                p95_duration_seconds=round(p95, 2) if p95 is not None else None,
+                execution_count=m.get("execution_count", 0),
+                currently_stuck_count=stuck,
+                severity=severity,
+            ))
+        bottlenecks.sort(
+            key=lambda b: (b.avg_duration_seconds or 0) * max(b.execution_count, 1),
+            reverse=True,
+        )
+
+        # ---- (c) Status distribution ---------------------------------------
+        status_pipeline = [
+            {"$match": {"workflow_id": workflow_id}},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+        status_rows = await WorkflowInstance.aggregate(status_pipeline).to_list()
+        status_distribution = [
+            StatusCount(status=r["_id"] or "unknown", count=r["count"]) for r in status_rows
+        ]
+
+        # ---- (d) Volume over time ------------------------------------------
+        window_start = now - timedelta(days=days)
+        started_pipeline = [
+            {"$match": {"workflow_id": workflow_id, "started_at": {"$gte": window_start}}},
+            {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$started_at"}}, "count": {"$sum": 1}}},
+        ]
+        completed_pipeline = [
+            {"$match": {"workflow_id": workflow_id, "completed_at": {"$gte": window_start}}},
+            {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$completed_at"}}, "count": {"$sum": 1}}},
+        ]
+        started_rows = await WorkflowInstance.aggregate(started_pipeline).to_list()
+        completed_rows = await WorkflowInstance.aggregate(completed_pipeline).to_list()
+        started_by_day = {r["_id"]: r["count"] for r in started_rows if r.get("_id")}
+        completed_by_day = {r["_id"]: r["count"] for r in completed_rows if r.get("_id")}
+
+        volume_over_time: List[VolumePoint] = []
+        day = window_start.date()
+        end_day = now.date()
+        while day <= end_day:
+            key = day.strftime("%Y-%m-%d")
+            volume_over_time.append(VolumePoint(
+                date=key,
+                started=started_by_day.get(key, 0),
+                completed=completed_by_day.get(key, 0),
+            ))
+            day += timedelta(days=1)
+
+        return WorkflowAnalyticsResponse(
+            workflow_id=workflow_id,
+            generated_at=now,
+            kpis=kpis,
+            bottlenecks=bottlenecks,
+            status_distribution=status_distribution,
+            volume_over_time=volume_over_time,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute workflow analytics: {str(e)}")
 
 
 @router.get("/steps/{step_id}/metrics", response_model=PerformanceMetricsResponse)
