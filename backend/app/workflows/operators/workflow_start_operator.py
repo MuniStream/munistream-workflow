@@ -100,6 +100,9 @@ class WorkflowStartOperator(BaseOperator):
             clear_completed_tasks: List of tasks to clear on recovery
             **kwargs: Additional arguments passed to BaseOperator
         """
+        # Lanzar un sub-workflow (p.ej. validación administrativa) es orquestación
+        # interna: por defecto no se muestra en la línea de pasos del ciudadano.
+        kwargs.setdefault("visible", False)
         super().__init__(task_id=task_id, **kwargs)
         self.workflow_id = workflow_id
         self.workflow_type = workflow_type
