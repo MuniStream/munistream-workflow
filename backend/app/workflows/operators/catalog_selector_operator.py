@@ -45,6 +45,7 @@ class CatalogSelectorOperator(BaseOperator):
         default_filters: Optional[Dict[str, Any]] = None,
         exact_match_columns: Optional[List[str]] = None,
         hierarchical_columns: Optional[List[str]] = None,
+        postal_code_column: Optional[str] = None,
         **kwargs
     ):
         """
@@ -87,6 +88,7 @@ class CatalogSelectorOperator(BaseOperator):
         self.default_filters = default_filters or {}
         self.exact_match_columns = exact_match_columns or []
         self.hierarchical_columns = hierarchical_columns or []
+        self.postal_code_column = postal_code_column
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
@@ -181,7 +183,8 @@ class CatalogSelectorOperator(BaseOperator):
                 "page_size": self.page_size,
                 "default_filters": resolved_filters,
                 "exact_match_columns": self.exact_match_columns,
-                "hierarchical_columns": self.hierarchical_columns
+                "hierarchical_columns": self.hierarchical_columns,
+                "postal_code_column": self.postal_code_column
             },
             "validation": {
                 "required": True,
