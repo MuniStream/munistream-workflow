@@ -260,6 +260,60 @@ async def get_catalog_data(
         )
 
 
+@router.get("/{catalog_id}/distinct", response_model=Dict[str, Any])
+async def get_catalog_distinct(
+    catalog_id: str,
+    column: str = Query(..., description="Column to get distinct values for"),
+    filters: Optional[str] = Query(None, description="JSON string of filters"),
+    search: Optional[str] = Query(None, description="Substring search across visible columns"),
+    current_user: dict = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Valores distintos de una columna (para selección jerárquica en cascada).
+
+    Ej.: distinct de 'municipio' con filters={"estado":"Sinaloa"} devuelve los
+    municipios de Sinaloa, sin traer todas las filas del catálogo.
+    """
+    try:
+        user_groups = _extract_user_groups(current_user)
+
+        filter_dict = {}
+        if filters:
+            import json
+            try:
+                filter_dict = json.loads(filters)
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid filters JSON format"
+                )
+
+        values = await CatalogService.get_distinct_values(
+            catalog_id=catalog_id,
+            user_groups=user_groups,
+            column=column,
+            filters=filter_dict,
+            search=search,
+        )
+        return {"catalog_id": catalog_id, "column": column, "values": values}
+
+    except CatalogNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Catalog '{catalog_id}' not found"
+        )
+    except CatalogPermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this catalog"
+        )
+    except Exception as e:
+        logger.error(f"Error getting catalog distinct values: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get catalog distinct values"
+        )
+
+
 @router.post("/{catalog_id}/search", response_model=CatalogDataResponse)
 async def search_catalog_data(
     catalog_id: str,

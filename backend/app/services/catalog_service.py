@@ -251,6 +251,63 @@ class CatalogService:
         return paginated_data, total_count
 
     @staticmethod
+    async def get_distinct_values(
+        catalog_id: str,
+        user_groups: List[str],
+        column: str,
+        filters: Optional[Dict[str, Any]] = None,
+        search: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[Any]:
+        """Valores distintos (ordenados) de una columna, con permisos/filtros aplicados.
+
+        Sirve para poblar los niveles de una selección jerárquica en cascada
+        (p. ej. estados; municipios de un estado; localidades de un municipio)
+        sin traer todas las filas al cliente.
+        """
+        catalog = await CatalogService.get_catalog(catalog_id)
+        if not catalog.is_accessible_by_user(user_groups):
+            raise CatalogPermissionError(f"User lacks access to catalog '{catalog_id}'")
+
+        visible_columns = catalog.get_visible_columns_for_user(user_groups)
+        if column not in visible_columns:
+            return []
+
+        catalog_data = await CatalogData.find_one(CatalogData.catalog_id == catalog_id)
+        if not catalog_data or not catalog_data.data:
+            return []
+
+        rows = [
+            {col: row.get(col) for col in visible_columns if col in row}
+            for row in catalog_data.data
+        ]
+
+        row_filters = catalog.get_row_filters_for_user(user_groups)
+        if row_filters:
+            rows = CatalogService._apply_row_filters(rows, row_filters)
+        if search:
+            rows = CatalogService._apply_search(rows, search, visible_columns)
+        if filters:
+            rows = CatalogService._apply_filters(rows, filters)
+
+        seen = set()
+        distinct: List[Any] = []
+        for row in rows:
+            val = row.get(column)
+            if val is None or val == "":
+                continue
+            key = str(val)
+            if key in seen:
+                continue
+            seen.add(key)
+            distinct.append(val)
+            if len(distinct) >= limit:
+                break
+
+        distinct.sort(key=lambda v: str(v))
+        return distinct
+
+    @staticmethod
     def _apply_row_filters(data: List[Dict[str, Any]], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Apply row-level filters to data"""
         filtered_data = []
