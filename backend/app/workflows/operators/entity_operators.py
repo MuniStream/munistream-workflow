@@ -61,6 +61,7 @@ class EntityCreationOperator(BaseOperator):
         user_id_source: Optional[str] = None,  # Optional: context field to get user_id from (admin only)
         visualizer: Optional[str] = None,  # Visualizer type for entity PDF generation
         field_blacklist: Optional[List[str]] = None,  # Fields to exclude from entity data
+        folio_config: Optional[Dict[str, Any]] = None,  # Auto-assign a sequential folio at creation
         **kwargs
     ):
         """
@@ -87,6 +88,10 @@ class EntityCreationOperator(BaseOperator):
         self.user_id_source = user_id_source
         self.visualizer = visualizer
         self.field_blacklist = field_blacklist or ["base64", "content"]
+        # Folio secuencial opcional: {"field","prefix","sequence_key","width","include_year"}.
+        # Cuando está presente, se asigna un número consecutivo único a la entidad al
+        # crearse (p. ej. el número de cédula RNPA), salvo que el campo ya venga poblado.
+        self.folio_config = folio_config or None
 
         # Merge visualizer into entity_display_config
         self.entity_display_config = entity_display_config or {
@@ -233,6 +238,9 @@ class EntityCreationOperator(BaseOperator):
             # un catálogo de oficios.
             await self._inject_oficio_metadata(self._entity_params, context)
 
+            # Asignar folio secuencial (p. ej. número de cédula RNPA) si se configuró.
+            await self._assign_folio(self._entity_params)
+
             print(f"   Creating entity with async executor...")
             try:
                 entity = await EntityService.create_entity(**self._entity_params)
@@ -338,6 +346,58 @@ class EntityCreationOperator(BaseOperator):
         
         # If regular execute didn't need async, return its result
         return result
+
+    async def _assign_folio(self, entity_params: Dict[str, Any]) -> None:
+        """Asigna un folio secuencial único a la entidad al crearse.
+
+        Config (``folio_config``):
+          - ``field`` (req): clave en ``entity.data`` donde se guarda el folio.
+          - ``prefix``: prefijo del folio (por defecto vacío).
+          - ``sequence_key``: nombre del contador atómico (por defecto = ``field``).
+            Distintas entidades pueden compartir o no la misma secuencia.
+          - ``width``: ceros a la izquierda del consecutivo (por defecto 6).
+          - ``include_year``: intercalar el año en curso (por defecto True).
+
+        El consecutivo se obtiene con un ``$inc`` atómico sobre la colección
+        ``counters`` (findAndModify con upsert), por lo que es único aún con
+        creaciones concurrentes. Si el campo ya viene poblado, no se reasigna.
+        """
+        cfg = self.folio_config
+        if not cfg:
+            return
+        field = cfg.get("field")
+        if not field:
+            return
+        data = entity_params.setdefault("data", {})
+        # No reasignar si ya trae folio (idempotencia ante re-capturas).
+        if data.get(field):
+            return
+
+        sequence_key = cfg.get("sequence_key") or field
+        prefix = cfg.get("prefix", "")
+        width = int(cfg.get("width", 6))
+        include_year = cfg.get("include_year", True)
+
+        try:
+            from pymongo import ReturnDocument
+            from ...core.database import get_database
+            db = await get_database()
+            counter = await db["counters"].find_one_and_update(
+                {"_id": sequence_key},
+                {"$inc": {"seq": 1}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            seq = int(counter["seq"])
+        except Exception as exc:
+            print(f"   ⚠️ No se pudo generar folio para '{field}': {exc}")
+            return
+
+        partes = [p for p in (prefix, str(datetime.utcnow().year) if include_year else None,
+                              str(seq).zfill(width)) if p]
+        folio = "-".join(partes)
+        data[field] = folio
+        print(f"   🔢 Folio asignado {field}={folio}")
 
     async def _inject_oficio_metadata(
         self, entity_params: Dict[str, Any], context: Dict[str, Any]
