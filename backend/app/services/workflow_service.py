@@ -122,6 +122,12 @@ class WorkflowService:
         if not dag:
             return None
             
+        # Overlay de metadatos persistidos (editables desde el admin: requisitos,
+        # costo, plazo) sobre los definidos en el código; los del editor ganan.
+        persisted = await WorkflowDefinition.find_one(WorkflowDefinition.workflow_id == workflow_id)
+        base_metadata = dag.metadata if hasattr(dag, 'metadata') and dag.metadata else {}
+        merged_metadata = {**base_metadata, **(persisted.metadata if persisted and persisted.metadata else {})}
+
         # Create a WorkflowDefinition object from the DAG
         return WorkflowDefinition(
             workflow_id=dag.dag_id,
@@ -131,7 +137,7 @@ class WorkflowService:
             status="active",  # DAGs in DAGBag are always active
             workflow_type=dag.workflow_type if hasattr(dag, 'workflow_type') else WorkflowType.PROCESS,
             tags=dag.tags if hasattr(dag, 'tags') else [],
-            metadata=dag.metadata if hasattr(dag, 'metadata') else {},
+            metadata=merged_metadata,
             created_at=dag.created_at if hasattr(dag, 'created_at') else datetime.utcnow(),
             updated_at=dag.updated_at if hasattr(dag, 'updated_at') else datetime.utcnow()
         )

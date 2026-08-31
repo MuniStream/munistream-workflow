@@ -554,18 +554,43 @@ def _get_workflow_icon(category: Optional[str]) -> str:
     return icons.get(category or "general", "assignment")
 
 
-def _get_workflow_requirements(workflow: WorkflowDefinition, locale: str) -> List[str]:
-    """Get workflow requirements from metadata or defaults."""
-    # Try to get from workflow metadata first
+def _get_workflow_requirements(workflow: WorkflowDefinition, dag=None, locale: str = "es") -> List[str]:
+    """Lista de requisitos para mostrar ANTES de iniciar el trámite.
+
+    Prioriza `metadata["requirements"]`; si no hay, la deriva de los pasos del
+    DAG: documentos a subir (campos de archivo de UserInputOperator) y entidades
+    prerequisito obligatorias (EntityPickerOperator). Así el ciudadano ve qué
+    necesita antes de empezar (fila 79 del feedback CONAPESCA)."""
     if workflow.metadata and "requirements" in workflow.metadata:
         reqs = workflow.metadata["requirements"]
         if isinstance(reqs, dict) and locale in reqs:
             return reqs[locale]
-        elif isinstance(reqs, list):
+        elif isinstance(reqs, list) and reqs:
             return reqs
-    
-    # Return empty list if no requirements defined
-    return []
+
+    derived: List[str] = []
+    for _task_id, task in (getattr(dag, "tasks", {}) or {}).items():
+        # Documentos a subir: campos type=file de los formularios.
+        form_config = getattr(task, "form_config", None) or {}
+        for field in (form_config.get("fields") or []):
+            if field.get("type") == "file" and field.get("label"):
+                derived.append(field["label"])
+        # Entidades prerequisito obligatorias (min_count != 0).
+        for req in (getattr(task, "requirements", None) or []):
+            if not isinstance(req, dict) or req.get("min_count", 1) == 0:
+                continue
+            info = req.get("info") or {}
+            name = info.get("display_name") or req.get("display_title")
+            if name:
+                derived.append(name)
+
+    seen = set()
+    out: List[str] = []
+    for item in derived:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 
 def _calculate_duration(num_steps: int, avg_seconds_per_step: int = 180) -> str:
@@ -999,7 +1024,9 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         description = dag.description if dag.description else workflow.description
         category = dag.category if hasattr(dag, 'category') else (workflow.category or "general")
         tags = dag.tags if dag.tags else (workflow.tags or [])
-        metadata = dag.metadata if hasattr(dag, 'metadata') and dag.metadata else (workflow.metadata or {})
+        # Los metadatos del código (DAG) son la base; los overrides persistidos
+        # en la BD (editables desde el admin: requisitos, costo, plazo) ganan.
+        metadata = {**(getattr(dag, 'metadata', None) or {}), **(workflow.metadata or {})}
 
         # Branch detection (robust for multiple / sequential forks). Branches are
         # ShortCircuitOperator gates; the citizen has not chosen a route yet on
@@ -1189,10 +1216,11 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         "icon": metadata.get("icon") or _get_workflow_icon(category),
         "estimatedDuration": metadata.get("estimatedTime") or metadata.get("estimated_duration") or _calculate_duration(len(steps)),
         "cost": metadata.get("cost"),
+        "customFields": metadata.get("customFields") or [],
         "steps": steps,
         "branches": branches,
         "step_flow": step_flow,
-        "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, locale),
+        "requirements": metadata.get("requirements", []) or _get_workflow_requirements(workflow, dag, locale),
         "entity_requirements": _extract_entity_requirements(dag) if dag else [],
         "available": metadata.get("available", True) if "available" in metadata else workflow.status == "active",
         "tags": tags,
