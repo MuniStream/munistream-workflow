@@ -247,3 +247,28 @@ class CatalogData(Document):
 
     def __repr__(self) -> str:
         return f"<CatalogData {self.catalog_id}: {self.row_count} rows>"
+
+
+class CatalogRow(Document):
+    """Una fila de catálogo como documento independiente.
+
+    Almacenamiento por-fila para catálogos grandes (p. ej. el padrón geográfico
+    SEPOMEX, ~146k filas) que no caben en el documento único de ``CatalogData``
+    (tope BSON de 16MB). Permite filtrar, paginar y obtener valores distintos
+    con consultas reales a Mongo, sin cargar todo en memoria.
+
+    Los valores de la fila viven bajo ``data`` para poder consultarlos con
+    notación de punto (``data.estado``) sin colisionar con los campos del modelo.
+    """
+
+    catalog_id: str = Field(..., index=True)
+    data: Dict[str, Any] = {}
+
+    class Settings:
+        name = "catalog_rows"
+        indexes = [
+            "catalog_id",
+        ]
+
+    def __repr__(self) -> str:
+        return f"<CatalogRow {self.catalog_id}>"
