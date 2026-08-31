@@ -150,6 +150,10 @@ class BaseOperator(ABC):
         self.upstream_tasks: List['BaseOperator'] = []
         self.state = TaskState()
         self.kwargs = kwargs
+        # Si es False, el paso se oculta en la línea de pasos del ciudadano
+        # (el admin lo sigue viendo). Útil para pasos internos como la
+        # validación administrativa. Ver public_auth.track_instance.
+        self.visible = kwargs.get("visible", True)
         self._instance_id: Optional[str] = None  # Set during execution
         self._workflow_id: Optional[str] = None  # Set during execution
         

@@ -513,6 +513,12 @@ async def track_instance(
             status_val = state.get("status", "pending")
             task_obj = dag_instance.dag.tasks.get(task_id)
 
+            # Ocultar pasos internos (visible=False, p.ej. la validación
+            # administrativa que lanza un sub-workflow) de la línea de pasos del
+            # ciudadano. El admin los sigue viendo por su propio endpoint.
+            if task_obj is not None and not getattr(task_obj, "visible", True):
+                continue
+
             # Branch gates are internal control steps, not citizen steps. The
             # gate that completed (rather than skipped) reveals the route taken.
             if isinstance(task_obj, ShortCircuitOperator):
