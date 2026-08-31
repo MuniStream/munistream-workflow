@@ -53,6 +53,7 @@ class EntityCreationOperator(BaseOperator):
         self,
         task_id: str,
         entity_type: str,
+        entity_subtype: Optional[str] = None,  # Optional subtype stored in data for filtering
         name_source: str = "name",  # Where to get the entity name from context
         data_mapping: Optional[Dict[str, str]] = None,  # Map context fields to entity data
         static_data: Optional[Dict[str, Any]] = None,  # Static data to include
@@ -81,6 +82,7 @@ class EntityCreationOperator(BaseOperator):
         """
         super().__init__(task_id, **kwargs)
         self.entity_type = entity_type
+        self.entity_subtype = entity_subtype
         self.name_source = name_source
         self.data_mapping = data_mapping or {}
         self.static_data = static_data or {}
@@ -178,6 +180,12 @@ class EntityCreationOperator(BaseOperator):
                     value = _resolve_context_path(context, context_key)
                     if value is not None:
                         entity_data[data_field] = value
+
+            # Persist the entity subtype inside data so it is queryable by
+            # EntityPickerOperator filters (which resolve non-dotted keys to
+            # "data.<key>"). Set last so it always wins over auto-collected data.
+            if self.entity_subtype:
+                entity_data["entity_subtype"] = self.entity_subtype
 
             # Get entity name - can be from entity_data, context or static
             entity_name = None
