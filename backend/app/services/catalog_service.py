@@ -7,6 +7,7 @@ for catalogs that can be used in workflows.
 
 import asyncio
 import logging
+import unicodedata
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from beanie import PydanticObjectId
@@ -291,16 +292,25 @@ class CatalogService:
 
     @staticmethod
     def _apply_search(data: List[Dict[str, Any]], search: str, columns: List[str]) -> List[Dict[str, Any]]:
-        """Apply text search across visible columns"""
-        search_term = search.lower()
+        """Apply text search across visible columns.
+
+        Búsqueda por substring, case-insensitive **y** insensible a acentos
+        (p.ej. "camaron" encuentra "Camarón"), necesario para español.
+        """
+        def _norm(text: str) -> str:
+            return ''.join(
+                c for c in unicodedata.normalize('NFKD', text.lower())
+                if not unicodedata.combining(c)
+            )
+
+        search_term = _norm(search)
         filtered_data = []
 
         for row in data:
             matches = False
             for col in columns:
                 if col in row:
-                    value = str(row[col]).lower()
-                    if search_term in value:
+                    if search_term in _norm(str(row[col])):
                         matches = True
                         break
 
