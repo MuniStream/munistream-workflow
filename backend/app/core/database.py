@@ -20,7 +20,7 @@ from ..models.category import WorkflowCategory
 from ..models.team import TeamModel
 from ..models.customer import Customer, CustomerSession
 from ..models.legal_entity import EntityType, LegalEntity
-from ..models.catalog import Catalog, CatalogData
+from ..models.catalog import Catalog, CatalogData, CatalogRow
 from ..models.profile_field_definition import ProfileFieldDefinition
 from ..models.user_profile import UserProfile
 from ..notifier.models import (
@@ -70,6 +70,7 @@ async def connect_to_mongo():
             LegalEntity,
             Catalog,
             CatalogData,
+            CatalogRow,
             ProfileFieldDefinition,
             UserProfile,
             NotificationChannelConfig,

@@ -17,6 +17,7 @@ from pymongo.errors import DuplicateKeyError
 from ..models.catalog import (
     Catalog,
     CatalogData,
+    CatalogRow,
     CatalogStatus,
     SourceType,
     ColumnSchema,
@@ -199,7 +200,34 @@ class CatalogService:
         if not catalog.is_accessible_by_user(user_groups):
             raise CatalogPermissionError(f"User lacks access to catalog '{catalog_id}'")
 
-        # Get catalog data
+        visible_columns = catalog.get_visible_columns_for_user(user_groups)
+        row_filters = catalog.get_row_filters_for_user(user_groups)
+        max_rows = catalog.get_max_rows_for_user(user_groups)
+
+        # --- Almacenamiento por-fila (catálogos grandes): consulta en Mongo ---
+        if await CatalogService._has_row_storage(catalog_id):
+            query = CatalogService._mongo_query(
+                catalog_id, visible_columns, row_filters, filters, search
+            )
+            total_count = await CatalogRow.find(query).count()
+            if max_rows is not None:
+                total_count = min(total_count, max_rows)
+
+            find = CatalogRow.find(query)
+            if sort_by and sort_by in visible_columns:
+                find = find.sort((f"data.{sort_by}", -1 if sort_desc else 1))
+            effective_offset = offset
+            effective_limit = limit
+            if max_rows is not None:
+                effective_limit = max(0, min(limit, max_rows - offset))
+            rows = await find.skip(effective_offset).limit(effective_limit).to_list()
+            data = [
+                {col: r.data.get(col) for col in visible_columns if col in r.data}
+                for r in rows
+            ]
+            return data, total_count
+
+        # --- Legado: documento único CatalogData (catálogos pequeños) ---
         catalog_data = await CatalogData.find_one(CatalogData.catalog_id == catalog_id)
         if not catalog_data:
             return [], 0
@@ -273,6 +301,20 @@ class CatalogService:
         if column not in visible_columns:
             return []
 
+        row_filters = catalog.get_row_filters_for_user(user_groups)
+
+        # --- Almacenamiento por-fila: distinct en Mongo ---
+        if await CatalogService._has_row_storage(catalog_id):
+            query = CatalogService._mongo_query(
+                catalog_id, visible_columns, row_filters, filters, search
+            )
+            coll = CatalogRow.get_motor_collection()
+            values = await coll.distinct(f"data.{column}", query)
+            values = [v for v in values if v is not None and v != ""]
+            values.sort(key=lambda v: str(v))
+            return values[:limit]
+
+        # --- Legado: documento único ---
         catalog_data = await CatalogData.find_one(CatalogData.catalog_id == catalog_id)
         if not catalog_data or not catalog_data.data:
             return []
@@ -429,28 +471,63 @@ class CatalogService:
 
     @staticmethod
     async def store_catalog_data(catalog_id: str, data: List[Dict[str, Any]]) -> CatalogData:
-        """Store or update catalog data"""
-        # Remove existing data
+        """Store or update catalog data (almacenamiento por-fila).
+
+        Escribe cada fila como un documento ``CatalogRow`` independiente, por lo
+        que no hay tope de 16MB y las consultas (filtros, distinct, paginación)
+        se resuelven en Mongo. Reemplaza cualquier dato previo del catálogo,
+        incluida la representación legada en ``CatalogData`` (documento único).
+        """
+        # Limpiar datos previos (por-fila y legado de documento único).
+        await CatalogRow.find(CatalogRow.catalog_id == catalog_id).delete()
         await CatalogData.find(CatalogData.catalog_id == catalog_id).delete()
 
-        # Calculate statistics
         row_count = len(data)
-        size_bytes = len(str(data).encode('utf-8'))
 
-        # Create new data document
+        # Insertar por lotes para no saturar memoria con catálogos grandes.
+        BATCH = 5000
+        for i in range(0, row_count, BATCH):
+            chunk = data[i:i + BATCH]
+            await CatalogRow.insert_many(
+                [CatalogRow(catalog_id=catalog_id, data=row) for row in chunk]
+            )
+
+        # Documento de metadatos (sin las filas embebidas) para row_count/estadísticas.
         catalog_data = CatalogData(
             catalog_id=catalog_id,
-            data=data,
+            data=[],
             metadata={
                 "last_updated": datetime.utcnow().isoformat(),
-                "source": "manual_update"
+                "source": "per_row",
+                "storage": "catalog_rows",
             },
             synced_at=datetime.utcnow(),
             version=1,
             row_count=row_count,
-            size_bytes=size_bytes
+            size_bytes=0,
         )
-
         await catalog_data.insert()
-        logger.info(f"Stored data for catalog {catalog_id}: {row_count} rows")
+        logger.info(f"Stored data for catalog {catalog_id}: {row_count} rows (per-row)")
         return catalog_data
+
+    @staticmethod
+    async def _has_row_storage(catalog_id: str) -> bool:
+        """True si el catálogo usa almacenamiento por-fila (CatalogRow)."""
+        return await CatalogRow.find(CatalogRow.catalog_id == catalog_id).limit(1).count() > 0
+
+    @staticmethod
+    def _mongo_query(catalog_id: str, visible_columns: List[str],
+                     row_filters: Optional[Dict[str, Any]],
+                     filters: Optional[Dict[str, Any]],
+                     search: Optional[str]) -> Dict[str, Any]:
+        """Construye el query Mongo para CatalogRow (campos bajo ``data.``)."""
+        query: Dict[str, Any] = {"catalog_id": catalog_id}
+        for f in (row_filters or {}), (filters or {}):
+            for k, v in f.items():
+                query[f"data.{k}"] = v
+        if search:
+            # Substring, insensible a mayúsculas, sobre las columnas visibles.
+            import re
+            rx = {"$regex": re.escape(search), "$options": "i"}
+            query["$or"] = [{f"data.{col}": rx} for col in visible_columns]
+        return query
