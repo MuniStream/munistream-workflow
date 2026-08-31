@@ -201,6 +201,18 @@ class EntityCreationOperator(BaseOperator):
                     entity_name = self._resolve_template_string(context, self.name_source)
                     print(f"   Resolved entity name: {entity_name}")
 
+            # Guard: si name_source es una RUTA de contexto que no resolvió
+            # (p. ej. "_selected_entities_data.embarcacion_ids.0.nombre" cuando la
+            # entidad no trae ese campo), no usar la ruta literal como nombre.
+            # Se cae a un valor seguro (otro campo de la entidad o el entity_type).
+            if isinstance(entity_name, str) and entity_name == self.name_source \
+                    and "{{" not in self.name_source \
+                    and ("." in self.name_source and " " not in self.name_source):
+                fallback = (entity_data.get("nombre") or entity_data.get("name")
+                            or entity_data.get("folio") or self.entity_type)
+                print(f"   ⚠️ name_source '{self.name_source}' no resolvió; usando '{fallback}'")
+                entity_name = fallback
+
             # For async operations, we'll handle this in execute_async
             # Store the parameters for async execution
             self._entity_params = {
