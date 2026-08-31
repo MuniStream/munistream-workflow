@@ -144,11 +144,21 @@ async def get_catalog_schema(
         visible_schema = await CatalogService.get_catalog_schema(catalog_id, user_groups)
         visible_columns = [col["name"] for col in visible_schema]
 
+        # Columnas buscables: las de texto (string) visibles; si ninguna es de
+        # texto, todas las visibles (la búsqueda del backend es substring sobre
+        # todas las columnas visibles). Sin esto el frontend no muestra la caja
+        # de búsqueda del CatalogSelector.
+        searchable_columns = [
+            col["name"] for col in visible_schema
+            if str(col.get("type", "")).lower() in ("string", "str", "text")
+        ] or visible_columns
+
         return CatalogSchemaResponse(
             catalog_id=catalog_id,
             catalog_name=catalog.name,
             schema=visible_schema,
             visible_columns=visible_columns,
+            searchable_columns=searchable_columns,
             permissions_applied=len(catalog.permissions) > 0
         )
 
