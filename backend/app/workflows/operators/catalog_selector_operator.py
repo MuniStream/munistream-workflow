@@ -34,6 +34,8 @@ class CatalogSelectorOperator(BaseOperator):
         display_columns: Optional[List[str]] = None,
         selection_fields: Optional[List[str]] = None,
         store_as: str = None,
+        title: str = None,
+        description: str = None,
         required_message: str = None,
         search_enabled: bool = True,
         filters_enabled: bool = True,
@@ -72,6 +74,10 @@ class CatalogSelectorOperator(BaseOperator):
         self.display_columns = display_columns or []
         self.selection_fields = selection_fields or []
         self.store_as = store_as or f"{task_id}_selection"
+        # Título/descripción visibles en el portal ciudadano. Por defecto usan el
+        # nombre del operador (self.name, en español) en vez del catalog_id en inglés.
+        self.title = title or getattr(self, "name", None) or f"Select from {catalog_id}"
+        self.description = description
         self.required_message = required_message or f"Please select from {catalog_id}"
         self.search_enabled = search_enabled
         self.filters_enabled = filters_enabled
@@ -157,8 +163,8 @@ class CatalogSelectorOperator(BaseOperator):
         resolved_filters = self._resolve_dynamic_filters(self.default_filters)
 
         return {
-            "title": f"Select from {self.catalog_id}",
-            "description": self.required_message,
+            "title": self.title,
+            "description": self.description or self.required_message,
             "type": "catalog_selector",
             "catalog_config": {
                 "catalog_id": self.catalog_id,

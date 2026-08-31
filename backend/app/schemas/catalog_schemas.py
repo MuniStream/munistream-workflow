@@ -231,6 +231,10 @@ class CatalogSchemaResponse(BaseModel):
     catalog_name: str
     schema: List[Dict[str, Any]]
     visible_columns: List[str]
+    # Columnas sobre las que aplica la búsqueda (el frontend muestra la caja de
+    # búsqueda solo si esta lista no está vacía). Por defecto = columnas de texto
+    # visibles; si no hay de texto, todas las visibles.
+    searchable_columns: List[str] = Field(default_factory=list)
     permissions_applied: bool
 
 
