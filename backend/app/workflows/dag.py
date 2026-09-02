@@ -30,6 +30,27 @@ class InstanceStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+def new_task_state(status: str = "pending", **overrides) -> Dict[str, Any]:
+    """
+    Construye un task_state con la forma canónica.
+
+    Es la única fuente de esa forma: tanto la creación de una instancia nueva
+    como las rutas que la rehidratan desde la base de datos deben usar este
+    helper. Un task_state parcial (solo `status`) rompe a quien lea cualquier
+    otra clave — p. ej. `update_task_status(..., "executing")`, que consulta
+    `started_at` para conservar la marca de tiempo original.
+    """
+    state = {
+        "status": status,
+        "started_at": None,
+        "completed_at": None,
+        "result": None,
+        "error": None,
+    }
+    state.update(overrides)
+    return state
+
+
 class DAG:
     """
     DAG Definition - template that can be instantiated multiple times.
@@ -271,13 +292,7 @@ class DAGInstance:
         
         # Initialize task states
         for task_id in dag.tasks.keys():
-            self.task_states[task_id] = {
-                "status": "pending",
-                "started_at": None,
-                "completed_at": None,
-                "result": None,
-                "error": None
-            }
+            self.task_states[task_id] = new_task_state()
     
     def get_executable_tasks(self) -> List[str]:
         """
@@ -391,7 +406,7 @@ class DAGInstance:
             # waiting/resume cycle (e.g. admin validation) reports its full dwell
             # time instead of only the post-resume interval. Stamp started_at only
             # the first time the task actually starts.
-            if not self.task_states[task_id]["started_at"]:
+            if not self.task_states[task_id].get("started_at"):
                 self.task_states[task_id]["started_at"] = datetime.utcnow()
             self.current_task = task_id
             

@@ -9,7 +9,7 @@ import asyncio
 import logging
 from enum import Enum
 
-from .dag import InstanceStatus
+from .dag import InstanceStatus, new_task_state
 from .operators.base import TaskStatus
 from .polling_strategy import OperatorPollingStrategy
 from ..models.workflow import WorkflowInstance, EventType
@@ -265,15 +265,15 @@ class DAGExecutor:
             # previous save persisted as current.
             for task_id in dag.tasks.keys():
                 if task_id in dag_instance.completed_tasks:
-                    dag_instance.task_states[task_id] = {"status": "completed"}
+                    dag_instance.task_states[task_id] = new_task_state("completed")
                 elif task_id in dag_instance.failed_tasks:
-                    dag_instance.task_states[task_id] = {"status": "failed"}
+                    dag_instance.task_states[task_id] = new_task_state("failed")
                 elif task_id in dag_instance.skipped_tasks:
-                    dag_instance.task_states[task_id] = {"status": "skipped"}
+                    dag_instance.task_states[task_id] = new_task_state("skipped")
                 elif task_id == db_instance.current_step:
-                    dag_instance.task_states[task_id] = {"status": "waiting"}
+                    dag_instance.task_states[task_id] = new_task_state("waiting")
                 else:
-                    dag_instance.task_states[task_id] = {"status": "pending"}
+                    dag_instance.task_states[task_id] = new_task_state()
             
             # Add to DAG bag for future reference
             self.workflow_service.dag_bag.instances[instance_id] = dag_instance

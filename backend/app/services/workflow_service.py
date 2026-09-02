@@ -13,7 +13,7 @@ from ..models.workflow import (
     WorkflowAuditLog,
     WorkflowType
 )
-from ..workflows.dag import DAG, DAGInstance, DAGBag, InstanceStatus
+from ..workflows.dag import DAG, DAGInstance, DAGBag, InstanceStatus, new_task_state
 from ..workflows.executor import DAGExecutor
 from ..workflows.operators.base import BaseOperator
 
@@ -336,17 +336,17 @@ class WorkflowService:
         self.logger.info(f"🔧 get_instance: Initializing task states for {len(dag.tasks)} tasks")
         try:
             for task_id in dag.tasks.keys():
-                dag_instance.task_states[task_id] = {"status": "pending"}
+                dag_instance.task_states[task_id] = new_task_state()
 
             # Update with execution data
             self.logger.info(f"🔧 get_instance: Updating task states with execution data")
             for execution in step_executions:
-                dag_instance.task_states[execution.step_id] = {
-                    "status": execution.status,
-                    "started_at": execution.started_at.isoformat() if execution.started_at else None,
-                    "completed_at": execution.completed_at.isoformat() if execution.completed_at else None,
-                    "result": execution.outputs
-                }
+                dag_instance.task_states[execution.step_id] = new_task_state(
+                    execution.status,
+                    started_at=execution.started_at.isoformat() if execution.started_at else None,
+                    completed_at=execution.completed_at.isoformat() if execution.completed_at else None,
+                    result=execution.outputs,
+                )
 
             # Mark completed steps
             self.logger.info(f"🔧 get_instance: Marking {len(db_instance.completed_steps or [])} completed steps")
