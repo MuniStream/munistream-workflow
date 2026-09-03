@@ -102,7 +102,6 @@ class DAGExecutor:
         hook_engine = WorkflowHookEngine(workflow_service=workflow_service)
         self.event_manager = WorkflowEventManager(hook_engine=hook_engine)
         self.status = ExecutorStatus.IDLE
-        self.execution_queue: list[str] = []  # Queue of instance IDs to process
         self._execution_task: Optional[asyncio.Task] = None
         self._should_stop = False
         # Event-driven optimization: notify when work is available
@@ -113,6 +112,8 @@ class DAGExecutor:
         # Throttling: prevent continuous execution without delays
         self.throttled_queue: dict[str, float] = {}  # Instance ID -> next allowed execution time
         self._instance_next_execution_time: dict[str, float] = {}  # Track next allowed execution per instance
+        # Fallos consecutivos por instancia, para el backoff acotado.
+        self._instance_failure_counts: dict[str, int] = {}
         # Performance metrics
         self._task_execution_times: dict[str, list[float]] = {}
         self._last_execution_time: dict[str, datetime] = {}
@@ -146,22 +147,54 @@ class DAGExecutor:
                 In(WorkflowInstance.status, ["pending", "running", "paused"])
             ).to_list()
 
-            queued_count = 0
-            for instance in incomplete_instances:
+            pending_ids = [
+                instance.instance_id
+                for instance in incomplete_instances
                 # Skip instances that need assignment or manual start
-                if instance.status in ["pending_assignment", "waiting_for_start"]:
-                    continue
+                if instance.status not in ["pending_assignment", "waiting_for_start"]
+                and instance.instance_id not in self.waiting_queue
+            ]
 
-                if instance.instance_id not in self.execution_queue:
-                    self.execution_queue.append(instance.instance_id)
-                    queued_count += 1
-
-            return queued_count
+            self._schedule_boot_instances(pending_ids)
+            return len(pending_ids)
 
         except Exception as e:
             logger.error(f"Error loading incomplete instances: {e}")
             logger.error(f"❌ Error loading incomplete instances: {e}")
             return 0
+
+    def _schedule_boot_instances(self, instance_ids: list[str]) -> None:
+        """
+        Estaciona en `waiting_queue` las instancias incompletas encontradas al
+        arrancar, repartiendo sus despertares dentro de una ventana acotada.
+
+        Van a `waiting_queue` y no a `active_queue` por dos razones. Es la rama
+        que el ciclo atiende de verdad — la cola aparte que existía antes solo
+        se drenaba cuando `active_queue` y `waiting_queue` estaban vacías, cosa
+        que con instancias pausadas estacionadas no ocurre nunca. Y el reparto
+        evita que un reinicio dispare de golpe la ejecución de todas ellas, cada
+        una con su reconstrucción del DAG y su ida a Mongo.
+        """
+        if not instance_ids:
+            return
+
+        import time as _time
+
+        window = settings.EXECUTOR_BOOT_DRAIN_WINDOW_SECONDS
+        # Un segundo de tope entre despertares para que un arranque con pocas
+        # instancias no las difiera la ventana entera. El reparto sigue cabiendo
+        # en la ventana: si `window / n` supera el tope es porque n <= window,
+        # y entonces el último vence en n segundos.
+        step = min(window / len(instance_ids), 1.0)
+        now = _time.time()
+        for position, instance_id in enumerate(instance_ids, start=1):
+            self.waiting_queue[instance_id] = now + position * step
+
+        self._work_available.set()
+        logger.info(
+            "📥 %d instancias incompletas repartidas en %.0fs (una cada %.2fs)",
+            len(instance_ids), window, step,
+        )
 
     async def stop(self):
         """Stop the executor"""
@@ -183,11 +216,10 @@ class DAGExecutor:
         Args:
             instance_id: ID of instance to execute
         """
-        if instance_id not in self.execution_queue and instance_id not in self.active_queue:
+        if instance_id not in self.active_queue:
             self.active_queue.append(instance_id)
-            # Legacy support - also add to old queue
-            if instance_id not in self.execution_queue:
-                self.execution_queue.append(instance_id)
+            # Un envío explícito gana a cualquier espera pendiente.
+            self.waiting_queue.pop(instance_id, None)
             # Signal that work is available (wake up the executor loop)
             self._work_available.set()
             logger.info(f"Instance {instance_id} queued for execution (active queue)")
@@ -706,7 +738,100 @@ class DAGExecutor:
         logger.debug(
             "Instance %s scheduled to poll in %.1fs", instance_id, poll_delay
         )
-    
+
+    def _failure_backoff(self, failure_count: int) -> Optional[float]:
+        """
+        Segundos a esperar tras `failure_count` fallos consecutivos, o None si
+        ya se agotaron los intentos.
+
+        Crece exponencialmente y con tope: un fallo determinista no puede
+        convertirse en un reintento en caliente que queme CPU, y tampoco se
+        reintenta para siempre.
+        """
+        if failure_count >= settings.EXECUTOR_MAX_CONSECUTIVE_FAILURES:
+            return None
+        return float(min(
+            2 ** failure_count,
+            settings.EXECUTOR_MAX_FAILURE_BACKOFF_SECONDS,
+        ))
+
+    async def _execute_queued_instance(self, instance_id: str) -> None:
+        """
+        Ejecuta una instancia tomada de la cola, conteniendo sus fallos.
+
+        El aislamiento es el punto: si la excepción subiera al ciclo, para
+        entonces el id ya salió de las colas y la instancia quedaría huérfana,
+        sin cola y sin temporizador, hasta el siguiente reinicio.
+        """
+        import time as _time
+
+        start_time = _time.time()
+        try:
+            can_continue = await self.execute_instance(instance_id)
+        except Exception as exc:
+            logger.exception(
+                "❌ Falló la ejecución de la instancia %s", instance_id
+            )
+            await self._handle_execution_failure(instance_id, exc)
+            return
+
+        self._instance_failure_counts.pop(instance_id, None)
+
+        execution_time = _time.time() - start_time
+        self._task_execution_times.setdefault(instance_id, []).append(execution_time)
+        self._last_execution_time[instance_id] = datetime.utcnow()
+        if execution_time > 1.0:
+            logger.warning(
+                f"⚠️ Slow execution detected for {instance_id}: {execution_time:.2f}s"
+            )
+
+        if can_continue:
+            self._schedule_next_wakeup(instance_id)
+
+    async def _handle_execution_failure(self, instance_id: str, error: Exception) -> None:
+        """Reprograma con backoff, o da la instancia por fallida al agotarse."""
+        import time as _time
+
+        failures = self._instance_failure_counts.get(instance_id, 0) + 1
+        self._instance_failure_counts[instance_id] = failures
+
+        delay = self._failure_backoff(failures)
+        if delay is not None:
+            self.waiting_queue[instance_id] = _time.time() + delay
+            logger.warning(
+                "Instancia %s reprogramada en %.0fs tras %d fallo(s)",
+                instance_id, delay, failures,
+            )
+            return
+
+        # Agotados los intentos: fuera de todas las colas y marcada en la base,
+        # para que quede visible en vez de desaparecer en silencio.
+        self._instance_failure_counts.pop(instance_id, None)
+        self.waiting_queue.pop(instance_id, None)
+        self.throttled_queue.pop(instance_id, None)
+        self._instance_next_execution_time.pop(instance_id, None)
+        logger.error(
+            "Instancia %s abandonada tras %d fallos consecutivos", instance_id, failures
+        )
+        await self._mark_instance_failed(instance_id, error)
+
+    async def _mark_instance_failed(self, instance_id: str, error: Exception) -> None:
+        """Marca la instancia como fallida. Nunca propaga: el ciclo debe seguir."""
+        try:
+            from ..models.workflow import WorkflowInstance
+
+            db_instance = await WorkflowInstance.find_one(
+                WorkflowInstance.instance_id == instance_id
+            )
+            if db_instance:
+                db_instance.status = "failed"
+                db_instance.updated_at = datetime.utcnow()
+                await db_instance.save()
+        except Exception:
+            logger.exception(
+                "No se pudo marcar como fallida la instancia %s", instance_id
+            )
+
     def _map_status(self, dag_status) -> str:
         """Map DAG status to database status string"""
         mapping = {
@@ -1009,29 +1134,9 @@ class DAGExecutor:
                     else:
                         logger.debug(f"First execution of {instance_id}, no throttling yet")
 
-                    # Remove from legacy queue too
-                    if instance_id in self.execution_queue:
-                        self.execution_queue.remove(instance_id)
-
-                    # Track execution time for metrics
-                    start_time = time.time()
-
-                    # Execute instance
-                    can_continue = await self.execute_instance(instance_id)
-
-                    # Log execution time
-                    execution_time = time.time() - start_time
-                    if instance_id not in self._task_execution_times:
-                        self._task_execution_times[instance_id] = []
-                    self._task_execution_times[instance_id].append(execution_time)
-                    self._last_execution_time[instance_id] = datetime.utcnow()
-
-                    if execution_time > 1.0:  # Log slow executions
-                        logger.warning(f"⚠️ Slow execution detected for {instance_id}: {execution_time:.2f}s")
-
-                    # Re-queue based on the instance's current scheduling profile.
-                    if can_continue:
-                        self._schedule_next_wakeup(instance_id)
+                    # Ejecuta con el fallo contenido: una instancia que revienta
+                    # no puede abortar el ciclo ni quedarse fuera de las colas.
+                    await self._execute_queued_instance(instance_id)
 
                 # Check waiting queue for instances ready to retry
                 elif self.waiting_queue:
@@ -1056,7 +1161,6 @@ class DAGExecutor:
 
                             # Not throttled, can execute immediately
                             self.active_queue.append(instance_id)
-                            self.execution_queue.append(instance_id)
                             logger.debug(f"Moving {instance_id} from waiting to active queue")
                         # Signal work available if we added to active queue
                         if self.active_queue:
@@ -1073,28 +1177,6 @@ class DAGExecutor:
                             self._work_available.clear()
                         except asyncio.TimeoutError:
                             pass
-
-                # Fallback to legacy queue processing
-                elif self.execution_queue:
-                    instance_id = self.execution_queue.pop(0)
-
-                    # Check throttling for legacy queue too
-                    if instance_id in self._instance_next_execution_time:
-                        next_allowed_time = self._instance_next_execution_time[instance_id]
-                        if current_time < next_allowed_time:
-                            # Not ready yet, add to throttled queue
-                            self.throttled_queue[instance_id] = next_allowed_time
-                            time_to_wait = next_allowed_time - current_time
-                            logger.info(f"⏳ Throttling {instance_id} from legacy queue, wait {time_to_wait:.1f}s more")
-                            continue  # Skip this instance for now
-
-                    # Execute
-                    start_time = time.time()
-                    can_continue = await self.execute_instance(instance_id)
-                    execution_time = time.time() - start_time
-
-                    if can_continue:
-                        self._schedule_next_wakeup(instance_id)
 
                 # Check if there are throttled instances waiting
                 elif self.throttled_queue:
@@ -1156,27 +1238,12 @@ class DAGExecutor:
 
         if instance_id not in self.active_queue:
             self.active_queue.insert(0, instance_id)
-            if instance_id not in self.execution_queue:
-                self.execution_queue.insert(0, instance_id)
             logger.info(f"Instance {instance_id} prioritized in active queue")
         else:
             logger.info(f"Instance {instance_id} already in active queue")
 
         self._work_available.set()
 
-    async def _execute_immediate(self, instance_id: str):
-        """Execute an instance immediately without waiting for the loop"""
-        try:
-            logger.info(f"Executing instance {instance_id} immediately")
-            can_continue = await self.execute_instance(instance_id)
-
-            # If instance needs to continue but isn't in queue, add it
-            if can_continue and instance_id not in self.execution_queue:
-                self.execution_queue.append(instance_id)
-
-        except Exception as e:
-            logger.error(f"Error in immediate execution of {instance_id}: {e}")
-    
     def cancel_instance(self, instance_id: str):
         """
         Cancel an instance.
@@ -1185,9 +1252,13 @@ class DAGExecutor:
             instance_id: Instance to cancel
         """
         # Remove from queue if present
-        if instance_id in self.execution_queue:
-            self.execution_queue.remove(instance_id)
-        
+        if instance_id in self.active_queue:
+            self.active_queue.remove(instance_id)
+        self.waiting_queue.pop(instance_id, None)
+        self.throttled_queue.pop(instance_id, None)
+        self._instance_next_execution_time.pop(instance_id, None)
+        self._instance_failure_counts.pop(instance_id, None)
+
         # Mark as cancelled in database
         asyncio.create_task(self._mark_cancelled(instance_id))
         logger.info(f"Instance {instance_id} cancelled")
@@ -1235,11 +1306,11 @@ class DAGExecutor:
 
         return {
             "status": self.status.value,
-            "queued_instances": len(self.execution_queue),
+            "queued_instances": len(self.active_queue),
             "active_queue_size": len(self.active_queue),
             "waiting_queue_size": len(self.waiting_queue),
             "throttled_queue_size": len(self.throttled_queue),
-            "queue": self.execution_queue[:10],  # Show first 10 in queue
+            "queue": self.active_queue[:10],  # Show first 10 in queue
             "active_queue": self.active_queue[:10],
             "waiting_instances": list(self.waiting_queue.keys())[:10],
             "throttled_instances": throttled_info,

@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     # Executor scheduling
     EXECUTOR_SAFETY_NET_SECONDS: int = 300
     EXECUTOR_RUNNING_THROTTLE_SECONDS: float = 0.5
+    # Ventana en la que se reparten las instancias incompletas que se cargan al
+    # arrancar, para que un reinicio no dispare todas sus ejecuciones a la vez.
+    EXECUTOR_BOOT_DRAIN_WINDOW_SECONDS: float = 60.0
+    # Reintentos ante una excepción al ejecutar una instancia. Agotados, la
+    # instancia se marca fallida en vez de reintentarse para siempre.
+    EXECUTOR_MAX_CONSECUTIVE_FAILURES: int = 5
+    EXECUTOR_MAX_FAILURE_BACKOFF_SECONDS: float = 300.0
 
     # Wallet Configuration
     APPLE_TEAM_ID: Optional[str] = None

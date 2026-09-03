@@ -61,7 +61,6 @@ def _make_executor():
     workflow_service = SimpleNamespace(dag_bag=dag_bag)
     executor = object.__new__(DAGExecutor)
     executor.workflow_service = workflow_service
-    executor.execution_queue = []
     executor.active_queue = []
     executor.waiting_queue = {}
     executor.throttled_queue = {}
