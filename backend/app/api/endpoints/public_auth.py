@@ -247,6 +247,27 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     return customer
 
 
+def require_instance_owner(db_instance, current_customer: Customer) -> None:
+    """
+    Exige que el trámite pertenezca al ciudadano que hace la petición.
+
+    Autenticar no es autorizar: sin esta comprobación, cualquier ciudadano con
+    sesión válida puede leer o tocar el trámite de otro con solo tener el UUID.
+    Vive aquí, con un nombre propio, porque estaba copiada a mano en unos
+    endpoints y olvidada en otro.
+
+    Falla cerrado: una instancia sin `user_id` no es de nadie.
+    """
+    owner_id = getattr(db_instance, "user_id", None)
+    if not owner_id or owner_id != str(current_customer.id):
+        # El detalle no menciona al dueño real: un 403 no debe servir para
+        # averiguar de quién es un trámite.
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to access this instance",
+        )
+
+
 async def get_current_customer_optional(authorization: Optional[str] = Header(None)) -> Optional[Customer]:
     """Optional customer authentication - wrapper that catches exceptions and returns None"""
     try:
@@ -403,7 +424,7 @@ async def track_instance(
     """
     Track workflow instance status.
     Returns current state and any required actions.
-    Requires authentication - only authenticated users can track instances.
+    Solo el ciudadano dueño del trámite puede consultarlo.
     """
     from ...models.workflow import WorkflowInstance
     from ...services.workflow_service import workflow_service
@@ -414,6 +435,8 @@ async def track_instance(
     )
     if not db_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
+
+    require_instance_owner(db_instance, current_customer)
 
     # Get DAG instance for detailed state
     dag_instance = await workflow_service.get_instance(instance_id)
