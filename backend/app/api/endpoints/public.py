@@ -17,7 +17,7 @@ from .public_auth import get_current_customer_optional
 from ...models.legal_entity import LegalEntity, EntityType
 from ...services.entity_service import EntityService
 from ...workflows.dag import DAG
-from .public_auth import router as auth_router, get_current_customer
+from .public_auth import router as auth_router, get_current_customer, require_instance_owner
 from ...core.logging_config import set_workflow_context
 # Removed localization imports - keeping it simple
 
@@ -59,8 +59,7 @@ async def rewind_instance(
     if not db_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
-    if db_instance.user_id != str(current_customer.id):
-        raise HTTPException(status_code=403, detail="Not authorized to access this instance")
+    require_instance_owner(db_instance, current_customer)
 
     to_task_id = (payload or {}).get("to_task_id")
     if not to_task_id or not isinstance(to_task_id, str):
@@ -122,9 +121,7 @@ async def submit_data(
     if not db_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    # Verify the instance belongs to the current customer
-    if db_instance.user_id != str(current_customer.id):
-        raise HTTPException(status_code=403, detail="Not authorized to access this instance")
+    require_instance_owner(db_instance, current_customer)
     
     # Get DAG instance
     dag_instance = await workflow_service.get_instance(instance_id)
