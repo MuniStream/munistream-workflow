@@ -140,6 +140,14 @@ class SignerOperator(BaseOperator):
         # Use the complete workflow context as the document to sign
         signable_data = context.copy()
 
+        # El documento a firmar no puede contener al documento a firmar. El
+        # ejecutor mezcla esta salida de vuelta en el contexto (rama WAITING),
+        # así que copiar el contexto tal cual añadía un nivel de anidamiento por
+        # cada re-ejecución. Como el safety net despierta al operador cada 300s,
+        # eran doce niveles por hora: al llegar a 180 Mongo rechazaba el save y
+        # el trámite quedaba imposible de guardar para siempre.
+        signable_data.pop("signable_data", None)
+
         # Remove sensitive or unnecessary fields
         sensitive_fields = ["_signature_pending", "kc_token", "password", "private_key"]
         for field in sensitive_fields:
@@ -149,9 +157,15 @@ class SignerOperator(BaseOperator):
         # Also remove any fields that start with underscore (internal fields)
         signable_data = {k: v for k, v in signable_data.items() if not k.startswith('_')}
 
+        # El timestamp se sella al crear la solicitud de firma y se reutiliza en
+        # los sondeos posteriores. Regenerarlo en cada llamada movía el
+        # `data_hash`, que es justo el ancla de integridad que el revisor firma.
+        pending = context.get(f"_signature_pending_{self.signature_field}") or {}
+        timestamp = pending.get("created_at") or datetime.utcnow().isoformat()
+
         # Add signature metadata
         signable_data.update({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": timestamp,
             "signature_purpose": self.signature_metadata.get("purpose", "workflow_approval"),
             "signature_type": "complete_context_signature"
         })
@@ -165,6 +179,21 @@ class SignerOperator(BaseOperator):
         print(f"   📄 Context keys included: {list(signable_data.keys())}")
 
         return signable_data
+
+    def _build_pending_signature_record(self, signable_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Registro de la solicitud de firma que se guarda en el contexto.
+
+        Toma el timestamp del propio payload en vez de sellar uno nuevo: es lo
+        que hace que el `data_hash` no se mueva entre el primer envío y los
+        sondeos posteriores, porque `_prepare_signable_data` lo relee de aquí.
+        """
+        return {
+            "signature_field": self.signature_field,
+            "created_at": signable_data["timestamp"],
+            "status": "pending",
+            "data_hash": signable_data.get("data_hash"),
+        }
 
     async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
         """Async execution method for handling signature workflow"""
@@ -282,12 +311,7 @@ class SignerOperator(BaseOperator):
 
             # Store minimal signature info - NO signable_data to avoid nesting
             signature_info_key = f"_signature_pending_{self.signature_field}"
-            context[signature_info_key] = {
-                "signature_field": self.signature_field,
-                "created_at": datetime.utcnow().isoformat(),
-                "status": "pending",
-                "data_hash": signable_data.get("data_hash")  # Just the hash
-            }
+            context[signature_info_key] = self._build_pending_signature_record(signable_data)
 
             await self.log_info(
                 f"Waiting for digital signature on {len(self.context_fields_to_sign)} context fields",
