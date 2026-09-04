@@ -887,33 +887,35 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
             if len(entities) < min_count:
                 missing_count = min_count - len(entities)
-                # Build description from all filters, not just document_type
-                filter_desc = ", ".join([f"{k}: {v}" for k, v in filters.items()]) if filters else "unfiltered"
+                info = req.get("info", {}) or {}
+                display_name = info.get("display_name") or req.get("display_title") or entity_type
+                prereq_workflow = info.get("workflow_id")
+                # Prefer the human instructions; fall back to a generated line.
+                description = info.get("instructions") or (
+                    f"Necesitas {missing_count} {display_name} para continuar."
+                )
 
                 missing_info.append({
-                    "title": req.get("display_title", f"Entities {entity_type}"),
-                    "description": f"Necesitas subir {missing_count} entidades de tipo: {entity_type} ({filter_desc})",
+                    "title": req.get("display_title", display_name),
+                    "description": description,
                     "type": "missing_requirement",
                     "entity_type": entity_type,
                     "filters": filters,
                     "required_count": min_count,
-                    "found_count": len(entities)
+                    "found_count": len(entities),
+                    # CTA so the citizen can go obtain the missing prerequisite.
+                    "display_name": display_name,
+                    "workflow_id": prereq_workflow,
+                    "action_url": f"/services/{prereq_workflow}" if prereq_workflow else None,
                 })
 
         return {
-            "title": "Documentos Requeridos Faltantes",
-            "description": "Antes de continuar, necesitas subir los siguientes documentos:",
+            "title": "Te faltan requisitos para este trámite",
+            "description": "Para continuar necesitas obtener primero lo siguiente:",
             "type": "missing_requirements_notification",
             "waiting_for": "missing_entities",
             "missing_requirements": missing_info,
             "is_notification": True,  # Mark as notification, not input form
-            "actions": [
-                {
-                    "type": "redirect",
-                    "text": "Ir a Subir Documentos",
-                    "route": "/documents"
-                }
-            ]
         }
 
     def _generate_selection_form(self, requirement_entities: Dict[str, List], requirements: List[Dict[str, Any]]) -> Dict[str, Any]:

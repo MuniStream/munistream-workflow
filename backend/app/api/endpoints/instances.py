@@ -30,6 +30,7 @@ from ...models.workflow import (
 from ...core.database import get_database
 from ...workflows.dag import DAGInstance, InstanceStatus
 from ...services.workflow_service import workflow_service
+from ...services.entity_service import EntityService
 from ...auth.provider import require_permission, get_current_user
 from ...services.assignment_service import assignment_service
 from ...models.team import TeamModel
@@ -90,6 +91,49 @@ async def require_instance_access(instance_id: str, current_user: dict = Depends
     return instance
 
 
+async def _find_missing_entity_prerequisites(workflow_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Prerequisite entities the user is missing to start ``workflow_id``.
+
+    Inspects the workflow's EntityPicker requirements (``min_count > 0``) and
+    verifies the user already owns enough matching entities. Used to block
+    starting a trámite that would immediately dead-end at the entity picker
+    (e.g. an aviso de cosecha without a permiso de acuacultura). Returns an
+    empty list when every mandatory prerequisite is satisfied.
+    """
+    dag = await workflow_service.get_dag(workflow_id)
+    if not dag:
+        return []
+    tasks = dag.tasks.values() if isinstance(dag.tasks, dict) else dag.tasks
+    missing: List[Dict[str, Any]] = []
+    for task in tasks:
+        requirements = getattr(task, "requirements", None)
+        if not isinstance(requirements, list):
+            continue
+        for req in requirements:
+            if not isinstance(req, dict) or not req.get("entity_type"):
+                continue
+            min_count = req.get("min_count", 1)
+            if not min_count or min_count <= 0:
+                continue  # optional prerequisite — never blocks starting
+            entities = await EntityService.find_entities(
+                owner_user_id=user_id,
+                entity_type=req["entity_type"],
+                filters=req.get("filters", {}) or {},
+            )
+            if len(entities) < min_count:
+                info = req.get("info", {}) or {}
+                prereq_workflow = info.get("workflow_id")
+                missing.append({
+                    "entity_type": req["entity_type"],
+                    "display_name": info.get("display_name") or req.get("display_title") or req["entity_type"],
+                    "required": min_count,
+                    "found": len(entities),
+                    "workflow_id": prereq_workflow,
+                    "action_url": f"/services/{prereq_workflow}" if prereq_workflow else None,
+                })
+    return missing
+
+
 @router.post("/", response_model=InstanceResponse)
 async def create_workflow_instance(
     request: WorkflowExecuteRequest,
@@ -105,6 +149,20 @@ async def create_workflow_instance(
             if "admin" not in user_roles and "manager" not in user_roles:
                 raise HTTPException(status_code=403, detail="Only admin/manager can create instances on behalf of another user")
             user_id = request.on_behalf_of_user_id
+
+        # Block creation when the citizen lacks a required prerequisite entity
+        # (e.g. a permiso de acuacultura for an aviso de cosecha). Without this
+        # the instance would start and immediately dead-end at the entity picker.
+        missing_prereqs = await _find_missing_entity_prerequisites(request.workflow_id, user_id)
+        if missing_prereqs:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "missing_requirements",
+                    "message": "Faltan requisitos para iniciar este trámite.",
+                    "missing": missing_prereqs,
+                },
+            )
 
         # Create DAG instance
         initial_data = request.initial_context or {}
@@ -133,7 +191,11 @@ async def create_workflow_instance(
             updated_at=dag_instance.updated_at,
             completed_at=dag_instance.completed_at if dag_instance.status.value == "completed" else None
         )
-        
+
+    except HTTPException:
+        # Preserve structured errors (e.g. 409 missing prerequisites) instead of
+        # collapsing them into a generic 400 below.
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
