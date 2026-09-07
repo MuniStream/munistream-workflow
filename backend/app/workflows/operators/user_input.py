@@ -123,7 +123,7 @@ class UserInputOperator(BaseOperator):
         # These are authoritative server-side checks; the frontend mirrors them.
         for field_cfg in fields_schema:
             ftype = field_cfg.get("type")
-            if ftype in ("array", "file", "camera", None):
+            if ftype in ("array", "file", "camera", "address", None):
                 continue
             name = field_cfg.get("name")
             label = field_cfg.get("label", name)
@@ -163,6 +163,32 @@ class UserInputOperator(BaseOperator):
                     else:
                         if selected < date.today():
                             errors.append(f"{label} no puede ser anterior a la fecha actual")
+
+        # Address fields: valor es un objeto {calle, no_ext, no_int, colonia,
+        # municipio, estado, cp}. Validar subcampos requeridos (no_int opcional).
+        ADDRESS_REQUIRED = [
+            ("calle", "Calle"),
+            ("no_ext", "No. Ext"),
+            ("cp", "Código Postal"),
+            ("colonia", "Colonia"),
+            ("municipio", "Municipio"),
+            ("estado", "Estado"),
+        ]
+        for field_cfg in fields_schema:
+            if field_cfg.get("type") != "address":
+                continue
+            name = field_cfg.get("name")
+            label = field_cfg.get("label", name)
+            value = user_input.get(name)
+            if not field_cfg.get("required") and value in (None, "", {}):
+                continue
+            if not isinstance(value, dict):
+                errors.append(f"{label} es requerido")
+                continue
+            for sub_key, sub_label in ADDRESS_REQUIRED:
+                sub_val = value.get(sub_key)
+                if sub_val is None or str(sub_val).strip() == "":
+                    errors.append(f"{label}: {sub_label} es requerido")
 
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "array":
