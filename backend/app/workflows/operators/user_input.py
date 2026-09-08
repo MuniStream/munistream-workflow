@@ -60,6 +60,27 @@ class UserInputOperator(BaseOperator):
         self.form_config = form_config
         self.required_fields = required_fields or []
     
+    def _coerce_structured_fields(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Reconstituir a dict los campos de tipo `address` que hayan llegado como
+        string JSON (el multipart/FormData serializa los objetos). Devuelve una
+        copia con esos campos parseados; deja el resto igual."""
+        import json as _json
+        if not isinstance(user_input, dict):
+            return user_input
+        fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
+        address_names = {f.get("name") for f in fields_schema if f.get("type") == "address"}
+        if not address_names:
+            return user_input
+        coerced = dict(user_input)
+        for name in address_names:
+            val = coerced.get(name)
+            if isinstance(val, str) and val.strip().startswith("{"):
+                try:
+                    coerced[name] = _json.loads(val)
+                except (ValueError, TypeError):
+                    pass
+        return coerced
+
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
         Check for user input in context and validate it.
@@ -71,6 +92,10 @@ class UserInputOperator(BaseOperator):
         if input_key in context:
             # We have input - validate it
             user_input = context[input_key]
+            # El submit va por multipart/FormData, que serializa los objetos a
+            # string JSON (p. ej. el campo `address`). Reconstituir esos campos a
+            # dict para validar y guardar el objeto estructurado, no el string.
+            user_input = self._coerce_structured_fields(user_input)
             errors = self._validate_input(user_input)
             
             if not errors:
