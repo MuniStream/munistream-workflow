@@ -60,6 +60,27 @@ class UserInputOperator(BaseOperator):
         self.form_config = form_config
         self.required_fields = required_fields or []
     
+    def _coerce_structured_fields(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Reconstituir a dict los campos de tipo `address` que hayan llegado como
+        string JSON (el multipart/FormData serializa los objetos). Devuelve una
+        copia con esos campos parseados; deja el resto igual."""
+        import json as _json
+        if not isinstance(user_input, dict):
+            return user_input
+        fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
+        address_names = {f.get("name") for f in fields_schema if f.get("type") == "address"}
+        if not address_names:
+            return user_input
+        coerced = dict(user_input)
+        for name in address_names:
+            val = coerced.get(name)
+            if isinstance(val, str) and val.strip().startswith("{"):
+                try:
+                    coerced[name] = _json.loads(val)
+                except (ValueError, TypeError):
+                    pass
+        return coerced
+
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
         Check for user input in context and validate it.
@@ -71,6 +92,10 @@ class UserInputOperator(BaseOperator):
         if input_key in context:
             # We have input - validate it
             user_input = context[input_key]
+            # El submit va por multipart/FormData, que serializa los objetos a
+            # string JSON (p. ej. el campo `address`). Reconstituir esos campos a
+            # dict para validar y guardar el objeto estructurado, no el string.
+            user_input = self._coerce_structured_fields(user_input)
             errors = self._validate_input(user_input)
             
             if not errors:
@@ -123,7 +148,7 @@ class UserInputOperator(BaseOperator):
         # These are authoritative server-side checks; the frontend mirrors them.
         for field_cfg in fields_schema:
             ftype = field_cfg.get("type")
-            if ftype in ("array", "file", "camera", None):
+            if ftype in ("array", "file", "camera", "address", None):
                 continue
             name = field_cfg.get("name")
             label = field_cfg.get("label", name)
@@ -163,6 +188,32 @@ class UserInputOperator(BaseOperator):
                     else:
                         if selected < date.today():
                             errors.append(f"{label} no puede ser anterior a la fecha actual")
+
+        # Address fields: valor es un objeto {calle, no_ext, no_int, colonia,
+        # municipio, estado, cp}. Validar subcampos requeridos (no_int opcional).
+        ADDRESS_REQUIRED = [
+            ("calle", "Calle"),
+            ("no_ext", "No. Ext"),
+            ("cp", "Código Postal"),
+            ("colonia", "Colonia"),
+            ("municipio", "Municipio"),
+            ("estado", "Estado"),
+        ]
+        for field_cfg in fields_schema:
+            if field_cfg.get("type") != "address":
+                continue
+            name = field_cfg.get("name")
+            label = field_cfg.get("label", name)
+            value = user_input.get(name)
+            if not field_cfg.get("required") and value in (None, "", {}):
+                continue
+            if not isinstance(value, dict):
+                errors.append(f"{label} es requerido")
+                continue
+            for sub_key, sub_label in ADDRESS_REQUIRED:
+                sub_val = value.get(sub_key)
+                if sub_val is None or str(sub_val).strip() == "":
+                    errors.append(f"{label}: {sub_label} es requerido")
 
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "array":
