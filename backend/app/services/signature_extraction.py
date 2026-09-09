@@ -1,37 +1,18 @@
-"""Agrupa las firmas que el SignerOperator deja sueltas en una entidad.
+"""Firmas de un documento, tal como las publica el SignerOperator.
 
-El operador publica sus resultados como `<task_id>_<atributo>`:
-`sign_document_signer`, `sign_document_signature_chain`, etc. Para imprimir el
-bloque de firma de un documento oficial hay que volver a juntarlos por tarea.
+El operador declara con `signatures_key` (default `firmas`) dónde deja la lista;
+el trámite mapea esa clave a la entidad y las plantillas la leen desde aquí. Un
+único lugar convenido, sin adivinar.
 
-Catastro lo resolvía buscando el prefijo `firma_`, que funciona porque sus
-tareas se llaman `firma_validacion`, `firma_dictamen_tecnico`… Pero amarra la
-presentación al nombre de la tarea: la de CONAPESCA se llama `sign_document` y
-por eso nunca aparecía firma en sus documentos; y renombrarla dejaría sin firma
-a todo lo ya emitido, que conserva el nombre viejo en su `data`.
-
-Aquí se detecta por el CONJUNTO DE ATRIBUTOS, no por el nombre: cualquier tarea
-que haya dejado firmante o cadena de firma cuenta como firma, se llame como se
-llame.
+Antes hubo un barrido que reconstruía las firmas a partir de las claves sueltas
+`<task_id>_<atributo>`. Se eliminó: acoplaba la presentación al nombre de la
+tarea y obligaba a heurísticas para no confundir cualquier `<paso>_submitted_at`
+con una firma. Los documentos emitidos antes de `signatures_key` no tienen la
+clave y por lo tanto no muestran bloque de firma.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-
-# Atributos que publica el SignerOperator. El orden no importa.
-SIGNATURE_ATTRS = (
-    "signer",
-    "signed_at",
-    "submitted_at",
-    "signature_valid",
-    "algorithm",
-    "signature_chain",
-    "cert_subject",
-)
-
-# Sin alguno de estos no hay evidencia real de firma, solo un paso que registró
-# una fecha. Evita que cualquier `<paso>_submitted_at` se cuele como firma.
-REQUIRED_EVIDENCE = ("signer", "signature_chain")
 
 
 def format_signature_chain(chain: Optional[str], group_size: int = 32) -> str:
@@ -47,43 +28,20 @@ def extract_signatures(
 ) -> List[Dict[str, Any]]:
     """Devuelve las firmas de la entidad, ordenadas por fecha de firma.
 
-    Si el SignerOperator dejó la lista en `key` —su `signatures_key`— se usa tal
-    cual. Ese es el camino normal.
-
-    El barrido por atributos que sigue existe solo por COMPATIBILIDAD con los
-    documentos emitidos antes de que la clave existiera, cuyas firmas quedaron
-    como claves sueltas `<task_id>_<atributo>`. No es el mecanismo principal.
+    Cada una se enriquece con `signature_chain_display`: la cadena ya agrupada,
+    lista para imprimir.
     """
     if not data:
         return []
 
-    explicitas = data.get(key)
-    if isinstance(explicitas, list) and explicitas:
-        firmas = [dict(f) for f in explicitas if isinstance(f, dict)]
-        firmas.sort(key=lambda f: str(f.get("signed_at") or f.get("submitted_at") or ""))
-        for f in firmas:
-            f["signature_chain_display"] = format_signature_chain(
-                f.get("signature_chain") or f.get("signature")
-            )
-        return firmas
+    firmas = [f for f in (data.get(key) or []) if isinstance(f, dict)]
+    if not firmas:
+        return []
 
-    encontradas: Dict[str, Dict[str, Any]] = {}
-    for clave, valor in data.items():
-        if not isinstance(clave, str):
-            continue
-        for attr in SIGNATURE_ATTRS:
-            sufijo = "_" + attr
-            if clave.endswith(sufijo) and len(clave) > len(sufijo):
-                task_id = clave[: -len(sufijo)]
-                encontradas.setdefault(task_id, {"task_id": task_id})[attr] = valor
-                break
-
-    firmas = [
-        f for f in encontradas.values()
-        if any(f.get(attr) for attr in REQUIRED_EVIDENCE)
-    ]
-
+    firmas = [dict(f) for f in firmas]
     firmas.sort(key=lambda f: str(f.get("signed_at") or f.get("submitted_at") or ""))
     for f in firmas:
-        f["signature_chain_display"] = format_signature_chain(f.get("signature_chain"))
+        f["signature_chain_display"] = format_signature_chain(
+            f.get("signature_chain") or f.get("signature")
+        )
     return firmas
