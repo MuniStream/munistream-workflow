@@ -219,10 +219,54 @@ def entity_ids_in_use(instance, wallet_entity_ids: Set[str]) -> List[str]:
     return sorted(found & wallet_entity_ids)
 
 
+async def resolve_origin(instance) -> Optional[Dict[str, Any]]:
+    """Tramite del que nace esta instancia, cuando es una hija.
+
+    Las validaciones administrativas corren como instancia aparte, con su
+    propio workflow ("Validacion Administrativa"). Visto desde ahi, el nombre
+    del trabajo no dice *que* se esta validando: el tramite del ciudadano es el
+    padre. Sin esto, dos validaciones de tramites distintos son
+    indistinguibles en pantalla.
+    """
+    context = getattr(instance, "context", None) or {}
+    parent_instance_id = context.get("parent_instance_id")
+    parent_workflow_id = context.get("parent_workflow_id")
+    if not parent_instance_id and not parent_workflow_id:
+        return None
+
+    # El propio tramite padre guarda en su context la referencia que uso para
+    # lanzar la validacion, asi que estas claves tambien aparecen en el, con su
+    # propio id. Ahi no hay origen que mostrar: es el tramite en si.
+    if parent_instance_id and parent_instance_id == getattr(instance, "instance_id", None):
+        return None
+    if not parent_instance_id and parent_workflow_id == getattr(instance, "workflow_id", None):
+        return None
+
+    parent_name = parent_workflow_id
+    if parent_workflow_id:
+        try:
+            from .workflow_service import workflow_service
+
+            parent_dag = await workflow_service.get_dag(parent_workflow_id)
+            parent_name = getattr(parent_dag, "name", None) or parent_workflow_id
+        except Exception:
+            # Un workflow padre que ya no esta cargado no debe tumbar el
+            # expediente: se muestra su identificador.
+            pass
+
+    return {
+        "parent_instance_id": parent_instance_id,
+        "parent_workflow_id": parent_workflow_id,
+        "parent_workflow_name": parent_name,
+        "parent_task_id": context.get("parent_task_id"),
+    }
+
+
 async def build_admin_detail(instance, dag) -> Dict[str, Any]:
     """Expediente completo de una instancia, sin la cartera (que va aparte)."""
     attachments = collect_instance_attachments(instance)
     citizen = await resolve_citizen(instance)
+    origin = await resolve_origin(instance)
 
     status = getattr(instance, "status", None)
     return {
@@ -249,6 +293,7 @@ async def build_admin_detail(instance, dag) -> Dict[str, Any]:
             },
         },
         "citizen": citizen,
+        "origin": origin,
         "context": curate_context(getattr(instance, "context", None)),
         "attachments": attachments,
         "counts": {"attachments": len(attachments)},
