@@ -37,6 +37,7 @@ from ...services.assignment_service import assignment_service
 from ...services.entity_serialization import slim_entity_data, describe_blobs
 from ...services.instance_attachments import find_attachment
 from ...services.instance_dossier import build_admin_detail, entity_ids_in_use
+from ...services.instance_listing import enrich_instances
 from ...models.team import TeamModel
 
 router = APIRouter()
@@ -526,6 +527,34 @@ async def list_instances(
     
     # Convert to response format
     instance_responses = [convert_instance_to_response(instance) for instance in instances]
+
+    # Datos de identificación: sin ellos el listado sólo puede mostrar
+    # identificadores, y el seguimiento ciudadano acaba enseñando información
+    # distinta de la bandeja aunque sean los mismos trámites.
+    extras = await enrich_instances(instances)
+    totales_por_workflow = {}
+    for wf_id in {i.workflow_id for i in instances if i.workflow_id}:
+        try:
+            dag = await workflow_service.get_dag(wf_id)
+            totales_por_workflow[wf_id] = len(getattr(dag, "tasks", None) or {})
+        except Exception:
+            totales_por_workflow[wf_id] = 0
+
+    for respuesta, extra, inst in zip(instance_responses, extras, instances):
+        respuesta.workflow_name = extra["workflow_name"]
+        respuesta.parent_workflow_name = extra["parent_workflow_name"]
+        respuesta.parent_instance_id = extra["parent_instance_id"]
+        respuesta.citizen_name = extra["citizen_name"]
+        respuesta.citizen_email = extra["citizen_email"]
+        respuesta.assigned_to_name = extra["assigned_to_name"]
+
+        total_pasos = totales_por_workflow.get(inst.workflow_id, 0)
+        if inst.status == "completed":
+            respuesta.completion_percentage = 100
+        elif total_pasos and extra["completed_steps_count"]:
+            respuesta.completion_percentage = min(
+                (extra["completed_steps_count"] / total_pasos) * 100, 100
+            )
     
     return InstanceListResponse(
         instances=instance_responses,
