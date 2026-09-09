@@ -42,14 +42,30 @@ def format_signature_chain(chain: Optional[str], group_size: int = 32) -> str:
     return " ".join(limpia[i:i + group_size] for i in range(0, len(limpia), group_size))
 
 
-def extract_signatures(data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def extract_signatures(
+    data: Optional[Dict[str, Any]], key: str = "firmas"
+) -> List[Dict[str, Any]]:
     """Devuelve las firmas de la entidad, ordenadas por fecha de firma.
 
-    Cada firma trae `task_id` y los atributos que el operador haya publicado,
-    más `signature_chain_display` con la cadena ya agrupada.
+    Si el SignerOperator dejó la lista en `key` —su `signatures_key`— se usa tal
+    cual. Ese es el camino normal.
+
+    El barrido por atributos que sigue existe solo por COMPATIBILIDAD con los
+    documentos emitidos antes de que la clave existiera, cuyas firmas quedaron
+    como claves sueltas `<task_id>_<atributo>`. No es el mecanismo principal.
     """
     if not data:
         return []
+
+    explicitas = data.get(key)
+    if isinstance(explicitas, list) and explicitas:
+        firmas = [dict(f) for f in explicitas if isinstance(f, dict)]
+        firmas.sort(key=lambda f: str(f.get("signed_at") or f.get("submitted_at") or ""))
+        for f in firmas:
+            f["signature_chain_display"] = format_signature_chain(
+                f.get("signature_chain") or f.get("signature")
+            )
+        return firmas
 
     encontradas: Dict[str, Dict[str, Any]] = {}
     for clave, valor in data.items():
