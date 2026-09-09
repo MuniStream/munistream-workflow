@@ -238,13 +238,33 @@ class SelfieOperator(ImageCaptureOperator):
 
             # Prepare output for context
             selfie_filename = self.generate_filename(context)
+            selfie_size = self.image_size_bytes(image_data)
+            content_type = capture_metadata.get('content_type') or "image/jpeg"
+
+            # Payload para el S3UploadOperator. Si la imagen ya está en S3
+            # (subida por `submit-data`), se le pasa la referencia para que haga
+            # copy de `tmp/` al destino final; los bytes no vuelven al context.
+            if self.is_s3_reference(image_data):
+                upload_payload = {
+                    **image_data,
+                    "filename": selfie_filename,
+                    "content_type": content_type,
+                    "size": selfie_size,
+                }
+            else:
+                upload_payload = {
+                    "content": image_data,
+                    "filename": selfie_filename,
+                    "content_type": content_type,
+                    "size": selfie_size,
+                }
 
             output_data = {
                 self.output_key: {
                     "image_data": image_data,
                     "filename": selfie_filename,
-                    "content_type": "image/jpeg",
-                    "size": len(base64.b64decode(image_data)) if isinstance(image_data, str) else len(image_data),
+                    "content_type": content_type,
+                    "size": selfie_size,
                     "provenance": provenance,
                     "validation": validation_result,
                     "purpose": self.purpose,
@@ -252,12 +272,7 @@ class SelfieOperator(ImageCaptureOperator):
                     "validated_at": datetime.utcnow().isoformat()
                 },
                 # Add direct key for S3UploadOperator compatibility (with _ prefix to exclude from parent context)
-                "_selfie_image": {
-                    "content": image_data,
-                    "filename": selfie_filename,
-                    "content_type": "image/jpeg",
-                    "size": len(base64.b64decode(image_data)) if isinstance(image_data, str) else len(image_data),
-                },
+                "_selfie_image": upload_payload,
                 f"{self.task_id}_validated": True,
                 f"{self.task_id}_captured_at": provenance['capture_timestamp'],
                 f"{self.task_id}_provenance": provenance,
