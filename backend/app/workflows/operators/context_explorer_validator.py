@@ -562,9 +562,9 @@ class ContextExplorerValidator(BaseOperator):
                 'bucket': upload_result.get('bucket'),
             }
 
-            # Add proxy download URL for secure access
-            if upload_result.get('s3_key'):
-                result['download_url'] = f"/api/v1/files/download/{upload_result.get('s3_key')}"
+            # No se guarda una URL de descarga: la ruta ya no es abierta y un
+            # enlace persistido caducaria de inmediato. El cliente pide un
+            # permiso de vida corta con la `s3_key` que ya va en `result`.
 
             # Map conversion result fields to frontend expectations
             if conversion_result:
@@ -588,9 +588,9 @@ class ContextExplorerValidator(BaseOperator):
                 'error': str(e)
             }
 
-            # Add proxy download URL even in error case if s3_key exists
+            # Igual que arriba: se conserva la s3_key, no un enlace directo.
             if upload_result.get('s3_key'):
-                result['download_url'] = f"/api/v1/files/download/{upload_result.get('s3_key')}"
+                result['s3_key'] = upload_result.get('s3_key')
 
             return result
 
