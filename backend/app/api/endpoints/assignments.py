@@ -24,7 +24,9 @@ from ...schemas.assignment import (
     UserAssignmentInfo, WorkflowStartRequest, WorkflowStartResponse
 )
 from ...core.logging_config import get_workflow_logger
+from ...models.workflow import StepExecution
 from ...workflows.executor import DAGExecutor
+from ...services.workflow_service import workflow_service
 
 logger = get_workflow_logger(__name__)
 
@@ -193,29 +195,63 @@ async def list_assignments(
         instances = await WorkflowInstance.find(query).sort([("created_at", -1)]).skip(skip).limit(limit).to_list()
         print(f"[ASSIGNMENTS DEBUG] Retrieved {len(instances)} instances")
 
+        # Nombres de workflow en una sola consulta, para el propio tramite y para
+        # el de origen. Antes se consultaba la definicion dentro del bucle, una
+        # vez por fila.
+        wf_ids = {i.workflow_id for i in instances if i.workflow_id}
+        wf_ids |= {i.parent_workflow_id for i in instances if i.parent_workflow_id}
+        definitions = {}
+        if wf_ids:
+            for wd in await WorkflowDefinition.find(
+                {"workflow_id": {"$in": list(wf_ids)}}
+            ).to_list():
+                definitions[wd.workflow_id] = wd
+
+        # Total de pasos por workflow, del DAG y una sola vez por workflow.
+        # Antes se contaban documentos de `WorkflowStep`, el modelo anterior a
+        # los DAG: para cualquier tramite actual esa coleccion esta vacia, asi
+        # que el total era 0 y el progreso salia siempre 0%.
+        totales_por_workflow = {}
+        for wf_id in {i.workflow_id for i in instances if i.workflow_id}:
+            try:
+                dag = await workflow_service.get_dag(wf_id)
+                tasks = getattr(dag, "tasks", None) or {}
+                totales_por_workflow[wf_id] = len(tasks)
+            except Exception:
+                totales_por_workflow[wf_id] = 0
+
+        # Pasos ya ejecutados, en una sola agregacion para toda la pagina.
+        # `completed_steps` del documento no es fiable (hay instancias avanzadas
+        # con la lista vacia) y `task_states` no se persiste: el avance real
+        # vive en la coleccion de ejecuciones, que es de donde lo saca tambien
+        # el endpoint de seguimiento.
+        ids_pagina = [i.instance_id for i in instances]
+        completados_por_instancia = {}
+        if ids_pagina:
+            cursor = StepExecution.get_motor_collection().aggregate([
+                {"$match": {"instance_id": {"$in": ids_pagina}, "status": "completed"}},
+                {"$group": {"_id": {"i": "$instance_id", "s": "$step_id"}}},
+                {"$group": {"_id": "$_id.i", "n": {"$sum": 1}}},
+            ])
+            async for fila in cursor:
+                completados_por_instancia[fila["_id"]] = fila["n"]
+
         # Build response
         assignments = []
         for inst in instances:
-            # Get workflow definition for name and total steps
-            workflow_def = await WorkflowDefinition.find_one(
-                WorkflowDefinition.workflow_id == inst.workflow_id
-            )
+            workflow_def = definitions.get(inst.workflow_id)
 
-            # Calculate completion percentage based on workflow steps
-            total_steps = 0
-            if workflow_def:
-                # Get total steps from workflow definition
-                from ...models.workflow import WorkflowStep
-                total_steps = await WorkflowStep.find(
-                    WorkflowStep.workflow_id == inst.workflow_id
-                ).count()
+            total_steps = totales_por_workflow.get(inst.workflow_id, 0)
 
             # Calculate progress percentage
+            completados = completados_por_instancia.get(
+                inst.instance_id, len(inst.completed_steps or [])
+            )
             completion_percentage = 0
-            if total_steps > 0 and inst.completed_steps:
-                completion_percentage = (len(inst.completed_steps) / total_steps) * 100
-                # Cap at 100%
-                completion_percentage = min(completion_percentage, 100)
+            if inst.status == "completed":
+                completion_percentage = 100
+            elif total_steps > 0 and completados:
+                completion_percentage = min((completados / total_steps) * 100, 100)
 
             assignments.append(AssignmentResponse(
                 instance_id=inst.instance_id,
@@ -230,6 +266,10 @@ async def list_assignments(
                 assigned_by=inst.assigned_by,
                 parent_instance_id=inst.parent_instance_id,
                 parent_workflow_id=inst.parent_workflow_id,
+                parent_workflow_name=(
+                    getattr(definitions.get(inst.parent_workflow_id), "name", None)
+                    or inst.parent_workflow_id
+                ),
                 priority=inst.priority,
                 created_at=inst.created_at,
                 updated_at=inst.updated_at,

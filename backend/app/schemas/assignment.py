@@ -42,6 +42,14 @@ class AssignmentResponse(BaseModel):
     # Parent workflow info
     parent_instance_id: Optional[str] = Field(None, description="Parent workflow instance if child")
     parent_workflow_id: Optional[str] = Field(None, description="Parent workflow ID if child")
+    parent_workflow_name: Optional[str] = Field(
+        None,
+        description=(
+            "Nombre del tramite de origen. Las validaciones administrativas corren "
+            "como instancia aparte y todas comparten el mismo workflow_name, asi que "
+            "sin esto las filas de la bandeja son indistinguibles entre si."
+        ),
+    )
 
     # Metadata
     priority: int = Field(default=5, description="Priority level")

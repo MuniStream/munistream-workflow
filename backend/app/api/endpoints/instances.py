@@ -31,8 +31,12 @@ from ...core.database import get_database
 from ...workflows.dag import DAGInstance, InstanceStatus
 from ...services.workflow_service import workflow_service
 from ...services.entity_service import EntityService
+from ...models.legal_entity import LegalEntity, EntityType
 from ...auth.provider import require_permission, get_current_user
 from ...services.assignment_service import assignment_service
+from ...services.entity_serialization import slim_entity_data, describe_blobs
+from ...services.instance_attachments import find_attachment
+from ...services.instance_dossier import build_admin_detail, entity_ids_in_use
 from ...models.team import TeamModel
 
 router = APIRouter()
@@ -198,42 +202,6 @@ async def create_workflow_instance(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.get("/{instance_id}", response_model=InstanceResponse)
-async def get_instance(
-    db_instance: WorkflowInstance = Depends(require_instance_access),
-    current_user: dict = Depends(get_current_user),
-):
-    """Get DAG instance details with role-based access control"""
-    instance_id = db_instance.instance_id
-    try:
-        dag_instance = await workflow_service.get_instance(instance_id)
-    except Exception as e:
-        logger.error(f"Error getting instance {instance_id}: {e}")
-        logger.error(f"Exception type: {type(e)}")
-        logger.error(f"Exception details: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-    if not dag_instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-
-    # Check permissions - user can only see their own instances unless admin
-    if dag_instance.user_id != str(current_user.get("sub")) and "admin" not in current_user.get("roles", []):
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    return InstanceResponse(
-        instance_id=dag_instance.instance_id,
-        workflow_id=dag_instance.dag.dag_id,
-        status=dag_instance.status if isinstance(dag_instance.status, str) else dag_instance.status.value,
-        user_id=dag_instance.user_id,
-        context=dag_instance.context,
-        step_results={},  # Initialize empty step results
-        current_step=dag_instance.current_task,
-        created_at=dag_instance.created_at,
-        updated_at=dag_instance.updated_at,
-        completed_at=dag_instance.completed_at if dag_instance.status == "completed" else None
-    )
 
 
 @router.get("/my-assignments", response_model=InstanceListResponse)
@@ -696,102 +664,6 @@ async def get_bottleneck_analysis(
         "analysis_period_days": 30,
         "total_executions_analyzed": len(recent_executions)
     }
-
-
-@router.get("/citizen-validations", response_model=List[Dict[str, Any]])
-async def get_citizen_validations(
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES")),
-    status: Optional[str] = Query(None, description="Filter by status: awaiting_input, pending_validation"),
-    limit: int = Query(100, description="Maximum number of results")
-):
-    """Get citizen instances awaiting validation"""
-    from ...models.user import UserModel
-    
-    # Build query for instances requiring validation
-    query_filters = []
-    
-    # Build MongoDB query to find instances with citizen data that need validation
-    if status:
-        query = {"status": status}
-    else:
-        # First get all instances that might need validation
-        # We'll filter them properly in Python code below
-        query = {
-            "$or": [
-                {"status": {"$in": ["awaiting_input", "pending_validation"]}},
-                {"status": "running"}
-            ]
-        }
-    
-    # Find instances that need validation
-    instances = await WorkflowInstance.find(
-        query
-    ).sort(-WorkflowInstance.created_at).limit(limit).to_list()
-    
-    # Format response with citizen data - filter out instances without citizen data
-    validation_items = []
-    for instance in instances:
-        # Get workflow from DAG system for metadata
-        dag = await workflow_service.get_dag(instance.workflow_id)
-        if not dag:
-            continue
-            
-        # Extract citizen data from context
-        citizen_data = {}
-        uploaded_files = {}
-        has_citizen_data = False
-        
-        for key, value in instance.context.items():
-            if key.endswith('_citizen_data'):
-                citizen_data.update(value)
-                has_citizen_data = True
-            elif key.endswith('_uploaded_files'):
-                uploaded_files.update(value)
-        
-        # Check if admin validation has already been done
-        admin_validation_done = instance.context.get("admin_validation_decision") is not None
-        
-        # Include instances that:
-        # 1. Are awaiting input (potential for citizen data), OR
-        # 2. Have citizen data but haven't been validated by admin yet
-        should_include = False
-        
-        if instance.status in ["awaiting_input", "pending_validation"]:
-            should_include = True
-        elif has_citizen_data and not admin_validation_done:
-            should_include = True
-        
-        if not should_include:
-            continue
-        
-        # Find current step requiring validation
-        current_step_info = None
-        if instance.current_step and instance.current_step in workflow.steps:
-            current_step = workflow.steps[instance.current_step]
-            current_step_info = {
-                "step_id": current_step.step_id,
-                "name": current_step.name,
-                "description": current_step.description,
-                "requires_citizen_input": getattr(current_step, 'requires_citizen_input', False)
-            }
-        
-        validation_items.append({
-            "instance_id": instance.instance_id,
-            "workflow_id": instance.workflow_id,
-            "workflow_name": workflow.name,
-            "citizen_id": instance.user_id,
-            "status": instance.status,
-            "current_step": current_step_info,
-            "citizen_data": citizen_data,
-            "uploaded_files": uploaded_files,
-            "created_at": instance.created_at,
-            "updated_at": instance.updated_at,
-            "context": instance.context
-        })
-    
-    return validation_items
-
-
 @router.put("/{instance_id}", response_model=InstanceResponse)
 async def update_instance(
     update_data: InstanceUpdateRequest,
@@ -1002,6 +874,55 @@ async def approve_step_dag(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error processing approval decision: {str(e)}")
+
+
+# NOTA DE ORDEN: `/{instance_id}` captura cualquier ruta de un solo segmento,
+# asi que debe declararse DESPUES de todas las rutas estaticas del router
+# (/my-assignments, /assignment-statistics, /unassigned-instances, /active,
+# /citizen-validations). Estaba declarada arriba del todo y se comia las cinco:
+# devolvian 404 'Instance not found' en vez de su propia respuesta.
+@router.get("/{instance_id}", response_model=InstanceResponse)
+async def get_instance(
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+):
+    """Get DAG instance details with role-based access control"""
+    instance_id = db_instance.instance_id
+    try:
+        dag_instance = await workflow_service.get_instance(instance_id)
+    except Exception as e:
+        logger.error(f"Error getting instance {instance_id}: {e}")
+        logger.error(f"Exception type: {type(e)}")
+        logger.error(f"Exception details: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+    if not dag_instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    # La autorizacion ya la resolvio require_instance_access (admin, asignado
+    # directo, o manager del equipo asignado). No se compara el user_id contra
+    # el sub del token: para tramites ciudadanos user_id es el id del Customer
+    # y sub es el id de staff en Keycloak, asi que esa comparacion dejaba fuera
+    # a todo el personal no-admin aunque tuviera la instancia asignada.
+    response = convert_instance_to_response(db_instance)
+
+    # El estado vivo del DAG es mas fresco que el documento persistido.
+    live_status = (
+        dag_instance.status
+        if isinstance(dag_instance.status, str)
+        else dag_instance.status.value
+    )
+    try:
+        response.status = InstanceStatus(live_status)
+    except ValueError:
+        pass  # estado no reconocido: se conserva el persistido
+
+    response.context = dag_instance.context
+    response.current_step = dag_instance.current_task
+    if live_status == "completed" and dag_instance.completed_at:
+        response.completed_at = dag_instance.completed_at
+
+    return response
+
 
 
 @router.get("/{instance_id}/history", response_model=InstanceHistoryResponse)
@@ -1348,284 +1269,6 @@ async def submit_workflow_data(
         "submitted_by": current_user.get("sub"),
         "submitted_at": datetime.utcnow().isoformat()
     }
-
-
-@router.post("/{instance_id}/validate")
-async def validate_citizen_data(
-    validation_request: Dict[str, Any],
-    background_tasks: BackgroundTasks,
-    instance: WorkflowInstance = Depends(require_instance_access),
-    current_user: dict = Depends(get_current_user)
-):
-    """Validate or reject citizen submitted data with role-based access control"""
-    from ...models.user import UserModel
-
-    instance_id = instance.instance_id
-    
-    # Check if instance can be validated
-    # Allow validation if:
-    # 1. Status is awaiting_input or pending_validation, OR
-    # 2. Status is running and has citizen data but no admin validation yet
-    has_citizen_data = any(key.endswith('_citizen_data') for key in instance.context.keys())
-    admin_validation_done = instance.context.get("admin_validation_decision") is not None
-    
-    valid_statuses = ["awaiting_input", "pending_validation"]
-    can_validate_running = instance.status == "running" and has_citizen_data and not admin_validation_done
-    
-    if instance.status not in valid_statuses and not can_validate_running:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Instance status '{instance.status}' does not allow validation or has already been validated"
-        )
-    
-    # Get validation decision
-    decision = validation_request.get("decision")
-    entity_type = validation_request.get("entity_type")
-    comments = validation_request.get("comments", "")
-    
-    if decision not in ["approve", "reject", "request_changes"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Decision must be 'approve', 'reject', or 'request_changes'"
-        )
-    
-    # Get workflow from DAG system
-    dag = await workflow_service.get_dag(instance.workflow_id)
-    if not dag:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    # Find which task needs validation (the current task requiring citizen input)
-    current_task = None
-    if instance.current_step and instance.current_step in dag.tasks:
-        current_task = dag.tasks[instance.current_step]
-    
-    # Determine validation keys based on entity_type or step
-    if entity_type:
-        # Entity-specific validation
-        step_validation_key = f"{entity_type}_validation_status"
-        step_comments_key = f"{entity_type}_validation_comments"
-        step_validator_key = f"{entity_type}_validated_by"
-        step_timestamp_key = f"{entity_type}_validation_timestamp"
-    elif current_step and hasattr(current_step, 'requires_citizen_input') and current_step.requires_citizen_input:
-        # Step-specific validation
-        step_validation_key = f"{current_step.step_id}_admin_validation_decision"
-        step_comments_key = f"{current_step.step_id}_admin_validation_comments"
-        step_validator_key = f"{current_step.step_id}_validated_by"
-        step_timestamp_key = f"{current_step.step_id}_validation_timestamp"
-    else:
-        # Fall back to global validation
-        step_validation_key = "admin_validation_decision"
-        step_comments_key = "admin_validation_comments"
-        step_validator_key = "validated_by"
-        step_timestamp_key = "validation_timestamp"
-    
-    # Update instance with validation decision
-    instance.context = instance.context or {}
-    instance.context.update({
-        step_validation_key: decision,
-        step_comments_key: comments,
-        step_validator_key: str(current_user.get("sub")),
-        step_timestamp_key: datetime.utcnow().isoformat()
-    })
-    
-    if decision == "approve":
-        # INTEGRATE WITH REVIEW SYSTEM: Instead of direct approval, assign to reviewer
-        from ...services.assignment_service import AssignmentService
-        
-        # Extract and promote citizen data to top-level context for subsequent steps
-        if instance.current_step and instance.current_step in workflow.steps:
-            current_step = workflow.steps[instance.current_step]
-            
-            # If this step collected citizen data, promote it to top-level context
-            if hasattr(current_step, 'requires_citizen_input') and current_step.requires_citizen_input:
-                citizen_data_key = f"{instance.current_step}_citizen_data"
-                if citizen_data_key in instance.context:
-                    citizen_data = instance.context[citizen_data_key]
-                    # Promote each field to top-level context for subsequent steps
-                    for field_name, field_value in citizen_data.items():
-                        instance.context[field_name] = field_value
-            
-            # Mark current step as completed
-            if instance.current_step not in instance.completed_steps:
-                instance.completed_steps.append(instance.current_step)
-        
-        # Simple step completion logic - let each step handle its own validation
-        print(f"🔍 Validation request: decision={validation_request.get('decision')}, current_step={instance.current_step}")
-        
-        if validation_request.get('decision') == 'approve':
-            print(f"✅ Approving step: {instance.current_step}")
-            # Step approved - execute the current step and advance to next
-            current_step = workflow.steps.get(instance.current_step)
-            if current_step:
-                print(f"📝 Found step: {current_step.name}")
-                try:
-                    # Execute the step with current context
-                    from ...workflows.executor import StepExecutionContext
-                    execution_context = StepExecutionContext(
-                        instance_id=instance.instance_id,
-                        user_id=instance.user_id
-                    )
-                    
-                    step_result = await step_executor.execute_step(
-                        step=current_step,
-                        inputs=instance.context,
-                        context=instance.context,
-                        execution_context=execution_context
-                    )
-                    print(f"🔧 Step executed, result type: {type(step_result)}")
-                    
-                    # Update context with step results
-                    if isinstance(step_result, dict):
-                        instance.context.update(step_result)
-                        print(f"📊 Context updated with: {list(step_result.keys())}")
-                    
-                    # Mark step as completed
-                    if instance.current_step not in instance.completed_steps:
-                        instance.completed_steps.append(instance.current_step)
-                    
-                    # Advance to next step
-                    if hasattr(current_step, 'next_steps') and current_step.next_steps:
-                        next_step_id = current_step.next_steps[0].step_id if hasattr(current_step.next_steps[0], 'step_id') else current_step.next_steps[0]
-                        instance.current_step = next_step_id
-                        instance.status = "awaiting_input"
-                        print(f"✅ Step completed, advancing to: {next_step_id}")
-                    else:
-                        # No next steps, workflow complete
-                        instance.status = "completed"
-                        instance.current_step = None
-                        instance.completed_at = datetime.utcnow()
-                        print(f"✅ Workflow completed")
-                        
-                except Exception as e:
-                    print(f"❌ Error executing step: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    instance.status = "failed"
-            else:
-                print(f"❌ Current step not found in workflow: {instance.current_step}")
-                    
-        elif validation_request.get('decision') == 'reject':
-            # Step rejected - workflow failed
-            instance.status = "failed"
-            instance.current_step = None
-            instance.completed_at = datetime.utcnow()
-    
-    instance.updated_at = datetime.utcnow()
-    await instance.save()
-    
-    # Create audit log for validation decision
-    step_execution = StepExecution(
-        execution_id=str(uuid.uuid4()),
-        instance_id=instance.instance_id,
-        step_id=instance.current_step or "admin_validation",
-        workflow_id=instance.workflow_id,
-        status="completed" if decision == "approve" else "failed",
-        inputs={"admin_decision": decision, "comments": comments},
-        outputs={"validation_result": decision, "validator": str(current_user.get("sub"))},
-        started_at=datetime.utcnow(),
-        completed_at=datetime.utcnow(),
-        duration_seconds=0
-    )
-    await step_execution.create()
-    
-    # Continue workflow execution if approved and status allows it
-    if decision == "approve" and instance.status in ["running", "awaiting_input"]:
-        workflow_service.executor.resume_instance(instance_id)
-    
-    return {
-        "success": True,
-        "message": f"Citizen data {decision}d successfully",
-        "instance_id": instance_id,
-        "decision": decision,
-        "next_status": instance.status,
-        "validated_by": str(current_user.get("sub")),
-        "validation_timestamp": datetime.utcnow().isoformat()
-    }
-
-
-@router.get("/{instance_id}/citizen-data")
-async def get_citizen_data(
-    db_instance: WorkflowInstance = Depends(require_instance_access)
-):
-    """Get detailed citizen data for an instance with role-based access control"""
-    instance_id = db_instance.instance_id
-    from ...models.user import UserModel
-    
-    # Find the instance
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
-    # Get workflow from DAG system
-    dag = await workflow_service.get_dag(instance.workflow_id)
-    if not dag:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-    
-    # Extract all citizen data from context
-    citizen_data = {}
-    uploaded_files = {}
-    data_submissions = []
-    
-    for key, value in instance.context.items():
-        if key.endswith('_citizen_data'):
-            step_id = key.replace('_citizen_data', '')
-            citizen_data[step_id] = value
-        elif key.endswith('_uploaded_files'):
-            step_id = key.replace('_uploaded_files', '')
-            uploaded_files[step_id] = value
-        elif key.endswith('_data_submitted_at'):
-            step_id = key.replace('_data_submitted_at', '')
-            data_submissions.append({
-                "step_id": step_id,
-                "submitted_at": value
-            })
-    
-    # Get step execution history
-    step_executions = await StepExecution.find(
-        StepExecution.instance_id == instance_id
-    ).sort(StepExecution.started_at).to_list()
-    
-    # Build complete citizen data view
-    citizen_info = {
-        "instance_id": instance_id,
-        "workflow_id": instance.workflow_id,
-        "workflow_name": workflow.name,
-        "citizen_id": instance.user_id,
-        "status": instance.status,
-        "current_step": instance.current_step,
-        "created_at": instance.created_at,
-        "updated_at": instance.updated_at,
-        "completed_at": instance.completed_at,
-        "citizen_data": citizen_data,
-        "uploaded_files": uploaded_files,
-        "data_submissions": data_submissions,
-        "step_executions": [
-            {
-                "step_id": ex.step_id,
-                "status": ex.status,
-                "started_at": ex.started_at,
-                "completed_at": ex.completed_at,
-                "duration_seconds": ex.duration_seconds,
-                "inputs": ex.inputs,
-                "outputs": ex.outputs
-            }
-            for ex in step_executions
-        ],
-        "validation_history": [
-            {
-                "decision": instance.context.get("admin_validation_decision"),
-                "comments": instance.context.get("admin_validation_comments"),
-                "validated_by": instance.context.get("validated_by"),
-                "timestamp": instance.context.get("validation_timestamp")
-            }
-        ] if instance.context.get("admin_validation_decision") else []
-    }
-    
-    return citizen_info
-
-
-# Assignment management endpoints
-
 @router.post("/{instance_id}/assign-to-user")
 async def assign_instance_to_user(
     request: Dict[str, Any],
@@ -2126,6 +1769,211 @@ async def auto_assign_instance(
             status_code=400, 
             detail="Could not find suitable assignment for this instance"
         )
+@router.get("/{instance_id}/admin-detail")
+async def get_instance_admin_detail(
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+):
+    """Identidad del ciudadano, contexto curado y adjuntos, en una sola llamada.
+
+    Se sirve agregado en vez de componer los endpoints existentes porque el
+    encabezado de la vista tiene que pintar de una sola vez: repartirlo en
+    varias llamadas hace que la identidad aparezca despues del resto.
+    """
+    dag = await workflow_service.get_dag(db_instance.workflow_id)
+    return await build_admin_detail(db_instance, dag)
+
+
+@router.get("/{instance_id}/citizen-entities")
+async def get_instance_citizen_entities(
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    entity_type: Optional[str] = Query(None, description="Filtrar por tipo de entidad"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Cartera completa del ciudadano dueno del tramite.
+
+    El dueno se resuelve en el servidor a partir de la instancia, de modo que la
+    llamada no depende de conocer el user_id y hereda el control de acceso del
+    tramite.
+
+    El `data` va recortado: las entidades legadas embeben imagenes en base64 de
+    varios MB y aqui solo se pintan tarjetas.
+    """
+    owner_id = db_instance.user_id
+
+    entities = await EntityService.find_entities(
+        owner_user_id=owner_id,
+        entity_type=entity_type,
+        skip=skip,
+        limit=limit,
+    )
+
+    total = await LegalEntity.find(LegalEntity.owner_user_id == owner_id).count()
+
+    # Tipos de entidad para el icono/color de cada tarjeta. Se piden en bloque:
+    # el listado del portal hace una consulta por entidad dentro del bucle y eso
+    # es justo lo que no queremos repetir aqui.
+    type_ids = {e.entity_type for e in entities if e.entity_type}
+    type_map = {}
+    if type_ids:
+        for et in await EntityType.find({"type_id": {"$in": list(type_ids)}}).to_list():
+            type_map[et.type_id] = et
+
+    in_use = set(entity_ids_in_use(db_instance, {e.entity_id for e in entities}))
+
+    items = []
+    for e in entities:
+        et = type_map.get(e.entity_type)
+        items.append({
+            "entity_id": e.entity_id,
+            "entity_type": e.entity_type,
+            "entity_type_label": getattr(et, "name", None) or e.entity_type,
+            "entity_type_icon": getattr(et, "icon", None),
+            "entity_type_color": getattr(et, "color", None),
+            "name": e.name,
+            "status": e.status,
+            "verified": e.verified,
+            "data": slim_entity_data(e.data),
+            "created_at": e.created_at,
+            "updated_at": e.updated_at,
+            "relationships_count": len([r for r in e.relationships if r.is_active]),
+            "in_use_by_this_instance": e.entity_id in in_use,
+        })
+
+    return {"entities": items, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/{instance_id}/entities/{entity_id}")
+async def get_instance_citizen_entity(
+    entity_id: str,
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+):
+    """Detalle de una entidad de la cartera del ciudadano del tramite.
+
+    Se responde 404 --y no 403-- cuando la entidad es de otro ciudadano, para no
+    confirmar que existe.
+
+    Los valores pesados se sustituyen por un descriptor en vez de devolverse: la
+    interfaz muestra que el campo existe y pide su contenido aparte solo si el
+    revisor lo abre.
+    """
+    entity = await EntityService.get_entity(entity_id)
+    if not entity or entity.owner_user_id != db_instance.user_id:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    entity_type = await EntityService.get_entity_type(entity.entity_type)
+
+    return {
+        "entity_id": entity.entity_id,
+        "entity_type": entity.entity_type,
+        "entity_type_label": getattr(entity_type, "name", None) or entity.entity_type,
+        "entity_type_icon": getattr(entity_type, "icon", None),
+        "entity_type_color": getattr(entity_type, "color", None),
+        "name": entity.name,
+        "status": entity.status,
+        "verified": entity.verified,
+        "verification_date": entity.verification_date,
+        "data": describe_blobs(entity.data),
+        "created_at": entity.created_at,
+        "updated_at": entity.updated_at,
+        "relationships_count": len([r for r in entity.relationships if r.is_active]),
+    }
+
+
+@router.get("/{instance_id}/attachments/{attachment_id}/content")
+async def get_instance_attachment_content(
+    attachment_id: str,
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    download: bool = Query(False, description="Forzar descarga en vez de vista en linea"),
+):
+    """Sirve un adjunto de *esta* instancia.
+
+    La comprobacion de pertenencia es la misma idea que usa el proxy de archivos
+    de entidades, pero mas estricta: en vez de adivinar por el nombre del campo,
+    el identificador pedido tiene que salir del indice de adjuntos de la propia
+    instancia. Una s3_key valida de otro tramite no se sirve.
+    """
+    attachment = find_attachment(db_instance, attachment_id)
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    if not attachment.get("s3_key"):
+        # Adjunto legado embebido en el context; no hay objeto en S3 que servir.
+        raise HTTPException(
+            status_code=409,
+            detail="Este adjunto es un archivo legado embebido en el contexto y no tiene copia en S3",
+        )
+
+    import asyncio as _asyncio
+    import io as _io
+    from botocore.exceptions import ClientError
+    from fastapi.responses import StreamingResponse
+    from ...services import s3_storage
+
+    bucket = attachment.get("s3_bucket") or s3_storage.default_bucket()
+    client = s3_storage.get_s3_client()
+
+    try:
+        obj = await _asyncio.to_thread(
+            client.get_object, Bucket=bucket, Key=attachment["s3_key"]
+        )
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "NoSuchBucket", "404"):
+            raise HTTPException(status_code=404, detail="Attachment file not found in storage")
+        logger.error(f"S3 error sirviendo adjunto {attachment_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"S3 error: {code or 'unknown'}")
+
+    body = await _asyncio.to_thread(obj["Body"].read)
+    filename = attachment.get("filename") or "archivo"
+    content_type = attachment.get("content_type") or obj.get("ContentType") or "application/octet-stream"
+    disposition = "attachment" if download else "inline"
+
+    return StreamingResponse(
+        _io.BytesIO(body),
+        media_type=content_type,
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
+            "Content-Length": str(len(body)),
+            # Material de expediente: cacheable en el navegador del revisor,
+            # nunca en un cache compartido.
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
+@router.post("/{instance_id}/files/grant")
+async def grant_instance_file_access(
+    payload: Dict[str, Any],
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+):
+    """Permisos de descarga de vida corta para archivos de esta instancia.
+
+    Existe para los formularios del revisor que ya traen la `s3_key` en su
+    configuracion y no el identificador de adjunto. Solo se firman llaves que
+    aparecen en el contexto de *esta* instancia: pedir una llave ajena no emite
+    token, y no se distingue de pedir una inexistente.
+    """
+    from ...core.file_tokens import issue_token
+    from ...services.instance_attachments import instance_s3_keys
+
+    solicitadas = payload.get("s3_keys") or []
+    if not isinstance(solicitadas, list) or len(solicitadas) > 200:
+        raise HTTPException(status_code=400, detail="s3_keys invalido")
+
+    permitidas = instance_s3_keys(db_instance)
+
+    grants = []
+    for key in solicitadas:
+        if not isinstance(key, str) or key not in permitidas:
+            logger.warning(
+                f"Grant denegado: {key} no pertenece a la instancia {db_instance.instance_id}"
+            )
+            continue
+        token, expires_at = issue_token(key, db_instance.instance_id)
+        grants.append({"s3_key": key, "token": token, "expires_at": expires_at})
+
+    return {"grants": grants}
 
 
 @router.post("/{instance_id}/validate-data")
@@ -2197,3 +2045,59 @@ async def validate_instance_data(
             status_code=500, 
             detail=f"Failed to save validation results: {str(e)}"
         )
+
+
+@router.get("/{instance_id}/entities/{entity_id}/document")
+async def get_instance_entity_document(
+    entity_id: str,
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    format: str = Query("html", pattern="^(html|pdf)$", description="html para el visor, pdf para descargar"),
+):
+    """Documento renderizado de una entidad de la cartera del ciudadano.
+
+    Es la misma representacion que ve el ciudadano --acuse, credencial,
+    certificado-- generada con el visualizador que la propia entidad declara.
+    El revisor necesita verla, no solo los campos sueltos.
+
+    Existen endpoints equivalentes bajo /signatures, pero con autenticacion
+    opcional: bastaria conocer un entity_id para obtener el documento con los
+    datos personales de cualquier ciudadano. Este cuelga de la instancia y
+    reutiliza el mismo selector de visualizador, para que la vista, la impresion
+    y la descarga sigan compartiendo plantilla.
+    """
+    import io as _io
+    from fastapi.responses import Response, StreamingResponse
+    from ...core.config import settings as _settings
+    from ...services.visualizers.visualizer_factory import VisualizerFactory
+    from .signatures import _select_entity_visualizer
+
+    entity = await EntityService.get_entity(entity_id)
+    if not entity or entity.owner_user_id != db_instance.user_id:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    config = {
+        **(entity.entity_display_config or {}),
+        "base_url": _settings.FRONTEND_BASE_URL,
+    }
+    visualizer = VisualizerFactory.get_visualizer(
+        visualizer_type=_select_entity_visualizer(entity),
+        config=config,
+    )
+    if not visualizer:
+        raise HTTPException(status_code=404, detail="Esta entidad no tiene visualizador configurado")
+
+    if format == "pdf":
+        pdf = await visualizer.generate_pdf(entity)
+        if not pdf:
+            raise HTTPException(status_code=500, detail="No se pudo generar el PDF")
+        info = await visualizer.get_download_info(entity)
+        return StreamingResponse(
+            _io.BytesIO(pdf),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=\"{info['filename']}\""},
+        )
+
+    html = await visualizer.generate_html(entity)
+    if not html:
+        raise HTTPException(status_code=404, detail="Esta entidad no tiene representacion visual")
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-cache"})

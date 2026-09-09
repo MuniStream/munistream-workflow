@@ -120,6 +120,17 @@ class Settings(BaseSettings):
     GOOGLE_WALLET_ISSUER_EMAIL: Optional[str] = None
     GOOGLE_SERVICE_ACCOUNT_KEY_PATH: Optional[str] = None
 
+    # Descarga de archivos de S3 (`/files/download`). Historicamente esa ruta
+    # no exigia ninguna credencial: quien conociera la s3_key bajaba cualquier
+    # objeto del bucket. Ahora acepta un token firmado emitido por
+    # `POST /files/grant`, que si autoriza contra el recurso dueno del archivo.
+    # El flag existe para poder desplegar el backend antes que los frontends:
+    # mientras este en False la ruta sigue aceptando peticiones sin token, para
+    # no romper enlaces en vuelo. Se pone en True en cuanto ambos frontends
+    # pidan permiso, que es cuando la ruta queda de verdad cerrada.
+    FILES_DOWNLOAD_REQUIRE_TOKEN: bool = False
+    FILES_DOWNLOAD_TOKEN_TTL_SECONDS: int = 300
+
     class Config:
         env_file = ".env"
         case_sensitive = True
