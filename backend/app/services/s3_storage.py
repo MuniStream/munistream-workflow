@@ -131,6 +131,14 @@ def copy_object(
     }
 
 
+def download_bytes(bucket: str, key: str) -> bytes:
+    """Baja un objeto completo a memoria. Lo usan los operadores de captura de
+    imagen para validar un archivo que ya vive en S3 sin traerse el base64 al
+    context."""
+    obj = get_s3_client().get_object(Bucket=bucket, Key=key)
+    return obj["Body"].read()
+
+
 def delete_object(bucket: str, key: str) -> None:
     """Borra un objeto. Errores silenciosos — el caller decide qué hacer si
     no se pudo limpiar (típicamente solo loggear)."""

@@ -18,6 +18,7 @@ import base64
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 import io
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 class ImageCaptureOperator(BaseOperator):
     """Base class for all image capture operators with shared functionality"""
+
+    # Suficiente para frente y reverso de un documento, con holgura.
+    S3_CACHE_SIZE = 4
 
     def __init__(
         self,
@@ -55,28 +59,92 @@ class ImageCaptureOperator(BaseOperator):
         # (timestamp, browser fingerprint, getUserMedia) y se conserva la
         # evaluación de calidad de imagen.
         self.allow_file_upload = allow_file_upload
+        # Cache acotado de bytes bajados de S3: dentro de una misma ejecución la
+        # imagen se resuelve varias veces (validación, detección de rostro,
+        # provenance) y no tiene sentido bajarla cada vez. Se limita a unas
+        # pocas entradas porque el operador es un singleton del DAG y las keys
+        # son distintas en cada instancia.
+        self._s3_image_cache: "OrderedDict[tuple[str, str], bytes]" = OrderedDict()
+
+    @staticmethod
+    def is_s3_reference(value: Any) -> bool:
+        """¿Es la referencia que `submit-data` guarda en el context?
+
+        Shape: ``{filename, content_type, size, s3_key, s3_bucket}`` — el
+        archivo ya está en S3 bajo ``tmp/`` y en Mongo solo vive el puntero.
+        """
+        return (
+            isinstance(value, dict)
+            and bool(value.get('s3_key'))
+            and bool(value.get('s3_bucket'))
+        )
+
+    def download_s3_reference(self, reference: Dict[str, Any]) -> Optional[bytes]:
+        """Resuelve una referencia S3 a bytes, solo para validar. La referencia
+        se conserva en el context: el S3UploadOperator la necesita íntegra para
+        copiar de ``tmp/`` al destino final."""
+        cache_key = (reference['s3_bucket'], reference['s3_key'])
+        cached = self._s3_image_cache.get(cache_key)
+        if cached is not None:
+            self._s3_image_cache.move_to_end(cache_key)
+            return cached
+
+        try:
+            from app.services import s3_storage
+            content = s3_storage.download_bytes(*cache_key)
+        except Exception as e:
+            logger.error(f"No se pudo bajar la imagen de S3 {cache_key[0]}/{cache_key[1]}: {e}")
+            return None
+
+        self._s3_image_cache[cache_key] = content
+        while len(self._s3_image_cache) > self.S3_CACHE_SIZE:
+            self._s3_image_cache.popitem(last=False)
+        return content
+
+    def image_size_bytes(self, image_data: Any) -> int:
+        """Tamaño real de la imagen, sea referencia S3, base64 o bytes."""
+        if self.is_s3_reference(image_data):
+            size = image_data.get('size')
+            if isinstance(size, int):
+                return size
+            content = self.download_s3_reference(image_data)
+            return len(content) if content else 0
+        content = self.convert_to_bytes(image_data)
+        return len(content) if content else 0
 
     def extract_image_from_formdata(self, image_data_raw: Any) -> tuple[Union[str, bytes], Dict[str, Any]]:
         """
         Extract image data from FormData format.
 
-        Handles the format sent by frontend: {'base64': '...', 'filename': '...', 'content_type': '...'}
+        Acepta dos shapes:
+        - base64 en línea: {'base64': '...', 'filename': '...', 'content_type': '...'}
+        - referencia S3 de `submit-data`: {'s3_key', 's3_bucket', 'filename',
+          'content_type', 'size'} — se devuelve tal cual y los bytes se
+          resuelven bajo demanda en `convert_to_bytes`.
+
         Returns: (image_data, file_metadata)
         """
-        if isinstance(image_data_raw, dict) and 'base64' in image_data_raw:
-            image_data = image_data_raw['base64']
+        if isinstance(image_data_raw, dict):
             file_metadata = {
                 'filename': image_data_raw.get('filename'),
                 'content_type': image_data_raw.get('content_type'),
                 'file_size': image_data_raw.get('size')
             }
-            return image_data, file_metadata
-        else:
-            # Direct string/bytes data
-            return image_data_raw, {}
+            if 'base64' in image_data_raw:
+                return image_data_raw['base64'], file_metadata
 
-    def convert_to_bytes(self, image_data: Union[str, bytes]) -> Optional[bytes]:
-        """Convert base64 string or bytes to bytes"""
+            if self.is_s3_reference(image_data_raw):
+                file_metadata['s3_key'] = image_data_raw['s3_key']
+                file_metadata['s3_bucket'] = image_data_raw['s3_bucket']
+                return image_data_raw, file_metadata
+
+        # Direct string/bytes data
+        return image_data_raw, {}
+
+    def convert_to_bytes(self, image_data: Union[str, bytes, Dict[str, Any]]) -> Optional[bytes]:
+        """Convert base64 string, bytes o referencia S3 a bytes"""
+        if self.is_s3_reference(image_data):
+            return self.download_s3_reference(image_data)
         if isinstance(image_data, str):
             try:
                 return base64.b64decode(image_data)
@@ -303,11 +371,10 @@ class ImageCaptureOperator(BaseOperator):
 
         # Handle multiple images for ID capture
         if isinstance(image_data, list):
-            total_size = sum(len(base64.b64decode(img) if isinstance(img, str) else img) for img in image_data)
+            total_size = sum(self.image_size_bytes(img) for img in image_data)
             image_count = len(image_data)
         else:
-            image_bytes = self.convert_to_bytes(image_data)
-            total_size = len(image_bytes) if image_bytes else 0
+            total_size = self.image_size_bytes(image_data)
             image_count = 1
 
         provenance = {

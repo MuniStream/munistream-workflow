@@ -307,13 +307,16 @@ class IDCaptureOperator(ImageCaptureOperator):
             front_filename = self.generate_filename(context, "front")
             back_filename = self.generate_filename(context, "back")
 
+            front_content_type = capture_metadata.get('front_content_type') or "image/jpeg"
+            back_content_type = capture_metadata.get('back_content_type') or "image/jpeg"
+
             output_data = {
                 self.output_key: {
                     "front_image": front_data,
                     "back_image": back_data,
                     "front_filename": front_filename,
                     "back_filename": back_filename,
-                    "content_type": "image/jpeg",
+                    "content_type": front_content_type,
                     "detected_elements": validation_result.get('detected_elements', {}),
                     "decoded_codes": validation_result.get('decoded_codes', []),
                     "provenance": provenance,
@@ -322,18 +325,12 @@ class IDCaptureOperator(ImageCaptureOperator):
                     "validated_at": datetime.utcnow().isoformat()
                 },
                 # Add direct keys for S3UploadOperator compatibility (with _ prefix to exclude from parent context)
-                "_id_front_image": {
-                    "content": front_data,
-                    "filename": front_filename,
-                    "content_type": "image/jpeg",
-                    "size": len(base64.b64decode(front_data)) if isinstance(front_data, str) else len(front_data),
-                },
-                "_id_back_image": {
-                    "content": back_data,
-                    "filename": back_filename,
-                    "content_type": "image/jpeg",
-                    "size": len(base64.b64decode(back_data)) if isinstance(back_data, str) else len(back_data),
-                },
+                "_id_front_image": self._build_upload_payload(
+                    front_data, front_filename, front_content_type
+                ),
+                "_id_back_image": self._build_upload_payload(
+                    back_data, back_filename, back_content_type
+                ),
                 f"{self.task_id}_validated": True,
                 f"{self.task_id}_captured_at": provenance['capture_timestamp'],
                 f"{self.task_id}_provenance": provenance,
@@ -543,14 +540,29 @@ class IDCaptureOperator(ImageCaptureOperator):
                 'reason': 'validation_exception'
             }
 
-    def _convert_to_bytes(self, image_data: Union[str, bytes]) -> Optional[bytes]:
-        """Convert base64 string or bytes to bytes"""
-        if isinstance(image_data, str):
-            try:
-                return base64.b64decode(image_data)
-            except Exception:
-                return None
-        return image_data
+    def _build_upload_payload(
+        self,
+        image_data: Union[str, bytes, Dict[str, Any]],
+        filename: str,
+        content_type: str,
+    ) -> Dict[str, Any]:
+        """Payload para el S3UploadOperator. Cuando la imagen ya vive en S3
+        (subida por `submit-data`) se pasa la referencia para que haga copy de
+        `tmp/` al destino final, en lugar de devolver los bytes al context."""
+        size = self.image_size_bytes(image_data)
+        if self.is_s3_reference(image_data):
+            return {**image_data, "filename": filename, "content_type": content_type, "size": size}
+        return {
+            "content": image_data,
+            "filename": filename,
+            "content_type": content_type,
+            "size": size,
+        }
+
+    def _convert_to_bytes(self, image_data: Union[str, bytes, Dict[str, Any]]) -> Optional[bytes]:
+        """Alias histórico de `convert_to_bytes` de la clase base, que además
+        resuelve las referencias S3 de `submit-data`."""
+        return self.convert_to_bytes(image_data)
 
     def _validate_timestamp(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Validate capture timestamp"""
