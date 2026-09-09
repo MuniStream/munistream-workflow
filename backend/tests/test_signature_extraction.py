@@ -114,3 +114,33 @@ def test_disponible_como_filtro_en_las_plantillas():
     salida = plantilla.render(data=_firma("sign_document"))
     assert "PAOLA VILLARREAL RODRIGUEZ" in salida
     assert CADENA[:32] in salida
+
+
+def test_prefiere_la_clave_explicita():
+    """Cuando el operador ya dejó la lista, se usa tal cual: sin barrido ni
+    heurística. El barrido es solo compatibilidad con lo ya emitido."""
+    data = {
+        "firmas": [{"task_id": "firma_validacion", "signer": "QUIEN FIRMÓ",
+                    "signature_chain": CADENA, "algorithm": "RSA-SHA256"}],
+        # Claves sueltas de otra tarea: NO deben mezclarse ni duplicar.
+        **_firma("sign_document"),
+    }
+    firmas = extract_signatures(data)
+    assert [f["signer"] for f in firmas] == ["QUIEN FIRMÓ"]
+
+
+def test_la_clave_explicita_tambien_formatea_la_cadena():
+    data = {"firmas": [{"task_id": "t", "signer": "X", "signature_chain": CADENA}]}
+    grupos = extract_signatures(data)[0]["signature_chain_display"].split(" ")
+    assert "".join(grupos) == CADENA
+
+
+def test_cae_al_barrido_si_no_hay_clave_explicita():
+    """Los documentos emitidos antes de `signatures_key` conservan su firma."""
+    firmas = extract_signatures(_firma("sign_document"))
+    assert len(firmas) == 1 and firmas[0]["task_id"] == "sign_document"
+
+
+def test_la_clave_es_configurable_en_el_filtro():
+    data = {"signatures": [{"task_id": "t", "signer": "Y", "signature_chain": CADENA}]}
+    assert extract_signatures(data, key="signatures")[0]["signer"] == "Y"

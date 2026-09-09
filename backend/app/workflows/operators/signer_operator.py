@@ -54,6 +54,7 @@ class SignerOperator(BaseOperator):
         hash_algorithm: str = "SHA256",
         required_cert_type: Optional[str] = None,  # "personal" or "organizational"
         timeout_minutes: int = None,
+        signatures_key: str = "firmas",
         **kwargs
     ):
         """
@@ -117,6 +118,12 @@ class SignerOperator(BaseOperator):
         self.hash_algorithm = hash_algorithm
         self.required_cert_type = required_cert_type
         self.timeout_minutes = timeout_minutes
+        # Clave del contexto donde se acumulan las firmas del trámite. Es el
+        # lugar convenido que los trámites mapean a la entidad y que las
+        # plantillas leen; sin ella, los consumidores tenían que adivinar las
+        # claves sueltas `<task_id>_<atributo>` y quedaban acoplados al NOMBRE
+        # de la tarea: renombrarla los rompía en silencio.
+        self.signatures_key = signatures_key
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
@@ -285,6 +292,13 @@ class SignerOperator(BaseOperator):
                         "signed_at": signature_data.get("timestamp"),
                         "algorithm": signature_data.get("algorithm"),
                     }
+
+                # Lista acumulada de firmas del trámite, en la clave
+                # convenida: es lo que el trámite mapea a la entidad y lo que
+                # las plantillas imprimen.
+                output_data[self.signatures_key] = self.collect_signatures(
+                    context, signature_data
+                )
 
                 # Objeto de firma completo, mapeable de una pieza a la
                 # entidad (`"<task>_signature": "signature"`).
@@ -471,6 +485,28 @@ class SignerOperator(BaseOperator):
         except Exception:
             return None
         return None
+
+    def collect_signatures(
+        self, context: Dict[str, Any], signature_data: Any
+    ) -> List[Dict[str, Any]]:
+        """Devuelve la lista de firmas del trámite con la de esta tarea incluida.
+
+        Acumula sobre lo que ya haya en `context[self.signatures_key]`, para que
+        un flujo con varios firmantes las apile en vez de pisarse. Si esta tarea
+        ya firmó —el operador se re-ejecuta al reanudar— reemplaza su entrada en
+        lugar de duplicarla.
+        """
+        previas = context.get(self.signatures_key) or []
+        if not isinstance(previas, list):
+            previas = []
+
+        firma = {"task_id": self.task_id, **self.build_signature_object(context, signature_data)}
+        firma["signature_chain"] = firma.get("signature")
+        firma["signed_at"] = firma.get("timestamp")
+
+        acumuladas = [f for f in previas if not (isinstance(f, dict) and f.get("task_id") == self.task_id)]
+        acumuladas.append(firma)
+        return acumuladas
 
     def build_signature_object(
         self, context: Dict[str, Any], signature_data: Any
