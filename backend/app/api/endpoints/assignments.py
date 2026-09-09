@@ -225,6 +225,9 @@ async def list_assignments(
         # con la lista vacia) y `task_states` no se persiste: el avance real
         # vive en la coleccion de ejecuciones, que es de donde lo saca tambien
         # el endpoint de seguimiento.
+        from ...services.instance_listing import _asignados
+        nombres_asignados = await _asignados(instances)
+
         ids_pagina = [i.instance_id for i in instances]
         completados_por_instancia = {}
         if ids_pagina:
@@ -274,6 +277,16 @@ async def list_assignments(
                 created_at=inst.created_at,
                 updated_at=inst.updated_at,
                 citizen_email=inst.context.get("parent_customer_email"),
+                assigned_to_name=(
+                    nombres_asignados.get(str(inst.assigned_user_id or ""))
+                    or nombres_asignados.get(str(inst.assigned_team_id or ""))
+                    # Los equipos viven en Keycloak y su identificador ya es
+                    # legible; mejor presentarlo que dejar el hueco vacio.
+                    or (
+                        str(inst.assigned_team_id).replace("_", " ").capitalize()
+                        if inst.assigned_team_id else None
+                    )
+                ),
                 current_step=inst.current_step,
                 completion_percentage=completion_percentage
             ))
@@ -712,6 +725,29 @@ async def list_available_teams(
                 current_load=current_load,
                 available=team.is_active and current_load < (len(team.members) * 5)
             ))
+
+        # Los equipos de trabajo viven en Keycloak, no en Mongo: la coleccion
+        # TeamModel esta vacia en los despliegues reales, y por eso este
+        # endpoint devolvia una lista vacia y no se podia asignar nada. Cuando
+        # no hay documentos, se ofrecen los equipos que las propias instancias
+        # ya usan, que es la unica fuente fiable que hay.
+        if not team_info:
+            en_uso = await WorkflowInstance.get_motor_collection().distinct("assigned_team_id")
+            for team_id in sorted(t for t in en_uso if t):
+                carga = await WorkflowInstance.find({
+                    "assigned_team_id": team_id,
+                    "assignment_status": {"$in": [
+                        AssignmentStatus.PENDING_REVIEW,
+                        AssignmentStatus.UNDER_REVIEW,
+                    ]},
+                }).count()
+                team_info.append(TeamInfo(
+                    team_id=team_id,
+                    team_name=team_id.replace("_", " ").capitalize(),
+                    member_count=0,
+                    current_load=carga,
+                    available=True,
+                ))
 
         return team_info
 

@@ -116,6 +116,17 @@ class InstanceResponse(BaseModel):
     assigned_at: Optional[datetime] = None
     assigned_by: Optional[str] = None
     assignment_notes: Optional[str] = None
+
+    # Identificación para los listados. Sin esto una lista de trámites sólo
+    # puede mostrar identificadores, y dos validaciones administrativas de
+    # trámites distintos son indistinguibles entre sí.
+    workflow_name: Optional[str] = None
+    parent_workflow_name: Optional[str] = None
+    parent_instance_id: Optional[str] = None
+    citizen_name: Optional[str] = None
+    citizen_email: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    completion_percentage: float = 0
     
     class Config:
         use_enum_values = True
