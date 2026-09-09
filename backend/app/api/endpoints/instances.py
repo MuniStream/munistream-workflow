@@ -629,7 +629,9 @@ async def get_active_instances(
 
 
 @router.get("/analytics/bottlenecks", response_model=BottleneckAnalysisResponse)
-async def get_bottleneck_analysis():
+async def get_bottleneck_analysis(
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
+):
     """Analyze workflow bottlenecks across all instances"""
     # Get all step executions from last 30 days
     from datetime import timedelta
@@ -791,12 +793,12 @@ async def get_citizen_validations(
 
 
 @router.put("/{instance_id}", response_model=InstanceResponse)
-async def update_instance(instance_id: str, update_data: InstanceUpdateRequest):
+async def update_instance(
+    update_data: InstanceUpdateRequest,
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user),
+):
     """Update instance status or context"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
     if update_data.status is not None:
         instance.status = update_data.status
     
@@ -809,33 +811,12 @@ async def update_instance(instance_id: str, update_data: InstanceUpdateRequest):
     return convert_instance_to_response(instance)
 
 
-@router.post("/{instance_id}/cancel")
-async def cancel_instance(instance_id: str):
-    """Cancel a running workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
-    if instance.status not in ["running", "paused"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot cancel instance in {instance.status} status"
-        )
-    
-    instance.status = "cancelled"
-    instance.updated_at = datetime.utcnow()
-    await instance.save()
-    
-    return {"message": "Instance cancelled successfully"}
-
-
 @router.post("/{instance_id}/pause")
-async def pause_instance(instance_id: str):
+async def pause_instance(
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user),
+):
     """Pause a running workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
     if instance.status != "running":
         raise HTTPException(
             status_code=400,
@@ -850,12 +831,13 @@ async def pause_instance(instance_id: str):
 
 
 @router.post("/{instance_id}/resume", response_model=InstanceResponse)
-async def resume_instance(instance_id: str, background_tasks: BackgroundTasks):
+async def resume_instance(
+    background_tasks: BackgroundTasks,
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user),
+):
     """Resume a paused workflow instance"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
+    instance_id = instance.instance_id
     if instance.status != "paused":
         raise HTTPException(
             status_code=400,
@@ -873,12 +855,19 @@ async def resume_instance(instance_id: str, background_tasks: BackgroundTasks):
 
 
 @router.post("/{instance_id}/approve")
-async def approve_step(approval: ApprovalRequest, background_tasks: BackgroundTasks):
+async def approve_step(
+    approval: ApprovalRequest,
+    background_tasks: BackgroundTasks,
+    instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(get_current_user),
+):
     """Submit approval decision for a workflow step"""
-    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == approval.instance_id)
-    if not instance:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
+    # La instancia es la de la ruta (la que autorizo `require_instance_access`),
+    # no la que venga en el cuerpo: si no, el permiso se comprueba sobre una y
+    # se actua sobre otra. Y el aprobador sale del token, nunca del JSON.
+    approval.instance_id = instance.instance_id
+    approval.approver_id = str(current_user.get("sub"))
+
     # Create approval record
     approval_record = ApprovalModel(
         approval_id=str(uuid.uuid4()),
