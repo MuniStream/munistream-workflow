@@ -125,10 +125,9 @@ class Settings(BaseSettings):
     # objeto del bucket. Ahora acepta un token firmado emitido por
     # `POST /files/grant`, que si autoriza contra el recurso dueno del archivo.
     # El flag existe para poder desplegar el backend antes que los frontends:
-    # mientras este en False la ruta sigue aceptando peticiones sin token, para
-    # no romper enlaces en vuelo. Se pone en True en cuanto ambos frontends
-    # pidan permiso, que es cuando la ruta queda de verdad cerrada.
-    FILES_DOWNLOAD_REQUIRE_TOKEN: bool = False
+    # ponerlo en False hace que la ruta vuelva a aceptar peticiones sin token.
+    # Ambos frontends ya piden permiso, asi que el valor por defecto es exigirlo.
+    FILES_DOWNLOAD_REQUIRE_TOKEN: bool = True
     FILES_DOWNLOAD_TOKEN_TTL_SECONDS: int = 300
 
     class Config:
