@@ -286,6 +286,12 @@ class SignerOperator(BaseOperator):
                         "algorithm": signature_data.get("algorithm"),
                     }
 
+                # Objeto de firma completo, mapeable de una pieza a la
+                # entidad (`"<task>_signature": "signature"`).
+                output_data[f"{self.task_id}_signature"] = self.build_signature_object(
+                    context, signature_data
+                )
+
                 if signature_str:
                     output_data[f"{self.task_id}_signature_chain"] = signature_str
                 if cert_subject:
@@ -465,6 +471,40 @@ class SignerOperator(BaseOperator):
         except Exception:
             return None
         return None
+
+    def build_signature_object(
+        self, context: Dict[str, Any], signature_data: Any
+    ) -> Dict[str, Any]:
+        """Arma el objeto de firma que consumen los visualizadores.
+
+        `SignedPDFVisualizer` lee `entity.data["signature"]` y exige un dict con
+        `signature`, `certificate` y `algorithm`: si falta alguno marca la
+        entidad como inválida y el PDF no se genera, y si recibe la cadena
+        base64 suelta truena en `validate_entity`. El operador publicaba solo
+        piezas sueltas (`_signer`, `_algorithm`, `_signature_chain`) que ningún
+        trámite podía recomponer, porque `data_mapping` mapea claves planas y no
+        construye dicts. Por eso los documentos firmados se imprimían como
+        "Documento oficial".
+
+        No inventa datos: lo que no está en el contexto queda en None.
+        """
+        def _de(*claves):
+            for clave in claves:
+                if isinstance(signature_data, dict) and signature_data.get(clave):
+                    return signature_data[clave]
+                if context.get(clave):
+                    return context[clave]
+            return None
+
+        cert_info = _de("certificate_info") or {}
+        return {
+            "signature": self._extract_signature_chain(context, signature_data),
+            "certificate": _de("digital_signature_certificate", "certificate"),
+            "algorithm": _de("algorithm") or "RSA-SHA256",
+            "certificate_info": cert_info if isinstance(cert_info, dict) else {},
+            "signer": _de("signer"),
+            "timestamp": _de("timestamp", "signed_at"),
+        }
 
     def _extract_signature_chain(self, context: Dict[str, Any], signature_data: Any) -> Optional[str]:
         """Retorna la 'cadena' de la firma (string base64) para evidencia visual."""
