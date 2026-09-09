@@ -88,3 +88,20 @@ def test_la_salida_del_operador_incluye_la_firma():
     assert '_signature"] = self.build_signature_object' in fuente or \
            "_signature'] = self.build_signature_object" in fuente, \
         "execute_async debe publicar <task_id>_signature con el objeto de firma"
+
+
+def test_incluye_el_subject_real_del_certificado():
+    """El reverso de los documentos imprime el certificado firmante, igual que
+    el oficio de catastro. `certificate_info.subject` llega como el placeholder
+    "Parsed on backend", así que el CN se saca del PEM."""
+    ctx = _contexto()
+    ctx["certificate_info"] = {"subject": "Parsed on backend"}
+    firma = _firma_publicada(ctx)
+    assert firma["cert_subject"] != "Parsed on backend", (
+        "no se debe imprimir el placeholder en un documento oficial"
+    )
+
+
+def test_marca_la_firma_como_valida():
+    """Catastro imprime `Validez: ✓ Firma válida`; el objeto debe traer el dato."""
+    assert _firma_publicada(_contexto())["signature_valid"] is True

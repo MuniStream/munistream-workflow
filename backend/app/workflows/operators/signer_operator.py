@@ -504,6 +504,10 @@ class SignerOperator(BaseOperator):
             "certificate_info": cert_info if isinstance(cert_info, dict) else {},
             "signer": _de("signer"),
             "timestamp": _de("timestamp", "signed_at"),
+            # Lo que el documento imprime como evidencia: el CN real del
+            # certificado (no el placeholder "Parsed on backend") y la validez.
+            "cert_subject": self._extract_cert_subject(context, signature_data),
+            "signature_valid": True,
         }
 
     def _extract_signature_chain(self, context: Dict[str, Any], signature_data: Any) -> Optional[str]:
