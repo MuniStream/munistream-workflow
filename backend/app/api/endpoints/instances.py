@@ -2045,3 +2045,59 @@ async def validate_instance_data(
             status_code=500, 
             detail=f"Failed to save validation results: {str(e)}"
         )
+
+
+@router.get("/{instance_id}/entities/{entity_id}/document")
+async def get_instance_entity_document(
+    entity_id: str,
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    format: str = Query("html", pattern="^(html|pdf)$", description="html para el visor, pdf para descargar"),
+):
+    """Documento renderizado de una entidad de la cartera del ciudadano.
+
+    Es la misma representacion que ve el ciudadano --acuse, credencial,
+    certificado-- generada con el visualizador que la propia entidad declara.
+    El revisor necesita verla, no solo los campos sueltos.
+
+    Existen endpoints equivalentes bajo /signatures, pero con autenticacion
+    opcional: bastaria conocer un entity_id para obtener el documento con los
+    datos personales de cualquier ciudadano. Este cuelga de la instancia y
+    reutiliza el mismo selector de visualizador, para que la vista, la impresion
+    y la descarga sigan compartiendo plantilla.
+    """
+    import io as _io
+    from fastapi.responses import Response, StreamingResponse
+    from ...core.config import settings as _settings
+    from ...services.visualizers.visualizer_factory import VisualizerFactory
+    from .signatures import _select_entity_visualizer
+
+    entity = await EntityService.get_entity(entity_id)
+    if not entity or entity.owner_user_id != db_instance.user_id:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    config = {
+        **(entity.entity_display_config or {}),
+        "base_url": _settings.FRONTEND_BASE_URL,
+    }
+    visualizer = VisualizerFactory.get_visualizer(
+        visualizer_type=_select_entity_visualizer(entity),
+        config=config,
+    )
+    if not visualizer:
+        raise HTTPException(status_code=404, detail="Esta entidad no tiene visualizador configurado")
+
+    if format == "pdf":
+        pdf = await visualizer.generate_pdf(entity)
+        if not pdf:
+            raise HTTPException(status_code=500, detail="No se pudo generar el PDF")
+        info = await visualizer.get_download_info(entity)
+        return StreamingResponse(
+            _io.BytesIO(pdf),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=\"{info['filename']}\""},
+        )
+
+    html = await visualizer.generate_html(entity)
+    if not html:
+        raise HTTPException(status_code=404, detail="Esta entidad no tiene representacion visual")
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-cache"})
