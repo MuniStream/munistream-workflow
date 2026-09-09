@@ -62,6 +62,11 @@ class TemplateEngine:
         self.env.filters['format_value'] = self._format_value
         self.env.filters['format_date'] = self._format_date
         self.env.filters['format_date_es'] = self._format_date_es
+        # Firmas del documento: cualquier plantilla puede pedirlas sin copiarse
+        # el extractor. `{% for f in entity.data|firmas %}` / `|cadena_firma`.
+        from ..signature_extraction import extract_signatures, format_signature_chain
+        self.env.filters['firmas'] = extract_signatures
+        self.env.filters['cadena_firma'] = format_signature_chain
 
     def _format_field_name(self, field_name: str) -> str:
         """Format field name for display"""
