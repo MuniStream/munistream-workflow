@@ -296,14 +296,23 @@ class SignerOperator(BaseOperator):
                 # Lista acumulada de firmas del trámite, en la clave
                 # convenida: es lo que el trámite mapea a la entidad y lo que
                 # las plantillas imprimen.
+                firmado_en = output_data[f"{self.task_id}_signed_at"]
                 output_data[self.signatures_key] = self.collect_signatures(
-                    context, signature_data
+                    context,
+                    signature_data,
+                    signer_name=signer_name,
+                    signed_at=firmado_en,
+                    cert_subject=cert_subject,
                 )
 
                 # Objeto de firma completo, mapeable de una pieza a la
                 # entidad (`"<task>_signature": "signature"`).
                 output_data[f"{self.task_id}_signature"] = self.build_signature_object(
-                    context, signature_data
+                    context,
+                    signature_data,
+                    signer_name=signer_name,
+                    signed_at=firmado_en,
+                    cert_subject=cert_subject,
                 )
 
                 if signature_str:
@@ -487,7 +496,13 @@ class SignerOperator(BaseOperator):
         return None
 
     def collect_signatures(
-        self, context: Dict[str, Any], signature_data: Any
+        self,
+        context: Dict[str, Any],
+        signature_data: Any,
+        *,
+        signer_name: Optional[str] = None,
+        signed_at: Optional[str] = None,
+        cert_subject: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Devuelve la lista de firmas del trámite con la de esta tarea incluida.
 
@@ -500,7 +515,16 @@ class SignerOperator(BaseOperator):
         if not isinstance(previas, list):
             previas = []
 
-        firma = {"task_id": self.task_id, **self.build_signature_object(context, signature_data)}
+        firma = {
+            "task_id": self.task_id,
+            **self.build_signature_object(
+                context,
+                signature_data,
+                signer_name=signer_name,
+                signed_at=signed_at,
+                cert_subject=cert_subject,
+            ),
+        }
         firma["signature_chain"] = firma.get("signature")
         firma["signed_at"] = firma.get("timestamp")
 
@@ -509,7 +533,13 @@ class SignerOperator(BaseOperator):
         return acumuladas
 
     def build_signature_object(
-        self, context: Dict[str, Any], signature_data: Any
+        self,
+        context: Dict[str, Any],
+        signature_data: Any,
+        *,
+        signer_name: Optional[str] = None,
+        signed_at: Optional[str] = None,
+        cert_subject: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Arma el objeto de firma que consumen los visualizadores.
 
@@ -538,11 +568,17 @@ class SignerOperator(BaseOperator):
             "certificate": _de("digital_signature_certificate", "certificate"),
             "algorithm": _de("algorithm") or "RSA-SHA256",
             "certificate_info": cert_info if isinstance(cert_info, dict) else {},
-            "signer": _de("signer"),
-            "timestamp": _de("timestamp", "signed_at"),
+            # Lo que ya resolvio `execute` manda sobre lo que se pueda rebuscar:
+            # el nombre sale de tres fuentes (el declarado, el funcionario
+            # autenticado, el CN del certificado) y ninguna de ellas esta en el
+            # context bajo la clave "signer". Sin pasarlo, la firma que se guarda
+            # en la entidad iba con el firmante en nulo y el oficio se imprimia
+            # a nombre de "Servidor publico autorizado".
+            "signer": signer_name or _de("signer") or context.get(f"{self.task_id}_signer"),
+            "timestamp": signed_at or _de("timestamp", "signed_at") or context.get(f"{self.task_id}_signed_at"),
             # Lo que el documento imprime como evidencia: el CN real del
             # certificado (no el placeholder "Parsed on backend") y la validez.
-            "cert_subject": self._extract_cert_subject(context, signature_data),
+            "cert_subject": cert_subject or self._extract_cert_subject(context, signature_data),
             "signature_valid": True,
         }
 
@@ -568,7 +604,14 @@ class SignerOperator(BaseOperator):
             subj = cert_info.get("subject")
             if subj and subj != "Parsed on backend":
                 return subj
-        pem = context.get("digital_signature_certificate")
+        # El certificado llega en la entrada del paso, no en la raiz del context:
+        # es un campo del formulario de firma. Mirando solo la raiz, el asunto
+        # salia siempre vacio y el oficio acababa firmado por "Servidor publico
+        # autorizado".
+        task_input = context.get(f"{self.task_id}_input") or {}
+        pem = context.get("digital_signature_certificate") or (
+            task_input.get("digital_signature_certificate") if isinstance(task_input, dict) else None
+        )
         if pem:
             return self._extract_cn_from_pem(pem)
         return None
