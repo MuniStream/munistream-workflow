@@ -25,7 +25,6 @@ from ...schemas.assignment import (
 )
 from ...core.logging_config import get_workflow_logger
 from ...models.workflow import StepExecution
-from ...workflows.executor import DAGExecutor
 from ...services.workflow_service import workflow_service
 
 logger = get_workflow_logger(__name__)
@@ -491,7 +490,6 @@ async def start_assigned_workflow(
     instance_id: str,
     request: WorkflowStartRequest = Body(default=WorkflowStartRequest()),
     admin: dict = Depends(get_current_admin),
-    executor: DAGExecutor = Depends(lambda: DAGExecutor())
 ):
     """
     Start execution of an assigned workflow.
@@ -551,8 +549,17 @@ async def start_assigned_workflow(
 
     await instance.save()
 
-    # Submit to executor
-    executor.submit_instance(instance_id)
+    # Al ejecutor que de verdad esta corriendo.
+    #
+    # Antes se inyectaba `Depends(lambda: DAGExecutor())`, que construye un
+    # ejecutor nuevo en cada peticion: `submit_instance` encolaba en un objeto de
+    # usar y tirar que nadie drena, y el que arranca la aplicacion no se enteraba
+    # nunca. El tramite quedaba en `running` con todos sus pasos en `pending` y
+    # sin nada esperando, o sea parado para siempre.
+    #
+    # Nadie lo veia porque el boton de la bandeja no llamaba aqui: solo navegaba.
+    # Al arreglar el boton, este camino se estreno.
+    await workflow_service.execute_instance(instance_id)
 
     logger.info("Workflow started by user",
                instance_id=instance_id,
