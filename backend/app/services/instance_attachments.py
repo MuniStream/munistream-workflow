@@ -55,6 +55,18 @@ _SUFFIX_ORIGINS = (
 # expediente y los etiqueta con un paso que no existe.
 _MIRRORED_KEYS = frozenset({"_selected_entities_data", "_parent_context"})
 
+# Claves que guardan lo que el tramite *ofrecio*, no lo que el ciudadano aporto.
+#
+# `form_config` es el formulario que se le pinta, y cuando un paso ofrece elegir
+# entre entidades de la cartera va con las entidades enteras dentro; el cache del
+# selector de entidades, igual. Los archivos que cuelgan de ahi son de esas
+# entidades y ya se ven en su propio documento.
+#
+# Sin esto, el expediente de un tramite que subio dos archivos listaba treinta y
+# dos: los dos suyos y los de las ocho embarcaciones que el selector le mostro.
+def _es_catalogo(key: str) -> bool:
+    return key == "form_config" or key.endswith("_discovery_cache")
+
 
 def _is_s3_ref(value: Any) -> bool:
     """Un dict con ``s3_key`` no vacia es una referencia a un objeto de S3."""
@@ -95,6 +107,35 @@ def _filename_from_key(s3_key: str) -> str:
     return s3_key.rsplit("/", 1)[-1] or "archivo"
 
 
+# El operador de S3 no guarda el tipo de contenido: su resumen solo lleva la
+# key, el bucket y el tamano. Sin tipo, la vista previa no sabe si pintar un
+# visor de PDF o una imagen, y acababa ofreciendo solo la descarga. Se deduce de
+# la extension, que es lo unico que queda del archivo original.
+_TIPOS_POR_EXTENSION = {
+    "pdf": "application/pdf",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "txt": "text/plain",
+    "csv": "text/csv",
+    "json": "application/json",
+    "xml": "application/xml",
+}
+
+
+def _content_type(value: Dict[str, Any], filename: str) -> Optional[str]:
+    declarado = value.get("content_type")
+    if isinstance(declarado, str) and declarado.strip():
+        return declarado
+    _, _, extension = filename.rpartition(".")
+    return _TIPOS_POR_EXTENSION.get(extension.lower())
+
+
 def _ref_to_attachment(
     value: Dict[str, Any],
     task_id: str,
@@ -113,7 +154,7 @@ def _ref_to_attachment(
         "task_id": task_id,
         "field": field,
         "filename": filename,
-        "content_type": value.get("content_type"),
+        "content_type": _content_type(value, filename),
         "size": value.get("size"),
         "s3_bucket": bucket,
         "s3_key": s3_key,
@@ -131,12 +172,13 @@ def _inline_to_attachment(
     uploaded_at: Optional[str],
 ) -> Dict[str, Any]:
     """Archivo legado sin s3_key: se identifica por su ruta en el context."""
+    filename = value.get("filename") or "archivo"
     return {
         "attachment_id": hashlib.sha1(path.encode("utf-8")).hexdigest()[:16],
         "task_id": task_id,
         "field": field,
-        "filename": value.get("filename") or "archivo",
-        "content_type": value.get("content_type"),
+        "filename": filename,
+        "content_type": _content_type(value, filename),
         "size": value.get("size"),
         "s3_bucket": None,
         "s3_key": None,
@@ -247,7 +289,34 @@ def collect_instance_attachments(instance) -> List[Dict[str, Any]]:
     context = getattr(instance, "context", None) or {}
     if not isinstance(context, dict):
         return []
+    return _attachments_de(context)
 
+
+def collect_origin_attachments(instance, origin_instance=None) -> List[Dict[str, Any]]:
+    """Adjuntos del tramite del que nace esta instancia.
+
+    Una validacion administrativa corre como instancia aparte, y lo que se valida
+    son los documentos que el ciudadano entrego en el tramite padre. Sin esto, el
+    expediente de origen ensena que se aporto pero no deja abrir ni uno.
+
+    Se prefiere el padre vivo cuando quien llama ya lo cargo: la copia que el hijo
+    lleva dentro (`_parent_context`) se congelo al lanzarse la validacion, y los
+    archivos que el padre produzca despues no estan en ella. Sin padre a mano se
+    usa la copia, que es mejor que nada.
+
+    No amplia el acceso del revisor: esa copia ya viaja dentro de la instancia que
+    esta viendo.
+    """
+    padre = getattr(origin_instance, "context", None)
+    if not isinstance(padre, dict):
+        context = getattr(instance, "context", None) or {}
+        padre = context.get("_parent_context") if isinstance(context, dict) else None
+    if not isinstance(padre, dict):
+        return []
+    return _attachments_de(padre)
+
+
+def _attachments_de(context: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         default_bucket = s3_storage.default_bucket()
     except Exception:
@@ -262,7 +331,7 @@ def collect_instance_attachments(instance) -> List[Dict[str, Any]]:
     for key, value in context.items():
         if not isinstance(value, (dict, list)):
             continue
-        if key in _MIRRORED_KEYS:
+        if key in _MIRRORED_KEYS or _es_catalogo(key):
             continue
         task_id, origin = _split_task_key(key)
         uploaded_at = context.get(f"{task_id}_submitted_at")
@@ -278,19 +347,25 @@ def collect_instance_attachments(instance) -> List[Dict[str, Any]]:
     return out
 
 
-def find_attachment(instance, attachment_id: str) -> Optional[Dict[str, Any]]:
+def find_attachment(instance, attachment_id: str, origin_instance=None) -> Optional[Dict[str, Any]]:
     """Busca un adjunto por id dentro de una instancia concreta.
 
     Es la comprobacion de pertenencia que usa el proxy de descarga: pedir un
     ``attachment_id`` que no salga del context de *esta* instancia no devuelve
     nada, aunque el archivo exista en el bucket.
     """
-    for att in collect_instance_attachments(instance):
+    for att in collect_instance_attachments(instance) + collect_origin_attachments(instance, origin_instance):
         if att["attachment_id"] == attachment_id:
             return att
     return None
 
 
-def instance_s3_keys(instance) -> set:
-    """Conjunto de s3_keys que pertenecen a la instancia."""
-    return {a["s3_key"] for a in collect_instance_attachments(instance) if a.get("s3_key")}
+def instance_s3_keys(instance, origin_instance=None) -> set:
+    """Conjunto de s3_keys que pertenecen a la instancia, incluidas las heredadas.
+
+    Los del tramite padre cuentan: son lo que hay que revisar en una validacion
+    administrativa. Si no se pasa el padre se usan los de la copia embebida, que
+    es lo que se ve en pantalla en ese caso.
+    """
+    todos = collect_instance_attachments(instance) + collect_origin_attachments(instance, origin_instance)
+    return {a["s3_key"] for a in todos if a.get("s3_key")}

@@ -15,6 +15,7 @@ import logging
 from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
 from ...core.i18n import t as translate
+from ...services.instance_progress import avance, pasos_recorridos
 from ...auth.auth_callbacks import run_post_auth_callbacks
 
 logger = logging.getLogger(__name__)
@@ -494,90 +495,12 @@ async def track_instance(
             if "current_step_id" not in input_form:
                 input_form["current_step_id"] = waiting_tasks[0]
 
-    # Build the citizen-facing step list. Branched workflows (e.g. RNPA
-    # persona física / moral) use ShortCircuitOperator gates whose non-taken
-    # branch is marked "skipped" by propagate_skips(). We hide both the
-    # internal gates and the skipped branch so the citizen only sees their own
-    # route, and we derive the route label from the gate that actually ran.
-    from ...workflows.operators.python import ShortCircuitOperator
-
-    step_progress = []
-    route_label = None
-
-    # Identify the non-taken branch so the citizen only sees their own route.
-    # A ShortCircuitOperator gate that did NOT complete means its branch was
-    # not taken. Reconstruction from the DB leaves that branch's steps as
-    # "pending" (they were never executed and have no StepExecution record), so
-    # there is no "skipped" status to rely on — we cascade from the un-taken
-    # gates instead. Convergence steps survive because they also have a
-    # completed (taken-branch) upstream, so not ALL their upstreams are dead.
-    dead_branch = set()
-    if dag_instance:
-        def _status_of(tid):
-            return dag_instance.task_states.get(tid, {}).get("status", "pending")
-
-        for tid, task in dag_instance.dag.tasks.items():
-            if isinstance(task, ShortCircuitOperator) and _status_of(tid) != "completed":
-                dead_branch.add(tid)
-
-        changed = True
-        while changed:
-            changed = False
-            for tid in dag_instance.dag.tasks.keys():
-                if tid in dead_branch or _status_of(tid) == "completed":
-                    continue
-                ups = list(dag_instance.dag.graph.predecessors(tid))
-                if ups and all(u in dead_branch for u in ups):
-                    dead_branch.add(tid)
-                    changed = True
-
-    if dag_instance:
-        for task_id, state in dag_instance.task_states.items():
-            status_val = state.get("status", "pending")
-            task_obj = dag_instance.dag.tasks.get(task_id)
-
-            # Ocultar pasos internos (visible=False, p.ej. la validación
-            # administrativa que lanza un sub-workflow) de la línea de pasos del
-            # ciudadano. El admin los sigue viendo por su propio endpoint.
-            if task_obj is not None and not getattr(task_obj, "visible", True):
-                continue
-
-            # Branch gates are internal control steps, not citizen steps. The
-            # gate that completed (rather than skipped) reveals the route taken.
-            if isinstance(task_obj, ShortCircuitOperator):
-                if status_val == "completed" and route_label is None:
-                    gate_name = getattr(task_obj, "name", None) or ""
-                    route_label = gate_name.replace("Rama ", "").strip() or None
-                continue
-
-            # Hide the non-taken branch (skipped, or pending-but-unreachable).
-            if status_val == "skipped" or task_id in dead_branch:
-                continue
-
-            task_name = getattr(task_obj, 'name', None)
-            if not task_name:
-                i18n_key = f"steps.{task_id}"
-                translated = translate(i18n_key, locale="es")
-                task_name = translated if translated != i18n_key else task_id.replace("_", " ").title()
-            task_group = getattr(task_obj, 'group', None)
-
-            step_info = {
-                "step_id": task_id,
-                "name": task_name,
-                "description": f"Step {task_id}",
-                "status": status_val,
-                "started_at": state.get("started_at"),
-                "completed_at": state.get("completed_at")
-            }
-            if task_group:
-                step_info["group"] = task_group
-            step_progress.append(step_info)
-
-    # Progress is computed over visible steps only (skipped branches and
-    # internal gates excluded) so branched workflows report accurate progress.
-    total_steps = len(step_progress)
-    completed_steps = sum(1 for s in step_progress if s["status"] == "completed")
-    progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+    # Los pasos que el tramite recorrio de verdad: sin las compuertas de
+    # bifurcacion, sin la rama que no se tomo y sin los pasos internos, que son
+    # trabajo del administrador y no del ciudadano. El avance se cuenta sobre
+    # esos, que es lo unico que hace que un tramite con ramas llegue al cien.
+    step_progress, route_label = pasos_recorridos(dag_instance, ocultar_internos=True)
+    completed_steps, total_steps, progress_percentage = avance(step_progress)
 
     # Resolve entities emitted by the workflow so the portal can show them
     # inline once the trámite concludes. Keep this light: ids/types only, never
