@@ -75,21 +75,14 @@ def _task_of(key: str) -> Optional[str]:
     return None
 
 
-def curate_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Devuelve el context saneado y agrupado por paso.
-
-    ``by_task`` permite mostrar "que aporto el ciudadano en cada paso"; ``general``
-    recoge lo que no pertenece a ninguna tarea concreta (identidad sembrada al
-    arrancar, decisiones de validacion, etc.).
-    """
-    context = context or {}
-    if not isinstance(context, dict):
-        return {"by_task": {}, "general": {}}
-
+def _curate_flat(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanea y agrupa por paso un context, sin mirar el del tramite padre."""
     by_task: Dict[str, Dict[str, Any]] = {}
     general: Dict[str, Any] = {}
 
     for key, value in context.items():
+        if key == "_parent_context":
+            continue
         curated = curate_value(key, value)
         task = _task_of(key)
         if task:
@@ -98,6 +91,32 @@ def curate_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             general[key] = curated
 
     return {"by_task": by_task, "general": general}
+
+
+def curate_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Devuelve el context saneado y agrupado por paso.
+
+    ``by_task`` permite mostrar "que aporto el ciudadano en cada paso"; ``general``
+    recoge lo que no pertenece a ninguna tarea concreta (identidad sembrada al
+    arrancar, decisiones de validacion, etc.).
+
+    ``origin`` es el context del tramite del que nace esta instancia, curado y
+    agrupado igual. Viaja embebido bajo ``_parent_context``, y presentarlo tal
+    cual dentro del expediente actual lo convertia en un volcado ilegible al
+    fondo de la pagina. Pero es justo lo que un revisor necesita ver: en una
+    validacion administrativa, lo que se valida es lo que el ciudadano aporto en
+    el tramite padre, no lo que hizo el flujo de validacion.
+    """
+    context = context or {}
+    if not isinstance(context, dict):
+        return {"by_task": {}, "general": {}, "origin": None}
+
+    resultado = _curate_flat(context)
+
+    padre = context.get("_parent_context")
+    resultado["origin"] = _curate_flat(padre) if isinstance(padre, dict) else None
+
+    return resultado
 
 
 async def _customer_by_any_id(candidate: Optional[str]) -> Optional[Customer]:
