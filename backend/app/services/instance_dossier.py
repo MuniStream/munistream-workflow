@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..models.customer import Customer
 from .entity_serialization import DETAIL_MAX_BYTES
-from .instance_attachments import collect_instance_attachments
+from .instance_attachments import collect_instance_attachments, collect_origin_attachments
 
 # Claves cuyo valor no debe salir nunca del backend. Los tramites con firma
 # digital guardan en el context la llave privada, su contrasena y el
@@ -27,14 +27,26 @@ _SECRET_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Sufijos con los que los pasos escriben en el context. Sirven para agrupar por
-# tarea en vez de presentar un volcado plano.
-_TASK_SUFFIXES = ("_input", "_result", "_submitted_at", "_uploaded_files", "_citizen_data")
+# Claves que acaban en `_key` pero no guardan ninguna llave: son la ruta de un
+# objeto en el almacenamiento. Redactarlas no protegia nada —la ruta sola no
+# descarga nada, hace falta un permiso firmado— y en cambio rompia lo unico para
+# lo que sirve: reconocer que el valor de un campo es un archivo y poder abrirlo.
+_NO_SON_SECRETO = frozenset({"s3_key", "object_key", "file_key", "bucket_key", "storage_key"})
+
+# Respaldo para instancias anteriores al registro de pasos (`_steps`), que no
+# llevan procedencia guardada. Adivinar el paso a partir del nombre de la clave es
+# fragil: cada operador bautiza las suyas a su gusto (`_data`, `_validated`,
+# `_selections`, `_signer`, `_assertions_result`, `_discovery_cache`...) y la lista
+# no se acaba nunca. Por eso dejo de ser el mecanismo; aqui solo evita que los
+# expedientes viejos se vean peor que antes.
+_LEGACY_TASK_SUFFIXES = ("_input", "_result", "_submitted_at", "_uploaded_files", "_citizen_data")
 
 _MAX_DEPTH = 8
 
 
 def _is_secret(key: str) -> bool:
+    if key.lower() in _NO_SON_SECRETO:
+        return False
     return bool(_SECRET_PATTERNS.search(key))
 
 
@@ -68,32 +80,122 @@ def curate_value(key: str, value: Any, depth: int = 0) -> Any:
     return value
 
 
-def _task_of(key: str) -> Optional[str]:
-    for suffix in _TASK_SUFFIXES:
+def _task_of_legacy(key: str) -> Optional[str]:
+    for suffix in _LEGACY_TASK_SUFFIXES:
         if key.endswith(suffix) and len(key) > len(suffix):
             return key[: -len(suffix)]
     return None
 
 
+def _leer_registro(context: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Invierte `_steps`, el registro que el executor escribe al entregar cada salida.
+
+    El registro va del paso a sus claves (`{paso: {_operator, _keys}}`); aqui se
+    devuelve `clave -> {task, operator}`, que es como se consulta al recorrer el
+    context.
+    """
+    registro = context.get("_steps")
+    if not isinstance(registro, dict):
+        return {}
+
+    duenio: Dict[str, Dict[str, Any]] = {}
+    disputadas = set()
+
+    for task, paso in registro.items():
+        if not isinstance(paso, dict):
+            continue
+        operador = paso.get("_operator")
+        operador = operador if isinstance(operador, dict) else {}
+        for clave in paso.get("_keys") or ():
+            if not isinstance(clave, str):
+                continue
+            if clave in duenio and duenio[clave]["task"] != task:
+                # Una clave que escriben varios pasos no es la salida de ninguno:
+                # es una casilla compartida que se van sobrescribiendo, como el
+                # `form_config` que cada paso en espera deja para la pantalla del
+                # ciudadano. Atribuirla al ultimo que paso por ahi seria inventar.
+                disputadas.add(clave)
+                continue
+            duenio[clave] = {"task": task, "operator": operador}
+
+    for clave in disputadas:
+        duenio.pop(clave, None)
+    return duenio
+
+
+def _pasos_del_registro(context: Dict[str, Any]) -> List[str]:
+    """Ids de paso que el executor dejo anotados en esta instancia."""
+    registro = context.get("_steps")
+    if not isinstance(registro, dict):
+        return []
+    return [t for t in registro if isinstance(t, str) and t]
+
+
+def _duenio_por_prefijo(key: str, pasos: List[str]) -> Optional[str]:
+    for paso in pasos:
+        if key.startswith(paso + "_"):
+            return paso
+    return None
+
+
 def _curate_flat(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Sanea y agrupa por paso un context, sin mirar el del tramite padre."""
+    """Sanea y agrupa por paso un context, sin mirar el del tramite padre.
+
+    ``operators`` dice con que operador se produjo cada grupo, para que la interfaz
+    pueda presentar un formulario como formulario y unos archivos como archivos en
+    vez de volcar el JSON de todos igual.
+    """
     by_task: Dict[str, Dict[str, Any]] = {}
     general: Dict[str, Any] = {}
+    operators: Dict[str, Dict[str, Any]] = {}
+
+    registrado = _leer_registro(context)
+    # De mas largo a mas corto, para que gane el prefijo mas especifico cuando un
+    # paso se llama como el principio de otro.
+    pasos_conocidos = sorted(_pasos_del_registro(context), key=len, reverse=True)
 
     for key, value in context.items():
-        if key == "_parent_context":
+        if key in ("_parent_context", "_steps"):
             continue
+
         curated = curate_value(key, value)
-        task = _task_of(key)
+
+        # Tres niveles, de mas a menos fiable. El respaldo se aplica clave a clave
+        # y no instancia a instancia: una instancia viva puede tener pasos
+        # anteriores al registro y pasos ya registrados, y descartarlo por tener
+        # registro dejaria los primeros sin agrupar.
+        procedencia = registrado.get(key)
+        if procedencia:
+            # 1. El executor dijo quien la escribio.
+            task = procedencia["task"]
+            nombre_operador = procedencia["operator"].get("operator")
+            if nombre_operador:
+                operators.setdefault(task, {
+                    "operator": nombre_operador,
+                    "name": procedencia["operator"].get("name"),
+                    "group": procedencia["operator"].get("group"),
+                })
+        else:
+            # 2. La clave es anterior al registro, pero empieza por el id de un
+            #    paso que el registro si conoce. El id no se adivina: viene del
+            #    propio registro, asi que reclamarla no es interpretar su nombre.
+            #    Es lo que rescata lo que un paso dejo escrito en ejecuciones
+            #    previas, como el cache de entidades elegidas.
+            # 3. Y si tampoco, el sufijo, que es puro respaldo historico.
+            task = _duenio_por_prefijo(key, pasos_conocidos) or _task_of_legacy(key)
+
         if task:
             by_task.setdefault(task, {})[key] = curated
         else:
             general[key] = curated
 
-    return {"by_task": by_task, "general": general}
+    return {"by_task": by_task, "general": general, "operators": operators}
 
 
-def curate_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def curate_context(
+    context: Optional[Dict[str, Any]],
+    origin_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Devuelve el context saneado y agrupado por paso.
 
     ``by_task`` permite mostrar "que aporto el ciudadano en cada paso"; ``general``
@@ -109,11 +211,13 @@ def curate_context(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
     context = context or {}
     if not isinstance(context, dict):
-        return {"by_task": {}, "general": {}, "origin": None}
+        return {"by_task": {}, "general": {}, "operators": {}, "origin": None}
 
     resultado = _curate_flat(context)
 
-    padre = context.get("_parent_context")
+    # El padre vivo cuando se ha podido cargar; si no, la copia que el hijo lleva
+    # dentro, que es lo unico que hay pero se quedo en el momento del lanzamiento.
+    padre = origin_context if isinstance(origin_context, dict) else context.get("_parent_context")
     resultado["origin"] = _curate_flat(padre) if isinstance(padre, dict) else None
 
     return resultado
@@ -238,6 +342,35 @@ def entity_ids_in_use(instance, wallet_entity_ids: Set[str]) -> List[str]:
     return sorted(found & wallet_entity_ids)
 
 
+async def load_origin_instance(instance):
+    """La instancia de la que nace esta, cargada de la base.
+
+    El hijo lleva dentro una copia del context del padre (`_parent_context`), y
+    durante un tiempo el expediente de origen se armo con ella. Pero esa copia es
+    una foto del momento en que se lanzo la validacion, y el trabajo del padre
+    sigue despues: en un tramite normal la entidad se emite *tras* aprobar, asi
+    que justo el documento que el revisor tiene que ver nunca estaba en la copia.
+    Tampoco lleva el registro de pasos, de modo que el expediente de origen se
+    quedaba sin procedencia y se leia como un volcado plano.
+
+    No amplia lo que el revisor puede ver: ya tenia delante una copia entera de
+    ese context. Lo que cambia es que ahora la ve al dia.
+    """
+    from ..models.workflow import WorkflowInstance
+
+    context = getattr(instance, "context", None) or {}
+    if not isinstance(context, dict):
+        return None
+    parent_id = context.get("parent_instance_id")
+    if not parent_id or parent_id == getattr(instance, "instance_id", None):
+        return None
+    try:
+        return await WorkflowInstance.find_one(WorkflowInstance.instance_id == parent_id)
+    except Exception:
+        # Un padre inalcanzable no debe tumbar el expediente: se sigue con la copia.
+        return None
+
+
 async def resolve_origin(instance) -> Optional[Dict[str, Any]]:
     """Tramite del que nace esta instancia, cuando es una hija.
 
@@ -284,6 +417,13 @@ async def resolve_origin(instance) -> Optional[Dict[str, Any]]:
 async def build_admin_detail(instance, dag) -> Dict[str, Any]:
     """Expediente completo de una instancia, sin la cartera (que va aparte)."""
     attachments = collect_instance_attachments(instance)
+    # El padre se carga una sola vez y se reparte: de el salen el expediente de
+    # origen, sus adjuntos y el permiso para descargarlos.
+    origin_instance = await load_origin_instance(instance)
+    # Los del tramite padre van aparte y no mezclados: son de otro expediente, y
+    # el revisor tiene que poder distinguir lo que se aporto aqui de lo que se
+    # esta validando.
+    origin_attachments = collect_origin_attachments(instance, origin_instance)
     citizen = await resolve_citizen(instance)
     origin = await resolve_origin(instance)
 
@@ -313,7 +453,14 @@ async def build_admin_detail(instance, dag) -> Dict[str, Any]:
         },
         "citizen": citizen,
         "origin": origin,
-        "context": curate_context(getattr(instance, "context", None)),
+        "context": curate_context(
+            getattr(instance, "context", None),
+            getattr(origin_instance, "context", None),
+        ),
         "attachments": attachments,
-        "counts": {"attachments": len(attachments)},
+        "origin_attachments": origin_attachments,
+        "counts": {
+            "attachments": len(attachments),
+            "origin_attachments": len(origin_attachments),
+        },
     }

@@ -83,6 +83,51 @@ class ExecutorStatus(str, Enum):
     STOPPED = "stopped"
 
 
+def _registrar_paso(dag_instance, task_id: str, task, output: dict) -> None:
+    """Anota que operador produjo esta salida y con que claves.
+
+    Sin esto, el context es un diccionario plano sin procedencia y la unica forma
+    de presentarlo es volcar el JSON: no hay manera de saber que
+    `collect_pf_identity_input` y `collect_pf_identity_validated` son el mismo
+    paso, ni que ese paso fue un formulario y no una subida de archivos.
+
+    Deducirlo del nombre de la clave no funciona. Cada operador bautiza las suyas
+    a su gusto —`_input`, `_data`, `_validated`, `_selections`, `_signer`,
+    `_assertions_result`, `_discovery_cache`— y la lista de sufijos no se acaba
+    nunca; con partirla mal, un paso se parte en dos o se traga las claves de
+    otro. Aqui no hay que deducir nada: este es el unico punto por el que pasa la
+    salida de cualquiera de los veintitres operadores, y en el se conoce de
+    primera mano el paso, el operador y las claves exactas que escribio.
+
+    El registro va bajo `_steps`, un mapa `paso -> {_operator, _keys}`. Se guardan
+    las claves y no una copia de los valores: duplicar la salida doblaria el
+    tamano del context en Mongo, y algunas salidas pesan megas.
+
+    Un paso puede escribir mas de una vez (espera y luego continua), asi que las
+    claves se acumulan en vez de sustituirse.
+    """
+    try:
+        registro = dag_instance.context.setdefault("_steps", {})
+        if not isinstance(registro, dict):
+            return
+        paso = registro.get(task_id)
+        if not isinstance(paso, dict):
+            paso = {}
+            registro[task_id] = paso
+        paso["_operator"] = {
+            "operator": type(task).__name__,
+            "name": getattr(task, "name", None),
+            "group": getattr(task, "group", None),
+        }
+        previas = paso.get("_keys")
+        claves = set(previas) if isinstance(previas, list) else set()
+        claves.update(k for k in output if isinstance(k, str))
+        paso["_keys"] = sorted(claves)
+    except Exception:
+        # La procedencia es informativa: no debe poder tumbar una ejecucion.
+        pass
+
+
 class DAGExecutor:
     """
     Simple executor that always fetches fresh instances from database.
@@ -484,6 +529,7 @@ class DAGExecutor:
                 output = task.get_output()
                 if output:
                     dag_instance.context.update(output)
+                    _registrar_paso(dag_instance, task_id, task, output)
                     logger.debug(f"Task {task_id} added to context: {list(output.keys())}")
             elif result == TaskStatus.WAITING:
                 dag_instance.update_task_status(task_id, "waiting")
@@ -491,6 +537,7 @@ class DAGExecutor:
                 output = task.get_output()
                 if output:
                     dag_instance.context.update(output)
+                    _registrar_paso(dag_instance, task_id, task, output)
 
                 # Ensure output_data is available in task_states for tracking endpoint
                 if hasattr(task, 'state') and task.state.output_data:

@@ -28,7 +28,13 @@ from ...models.workflow import (
     EventType,
 )
 from ...core.database import get_database
-from ...workflows.dag import DAGInstance, InstanceStatus
+# Solo `DAGInstance`: el enum de estados que vale aqui es el de `schemas.workflow`,
+# que se importa arriba. Traerlo tambien desde `dag` lo tapaba, y el de `dag` no
+# conoce `waiting_for_start` ni `pending_assignment` -- los dos estados en los que
+# un tramite espera a que un funcionario lo arranque. La conversion no los
+# reconocia y los reportaba como FAILED, asi que la lista de tramites daba por
+# fallido todo lo que estaba por empezar.
+from ...workflows.dag import DAGInstance
 from ...services.workflow_service import workflow_service
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity, EntityType
@@ -36,7 +42,8 @@ from ...auth.provider import require_permission, get_current_user
 from ...services.assignment_service import assignment_service
 from ...services.entity_serialization import slim_entity_data, describe_blobs
 from ...services.instance_attachments import find_attachment
-from ...services.instance_dossier import build_admin_detail, entity_ids_in_use
+from ...services.instance_dossier import build_admin_detail, entity_ids_in_use, load_origin_instance
+from ...services.instance_progress import avance, pasos_recorridos
 from ...services.instance_listing import enrich_instances
 from ...models.team import TeamModel
 
@@ -418,13 +425,19 @@ async def bulk_auto_assign_instances_early(
 
 def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse:
     """Convert internal WorkflowInstance to API response"""
-    # Handle invalid status gracefully
+    # Un estado que el enum no conozca no es un fallo del tramite. Antes se
+    # devolvia FAILED, que en pantalla se lee "Fallido": la respuesta afirmaba
+    # algo que no habia ocurrido. Se avisa por el registro y se deja PENDING, que
+    # no acusa a nadie; si aparece aqui, lo que hay que hacer es anadir el estado
+    # al enum, no reetiquetarlo.
     try:
         status = InstanceStatus(instance.status)
     except ValueError:
-        # If status is invalid, default to FAILED 
-        print(f"Warning: Invalid status '{instance.status}' for instance {instance.instance_id}, defaulting to FAILED")
-        status = InstanceStatus.FAILED
+        logger.warning(
+            f"Estado desconocido '{instance.status}' en la instancia "
+            f"{instance.instance_id}; falta anadirlo a InstanceStatus"
+        )
+        status = InstanceStatus.PENDING
     
     return InstanceResponse(
         instance_id=instance.instance_id,
@@ -1100,38 +1113,54 @@ async def track_instance_for_admin(
                     input_form = dag_instance.context["form_config"]
 
 
-    # Calculate progress
-    total_steps = len(dag_instance.dag.tasks) if dag_instance and dag_instance.dag else 0
-    completed_steps = 0
-    step_progress = []
-
-    if dag_instance:
-        for task_id, state in dag_instance.task_states.items():
-            status_val = state.get("status", "pending")
-            if status_val == "completed":
-                completed_steps += 1
-
-            task_obj = dag_instance.dag.tasks.get(task_id)
-            task_name = getattr(task_obj, 'name', None) or task_id.replace("_", " ").title()
-            task_group = getattr(task_obj, 'group', None)
-
-            step_info = {
-                "step_id": task_id,
-                "name": task_name,
-                "description": f"Step {task_id}",
-                "status": status_val,
-                "started_at": state.get("started_at"),
-                "completed_at": state.get("completed_at")
-            }
-            if task_group:
-                step_info["group"] = task_group
-            step_progress.append(step_info)
-
-    progress_percentage = (completed_steps / total_steps * 100) if total_steps > 0 else 0
+    # El avance se cuenta sobre el camino que el tramite recorrio, no sobre todo
+    # lo que el flujo declara: con una bifurcacion, la rama no tomada y las
+    # compuertas hacian que un tramite terminado no llegara al cien por cien.
+    # Los pasos internos si se muestran aqui: revisarlos es el trabajo del
+    # administrador, y es lo unico en lo que esta vista difiere de la del
+    # ciudadano.
+    step_progress, _rama = pasos_recorridos(dag_instance, ocultar_internos=False)
+    completed_steps, total_steps, progress_percentage = avance(step_progress)
 
     # Get workflow info
     workflow = await workflow_service.get_workflow_definition(db_instance.workflow_id)
     workflow_name = workflow.name if workflow else db_instance.workflow_id
+
+    # Entidades emitidas por este trámite (para la pestaña "Documento Emitido").
+    # Ligero: solo ids/tipos desde el contexto, nunca entity.data.
+    emitted_entities = []
+    if dag_instance:
+        _ctx = dag_instance.context or {}
+        _seen_emitted = set()
+
+        def _add_emitted(eid, etype):
+            if isinstance(eid, str) and eid and eid not in _seen_emitted:
+                _seen_emitted.add(eid)
+                emitted_entities.append({"entity_id": eid, "entity_type": etype})
+
+        def _derive_emitted(ctx):
+            for _k, _v in (ctx or {}).items():
+                if _k.startswith("created_entity_"):
+                    _add_emitted(_v, _k[len("created_entity_"):])
+            for _k, _v in (ctx or {}).items():
+                if _k.endswith("_entity_id"):
+                    _add_emitted(_v, (ctx or {}).get(_k[:-len("_entity_id")] + "_entity_type"))
+
+        _derive_emitted(_ctx)
+
+        # Si esta instancia nace de un trámite padre (p. ej. una validación
+        # administrativa), también se muestra el documento que emitió el padre:
+        # el revisor verifica el oficio resultante sin salir del expediente. El
+        # dueño de la entidad es el mismo ciudadano, así que el documento se
+        # sirve por esta instancia.
+        _parent_iid = _ctx.get("parent_instance_id")
+        if _parent_iid and _parent_iid != instance_id:
+            try:
+                _parent = await workflow_service.get_instance(_parent_iid)
+                if _parent:
+                    _derive_emitted(_parent.context or {})
+            except Exception:
+                pass
 
     return {
         "instance_id": instance_id,
@@ -1149,6 +1178,7 @@ async def track_instance_for_admin(
         "requires_input": requires_input,
         "input_form": input_form,
         "waiting_for": waiting_for,
+        "emitted_entities": emitted_entities,
         "estimated_completion": None,  # Could calculate based on average step time
         "message": f"Workflow {db_instance.status}"
     }
@@ -1922,7 +1952,9 @@ async def get_instance_attachment_content(
     el identificador pedido tiene que salir del indice de adjuntos de la propia
     instancia. Una s3_key valida de otro tramite no se sirve.
     """
-    attachment = find_attachment(db_instance, attachment_id)
+    # El padre entra en la busqueda: en una validacion, los archivos a revisar son
+    # los del tramite que la origino.
+    attachment = find_attachment(db_instance, attachment_id, await load_origin_instance(db_instance))
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
@@ -1990,7 +2022,7 @@ async def grant_instance_file_access(
     if not isinstance(solicitadas, list) or len(solicitadas) > 200:
         raise HTTPException(status_code=400, detail="s3_keys invalido")
 
-    permitidas = instance_s3_keys(db_instance)
+    permitidas = instance_s3_keys(db_instance, await load_origin_instance(db_instance))
 
     grants = []
     for key in solicitadas:

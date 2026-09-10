@@ -158,6 +158,12 @@ class EntityCreationOperator(BaseOperator):
             # Build entity data from context automatically first
             entity_data = dict(self.static_data)  # Start with static data
 
+            # Campos capturados por el ciudadano (los outputs de UserInputOperator
+            # llegan al contexto como `{task_id}_data` -> dict). Se registran para
+            # que el documento oficial muestre SÓLO lo que puso el usuario y no la
+            # maquinaria interna del flujo (validación, firma, s3, etc.).
+            user_fields: List[str] = []
+
             # Auto-collect all task outputs from context
             for key, value in context.items():
                 # Skip fields using the blacklist filter
@@ -169,6 +175,15 @@ class EntityCreationOperator(BaseOperator):
                     # Filter fields within dictionaries too
                     filtered_dict = {k: v for k, v in value.items() if self._should_include_field(k)}
                     entity_data.update(filtered_dict)
+                    # Solo los formularios del ciudadano cuentan como "campos del
+                    # usuario" para el oficio. La convención es `collect_<x>_data`
+                    # (output de UserInputOperator). Otros dicts `*_data` de la
+                    # maquinaria (citizen_data, received_data, validación admin…)
+                    # NO son datos capturados y no deben aparecer en el documento.
+                    if key.startswith("collect_") and key.endswith("_data"):
+                        for k in filtered_dict.keys():
+                            if k not in user_fields:
+                                user_fields.append(k)
                 elif value is not None and not isinstance(value, (list, dict)):
                     entity_data[key] = value
 
@@ -180,6 +195,10 @@ class EntityCreationOperator(BaseOperator):
                     value = _resolve_context_path(context, context_key)
                     if value is not None:
                         entity_data[data_field] = value
+                        # Los destinos del data_mapping son campos curados por quien
+                        # define el trámite -> también son "del usuario" para el oficio.
+                        if data_field not in user_fields:
+                            user_fields.append(data_field)
 
             # Persist the entity subtype inside data so it is queryable by
             # EntityPickerOperator filters (which resolve non-dotted keys to
@@ -213,6 +232,19 @@ class EntityCreationOperator(BaseOperator):
                 print(f"   ⚠️ name_source '{self.name_source}' no resolvió; usando '{fallback}'")
                 entity_name = fallback
 
+            # Adjuntar la lista de campos del usuario al display config (sin pisar
+            # una lista explícita si el trámite ya la definió). El documento oficial
+            # la usa como allowlist: muestra sólo estos campos, en este orden,
+            # omitiendo firma/urls/ids/archivos.
+            edc = dict(self.entity_display_config or {})
+            if "oficio_fields" not in edc:
+                _INTERNAL = {"signature", "firmas", "entity_subtype"}
+                edc["oficio_fields"] = [
+                    f for f in user_fields
+                    if f not in _INTERNAL
+                    and not f.endswith(("_url", "_ids", "_result", "_file"))
+                ]
+
             # For async operations, we'll handle this in execute_async
             # Store the parameters for async execution
             self._entity_params = {
@@ -222,7 +254,7 @@ class EntityCreationOperator(BaseOperator):
                 "data": entity_data,
                 "created_by_workflow": context.get("instance_id"),
                 "visualization_config": self.visualization_config,
-                "entity_display_config": self.entity_display_config
+                "entity_display_config": edc
             }
             
             # Return pending status - will be handled by execute_async
