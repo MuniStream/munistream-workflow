@@ -214,6 +214,12 @@ class UserInputOperator(BaseOperator):
                 sub_val = value.get(sub_key)
                 if sub_val is None or str(sub_val).strip() == "":
                     errors.append(f"{label}: {sub_label} es requerido")
+            # Medios de contacto (opcionales, solo si el field los pide): validar
+            # el formato del correo cuando venga capturado.
+            if field_cfg.get("with_contact"):
+                correo = value.get("correo")
+                if correo and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", str(correo).strip()):
+                    errors.append(f"{label}: el correo electrónico tiene un formato inválido")
 
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "array":
