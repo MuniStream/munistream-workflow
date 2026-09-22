@@ -68,11 +68,13 @@ class UserInputOperator(BaseOperator):
         if not isinstance(user_input, dict):
             return user_input
         fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
-        address_names = {f.get("name") for f in fields_schema if f.get("type") == "address"}
-        if not address_names:
+        # Los campos estructurados (address y daterange) llegan como string JSON por
+        # el multipart/FormData; se reconstituyen a dict.
+        struct_names = {f.get("name") for f in fields_schema if f.get("type") in ("address", "daterange")}
+        if not struct_names:
             return user_input
         coerced = dict(user_input)
-        for name in address_names:
+        for name in struct_names:
             val = coerced.get(name)
             if isinstance(val, str) and val.strip().startswith("{"):
                 try:
@@ -227,6 +229,26 @@ class UserInputOperator(BaseOperator):
                 correo = value.get("correo")
                 if correo and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", str(correo).strip()):
                     errors.append(f"{label}: el correo electrónico tiene un formato inválido")
+
+        # Rango de fechas: valor {inicio, fin}. Ambas requeridas y fin >= inicio.
+        for field_cfg in fields_schema:
+            if field_cfg.get("type") != "daterange":
+                continue
+            name = field_cfg.get("name")
+            label = field_cfg.get("label", name)
+            value = user_input.get(name)
+            if not field_cfg.get("required") and value in (None, "", {}):
+                continue
+            if not isinstance(value, dict) or not value.get("inicio") or not value.get("fin"):
+                errors.append(f"{label}: indique la fecha de inicio y la de fin")
+                continue
+            try:
+                ini = datetime.fromisoformat(str(value["inicio"])[:10]).date()
+                fin = datetime.fromisoformat(str(value["fin"])[:10]).date()
+                if fin < ini:
+                    errors.append(f"{label}: la fecha de fin no puede ser anterior a la de inicio")
+            except ValueError:
+                errors.append(f"{label}: fechas inválidas")
 
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "array":
