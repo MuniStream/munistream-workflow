@@ -210,7 +210,14 @@ class UserInputOperator(BaseOperator):
             if not isinstance(value, dict):
                 errors.append(f"{label} es requerido")
                 continue
-            for sub_key, sub_label in ADDRESS_REQUIRED:
+            # `region_only`: solo se captura CP, Municipio y Estado (sin calle,
+            # número ni colonia), p. ej. "Lugar de embarque".
+            required_subfields = (
+                [("cp", "Código Postal"), ("municipio", "Municipio"), ("estado", "Estado")]
+                if field_cfg.get("region_only")
+                else ADDRESS_REQUIRED
+            )
+            for sub_key, sub_label in required_subfields:
                 sub_val = value.get(sub_key)
                 if sub_val is None or str(sub_val).strip() == "":
                     errors.append(f"{label}: {sub_label} es requerido")
