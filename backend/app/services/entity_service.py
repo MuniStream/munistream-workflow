@@ -105,7 +105,9 @@ class EntityService:
             query["owner_user_id"] = owner_user_id
         
         if entity_type:
-            query["entity_type"] = entity_type
+            # entity_type puede ser un tipo (str) o varios (list -> $in), para
+            # requisitos que aceptan más de un tipo de entidad.
+            query["entity_type"] = {"$in": entity_type} if isinstance(entity_type, list) else entity_type
         
         # Add custom filters for data fields
         if filters:

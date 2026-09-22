@@ -127,6 +127,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 critical=min_count > 0,  # Critical if at least one is required
                 metadata={
                     "entity_type": entity_type,
+                    "entity_types": req_config.get("entity_types"),
                     "min_count": min_count,
                     "max_count": req_config.get("max_count", min_count),
                     "filters": req_config.get("filters", {}),
@@ -152,6 +153,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         # Extract metadata
         metadata = requirement.metadata
         entity_type = metadata.get("entity_type")
+        entity_types = metadata.get("entity_types")
         min_count = metadata.get("min_count", 1)
         filters = metadata.get("filters", {})
         workflow_id = metadata.get("workflow_id")
@@ -175,11 +177,12 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             )
 
         try:
-            # Query for entities matching the requirement
+            # Query for entities matching the requirement (uno o varios tipos)
             entities = await EntityService.find_entities(
                 owner_user_id=user_id,
-                entity_type=entity_type,
-                filters=filters
+                entity_type=entity_types or entity_type,
+                filters=filters,
+                limit=100
             )
 
             # Check if requirement is fulfilled
@@ -474,11 +477,13 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                         min_count=min_count,
                         store_as=store_as)
 
-            # Find entities matching this requirement
+            # Find entities matching this requirement. Un requisito puede aceptar
+            # varios tipos (`entity_types`); si no, usa el tipo único.
             entities = await EntityService.find_entities(
                 owner_user_id=user_id,
-                entity_type=entity_type,
-                filters=filters
+                entity_type=req.get("entity_types") or entity_type,
+                filters=filters,
+                limit=100
             )
 
             logger.debug("Entity discovery result",
