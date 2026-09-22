@@ -152,6 +152,15 @@ class ConfirmationOperator(BaseOperator):
             for field in section.get("fields", []) or []:
                 key = field.get("key")
                 value = _resolve_path(context, key) if key else None
+                # Si el campo es un menú (select/multiselect), mostrar la etiqueta
+                # de la opción en vez del valor guardado (p. ej. "Primera vez" en
+                # lugar de "primera_vez").
+                value_labels = field.get("value_labels")
+                if value_labels and value is not None:
+                    if isinstance(value, list):
+                        value = ", ".join(str(value_labels.get(str(v), v)) for v in value)
+                    else:
+                        value = value_labels.get(str(value), value)
                 resolved_fields.append({
                     "key": key,
                     "label": field.get("label"),
