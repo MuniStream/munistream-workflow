@@ -980,6 +980,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 "max_count": max_count,
                 "options": entity_options,
                 "entity_type": entity_type,
+                "display_fields": req.get("display_fields", []),
                 "description": f"Select {min_count}-{max_count} item(s)" if min_count != max_count else f"Select {min_count} item(s)"
             }
 
