@@ -61,26 +61,44 @@ class UserInputOperator(BaseOperator):
         self.required_fields = required_fields or []
     
     def _coerce_structured_fields(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Reconstituir a dict los campos de tipo `address` que hayan llegado como
-        string JSON (el multipart/FormData serializa los objetos). Devuelve una
-        copia con esos campos parseados; deja el resto igual."""
+        """Reconstituir los campos estructurados que hayan llegado como string JSON
+        (el multipart/FormData serializa todo objeto/array con JSON.stringify).
+        Devuelve una copia con esos campos parseados; deja el resto igual.
+
+        - `address`, `daterange`, `geo` -> dict (string que empieza con `{`).
+        - `array` -> list (string que empieza con `[`).
+
+        Es defensivo: solo reemplaza el valor si el parse produce el contenedor
+        esperado; si falla o no coincide el tipo, deja el valor original (así los
+        campos que ya llegan como dict/list no se tocan)."""
         import json as _json
         if not isinstance(user_input, dict):
             return user_input
         fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
-        # Los campos estructurados (address y daterange) llegan como string JSON por
-        # el multipart/FormData; se reconstituyen a dict.
-        struct_names = {f.get("name") for f in fields_schema if f.get("type") in ("address", "daterange")}
-        if not struct_names:
+        # tipo -> contenedor esperado tras el parse
+        expected = {"address": dict, "daterange": dict, "geo": dict, "array": list}
+        types_by_name = {
+            f.get("name"): f.get("type")
+            for f in fields_schema
+            if f.get("type") in expected and f.get("name")
+        }
+        if not types_by_name:
             return user_input
         coerced = dict(user_input)
-        for name in struct_names:
+        for name, ftype in types_by_name.items():
             val = coerced.get(name)
-            if isinstance(val, str) and val.strip().startswith("{"):
-                try:
-                    coerced[name] = _json.loads(val)
-                except (ValueError, TypeError):
-                    pass
+            if not isinstance(val, str):
+                continue
+            stripped = val.strip()
+            opener = "[" if ftype == "array" else "{"
+            if not stripped.startswith(opener):
+                continue
+            try:
+                parsed = _json.loads(stripped)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, expected[ftype]):
+                coerced[name] = parsed
         return coerced
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
