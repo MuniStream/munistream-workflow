@@ -508,6 +508,28 @@ async def auto_assign_new_instance(instance_id: str, workflow_def: WorkflowDefin
 # Removed duplicate create_instance endpoint - using authenticated one above
 
 
+async def _ids_de_clientes_que_coinciden(q: Optional[str]) -> List[str]:
+    """
+    Clientes cuyo nombre o correo casa con el texto, para poder buscar trámites
+    por el nombre del ciudadano.
+
+    Devuelve lista vacía si no hay texto o no hay coincidencias; la búsqueda
+    sigue funcionando por los demás campos.
+    """
+    texto = (q or "").strip()
+    if not texto:
+        return []
+    import re as _re
+
+    from ...models.customer import Customer
+
+    patron = {"$regex": _re.escape(texto), "$options": "i"}
+    clientes = await Customer.find(
+        {"$or": [{"full_name": patron}, {"email": patron}]}
+    ).limit(200).to_list()
+    return [str(c.id) for c in clientes]
+
+
 @router.get("/", response_model=InstanceListResponse)
 @router.get("", response_model=InstanceListResponse)
 async def list_instances(
@@ -517,17 +539,23 @@ async def list_instances(
     workflow_id: Optional[str] = None,
     user_id: Optional[str] = None,
     status: Optional[InstanceStatus] = None,
-    instance_id: Optional[str] = Query(None, description="Search by instance ID (partial match)")
+    instance_id: Optional[str] = Query(None, description="Search by instance ID (partial match)"),
+    q: Optional[str] = Query(None, description="Texto libre: identificador, nombre o correo del ciudadano")
 ):
     """List workflow instances with filtering and pagination"""
-    # Build query
-    query = {}
-    if workflow_id:
-        query["workflow_id"] = workflow_id
+    from ...services.instance_search import construir_consulta
+
+    # `q` busca además por nombre y correo del ciudadano. Ese dato no vive en la
+    # instancia —el listado lo resuelve después con `enrich_instances`—, así que
+    # aquí se traduce primero a ids de cliente.
+    query = construir_consulta(
+        q=q,
+        user_ids=await _ids_de_clientes_que_coinciden(q),
+        status=status.value if hasattr(status, "value") else status,
+        workflow_id=workflow_id,
+    )
     if user_id:
         query["user_id"] = {"$regex": user_id, "$options": "i"}
-    if status:
-        query["status"] = status
     if instance_id:
         query["instance_id"] = {"$regex": instance_id, "$options": "i"}
     
