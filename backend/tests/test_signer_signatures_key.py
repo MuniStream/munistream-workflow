@@ -113,3 +113,27 @@ def test_parent_context_malformado_no_rompe():
     for basura in ("no es dict", None, {"firmas": "no es lista"}, {}):
         firmas = _op().collect_signatures(_ctx(_parent_context=basura), CADENA)
         assert [f["task_id"] for f in firmas] == ["firma_validacion"]
+
+
+def test_el_firmante_del_objeto_nunca_contradice_al_de_la_clave_plana():
+    """Cuando no se resuelve quién firmó, la clave plana cae a "Funcionario
+    autorizado" pero el objeto quedaba en None, porque leía del context un valor
+    que todavía no existía. El oficio imprimía un guion donde la evidencia decía
+    que sí había firmante."""
+    op = _op()
+    ctx = _ctx()
+    firmas = op.collect_signatures(ctx, CADENA, signer_name=None,
+                                   respaldo_firmante="Funcionario autorizado")
+    assert firmas[0]["signer"] == "Funcionario autorizado"
+
+
+def test_el_firmante_resuelto_gana_sobre_el_respaldo():
+    firmas = _op().collect_signatures(_ctx(), CADENA, signer_name="LAURA LÓPEZ",
+                                      respaldo_firmante="Funcionario autorizado")
+    assert firmas[0]["signer"] == "LAURA LÓPEZ"
+
+
+def test_execute_pasa_el_respaldo_del_firmante():
+    import inspect
+    fuente = inspect.getsource(SignerOperator.execute_async)
+    assert "respaldo_firmante=" in fuente, "execute_async debe pasar el respaldo"
