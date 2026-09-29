@@ -303,6 +303,11 @@ class SignerOperator(BaseOperator):
                     signer_name=signer_name,
                     signed_at=firmado_en,
                     cert_subject=cert_subject,
+                    # El mismo valor que llevó la clave plana: si no se pudo
+                    # resolver quién firmó, la evidencia del documento y la
+                    # clave suelta deben decir lo mismo, nunca una un nombre y
+                    # la otra un nulo.
+                    respaldo_firmante=output_data[f"{self.task_id}_signer"],
                 )
 
                 # Objeto de firma completo, mapeable de una pieza a la
@@ -503,6 +508,7 @@ class SignerOperator(BaseOperator):
         signer_name: Optional[str] = None,
         signed_at: Optional[str] = None,
         cert_subject: Optional[str] = None,
+        respaldo_firmante: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Devuelve la lista de firmas del trámite con la de esta tarea incluida.
 
@@ -528,7 +534,7 @@ class SignerOperator(BaseOperator):
             **self.build_signature_object(
                 context,
                 signature_data,
-                signer_name=signer_name,
+                signer_name=signer_name or respaldo_firmante,
                 signed_at=signed_at,
                 cert_subject=cert_subject,
             ),
