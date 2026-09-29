@@ -71,10 +71,9 @@ async def download_apple_wallet(
         if not pkpass_data:
             raise HTTPException(status_code=500, detail="Failed to generate Apple Wallet pass")
 
-        # Create filename
-        entity_type = entity.entity_type.lower().replace(' ', '_')
-        entity_id_short = entity.entity_id[:8].lower() if entity.entity_id else 'unknown'
-        filename = f"{entity_type}_{entity_id_short}.pkpass"
+        # `entity_id` ya es `{entity_type}_{uuid8}`: componerlo otra vez con
+        # `entity_id[:8]` producía nombres como `pescador_rnpa_pescador.pkpass`.
+        filename = f"{entity.entity_id}.pkpass"
 
         # Return as streaming response
         return StreamingResponse(
