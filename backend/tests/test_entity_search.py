@@ -85,3 +85,34 @@ def test_varios_tipos_a_la_vez():
     consulta = construir_consulta(entity_type=["permiso_pesca_comercial", "guia_pesca"])
 
     assert consulta["entity_type"] == {"$in": ["permiso_pesca_comercial", "guia_pesca"]}
+
+
+def test_los_filtros_del_requisito_se_aplican():
+    """
+    Los pickers declaran `filters` como `{"entity_subtype": "permiso_simplificado"}`.
+    Se siguen las mismas reglas que `EntityService.find_entities`: una clave sin
+    punto se asume campo de `data`.
+    """
+    consulta = construir_consulta(filtros={"entity_subtype": "permiso_simplificado"})
+
+    assert consulta["data.entity_subtype"] == "permiso_simplificado"
+
+
+def test_un_filtro_con_ruta_explicita_se_respeta():
+    consulta = construir_consulta(filtros={"data.tipo": "mayor"})
+
+    assert consulta["data.tipo"] == "mayor"
+    assert "data.data.tipo" not in consulta
+
+
+def test_un_filtro_con_varios_valores_usa_in():
+    consulta = construir_consulta(filtros={"tipo": ["mayor", "menor"]})
+
+    assert consulta["data.tipo"] == {"$in": ["mayor", "menor"]}
+
+
+def test_los_filtros_conviven_con_la_busqueda():
+    consulta = construir_consulta(q="abc", filtros={"tipo": "mayor"})
+
+    assert "$or" in consulta
+    assert consulta["data.tipo"] == "mayor"

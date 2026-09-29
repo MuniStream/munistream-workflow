@@ -39,7 +39,7 @@ class WorkflowService:
         start_step_id = root_tasks[0].task_id if root_tasks else None
 
         if existing:
-            existing.name = dag.description or dag.dag_id
+            existing.name = dag.name or dag.description or dag.dag_id
             existing.description = dag.description
             existing.version = dag.version
             existing.start_step_id = start_step_id
@@ -51,7 +51,7 @@ class WorkflowService:
         else:
             workflow_def = WorkflowDefinition(
                 workflow_id=dag.dag_id,
-                name=dag.description or dag.dag_id,
+                name=dag.name or dag.description or dag.dag_id,
                 description=dag.description,
                 version=dag.version,
                 status="active" if dag.status.value == "active" else "draft",

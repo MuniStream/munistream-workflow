@@ -43,6 +43,7 @@ def construir_consulta(
     entity_type: Optional[Union[str, List[str]]] = None,
     status: Optional[str] = None,
     owner_user_id: Optional[str] = None,
+    filtros: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Consulta de Mongo para el listado de entidades del admin."""
     consulta: Dict[str, Any] = {}
@@ -57,6 +58,14 @@ def construir_consulta(
 
     if status:
         consulta["status"] = status
+
+    # Los pickers declaran `filters` como `{"entity_subtype": "..."}`. Se siguen
+    # las mismas reglas que `EntityService.find_entities`: una clave sin punto se
+    # asume campo de `data`, para no obligar a cada workflow a escribir el
+    # prefijo.
+    for clave, valor in (filtros or {}).items():
+        destino = clave if "." in clave else f"data.{clave}"
+        consulta[destino] = {"$in": valor} if isinstance(valor, list) else valor
 
     texto = (q or "").strip()
     if texto:

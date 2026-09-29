@@ -360,24 +360,25 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         """Rebuild a lightweight entity proxy from a serialized snapshot."""
         return SimpleNamespace(**raw)
 
-    def _store_discovery_cache(
-        self,
-        context: Dict[str, Any],
-        requirement_entities: Dict[str, List],
-    ) -> None:
-        context[self._discovery_cache_key] = {
-            key: [self._serialize_entity(e) for e in entities]
-            for key, entities in requirement_entities.items()
-        }
+    def _store_discovery_cache(self, context: Dict[str, Any], requirement_entities: Any) -> None:
+        """
+        Ya no se guarda catálogo en el contexto.
 
-    def _load_cached_discovery(self, context: Dict[str, Any]) -> Dict[str, List]:
-        cached = context.get(self._discovery_cache_key)
-        if cached is None:
-            return None
-        return {
-            key: [self._hydrate_cached_entity(raw) for raw in entities]
-            for key, entities in cached.items()
-        }
+        Guardaba la cartera entera del ciudadano —con el `data` de cada
+        entidad— dentro del documento de la instancia, y solo se invalidaba al
+        validar selecciones. Nunca en el camino "faltan entidades", sin TTL y
+        con el picker esperando por evento: quien creaba la entidad que le
+        faltaba y volvía, releía el snapshot viejo y seguía viendo que le
+        faltaba. Para siempre.
+
+        Se conserva la firma porque `execute_async` la llama, y se limpia
+        cualquier caché que haya quedado de antes.
+        """
+        context.pop(self._discovery_cache_key, None)
+
+    def _load_cached_discovery(self, context: Dict[str, Any]) -> None:
+        """Siempre None: el descubrimiento se rehace, nunca se relee."""
+        return None
 
     def _invalidate_discovery_cache(self, context: Dict[str, Any]) -> None:
         context.pop(self._discovery_cache_key, None)
@@ -679,8 +680,9 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
 
     def _generate_entity_selection_form(self, requirement_entities: Dict[str, List], requirements: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate form for user to select specific entities"""
-        form_config = self._generate_selection_form(requirement_entities, requirements)
-        self._last_form_config = form_config
+        form_config = self._generate_selection_form(
+            {k: len(v or []) for k, v in (requirement_entities or {}).items()}
+        )
         return form_config
 
     def _validate_selections(self, context: Dict[str, Any]) -> TaskResult:
@@ -769,7 +771,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                     status=TaskStatus.WAITING,
                     data={
                         "waiting_for": "entity_selection",
-                        "form_config": self._last_form_config,
+                        "form_config": self._generate_selection_form({}),
                         "validation_errors": validation_errors,
                         "previous_selections": selections
                     }
@@ -787,11 +789,13 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             )
 
         except Exception as e:
-            error_msg = f"Selection validation failed: {str(e)}"
-            self.state.error_message = error_msg
-            return TaskResult(
-                status=TaskStatus.FAILED,
-                error=error_msg
+            # Nunca FAILED: mata la instancia y deja al ciudadano sin salida por
+            # una entrada malformada. Se vuelve a pedir explicando el problema.
+            logger.error(f"Falló la validación de la selección: {e}")
+            return self._rechazar_seleccion(
+                {},
+                errores=["No pudimos registrar tu selección. Vuelve a elegir e inténtalo de nuevo."],
+                previas={},
             )
 
     async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
@@ -923,85 +927,106 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             "is_notification": True,  # Mark as notification, not input form
         }
 
-    def _generate_selection_form(self, requirement_entities: Dict[str, List], requirements: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate form configuration for entity selection"""
+    def _generate_selection_form(self, conteos: Dict[str, int]) -> Dict[str, Any]:
+        """
+        Descriptor de los requisitos. **Sin las candidatas.**
 
-        # Build form sections for each requirement
-        form_sections = []
+        Antes metía cada entidad completa aquí dentro, y el executor mezcla esta
+        salida al contexto que Mongo persiste: con una entidad pesando ~107 KB de
+        media, unas decenas bastaban para empujar la instancia contra el tope de
+        16 MB y dejarla atorada. Ahora el portal las pide paginadas a
+        `/public/instances/{id}/picker/{store_as}`.
 
-        for req in requirements:
-            entity_type = req["entity_type"]
+        `por_pantallas` le dice al portal que recorra los requisitos de uno en
+        uno en vez de apilarlos: hay trámites que piden tres tipos a la vez y
+        verlos juntos es lo que vuelve ilegible el primer paso.
+        """
+        campos = []
+        for req in self.requirements:
+            store_as = req.get("store_as") or f"{req['entity_type']}_entities"
             min_count = req.get("min_count", 1)
-            # Use store_as as the key, consistent with _discover_available_entities
-            req_key = req.get("store_as", f"{entity_type}_entities")
-            entities = requirement_entities.get(req_key, [])
-
-            # Only skip if there are no entities AND it's a required field
-            if not entities and min_count > 0:
-                continue
             max_count = req.get("max_count", min_count)
-            display_title = req.get("display_title", f"Select {entity_type.title()}")
-            display_fields = req.get("display_fields", ["name"])
-
-            # Create entity options for this requirement
-            entity_options = []
-            for entity in entities:
-                # Build display label from display_fields
-                label_parts = []
-                for field in display_fields:
-                    if hasattr(entity, field):
-                        value = getattr(entity, field)
-                    elif isinstance(entity.data, dict) and field in entity.data:
-                        value = entity.data[field]
-                    else:
-                        continue
-
-                    if value:
-                        label_parts.append(str(value))
-
-                label = " - ".join(label_parts) if label_parts else entity.name
-
-                entity_options.append({
-                    "value": entity.entity_id,
-                    "label": label,
-                    "entity_data": {
-                        "entity_id": entity.entity_id,
-                        "entity_type": entity.entity_type,
-                        "name": entity.name,
-                        "data": entity.data
-                    }
-                })
-
-            # Use store_as as field name to match validation logic
-            field_name = req.get("store_as")
-
-            # Create form field
-            form_field = {
-                "name": field_name,
-                "label": display_title,
+            campos.append({
+                "name": store_as,
                 "type": "entity_multi_select" if max_count > 1 else "entity_select",
-                "required": min_count > 0,
+                "label": req.get("display_title") or req["entity_type"].title(),
+                "entity_type": req.get("entity_types") or req["entity_type"],
+                "display_fields": req.get("display_fields") or ["name"],
                 "min_count": min_count,
                 "max_count": max_count,
-                "options": entity_options,
-                "entity_type": entity_type,
-                "display_fields": req.get("display_fields", []),
-                "description": f"Select {min_count}-{max_count} item(s)" if min_count != max_count else f"Select {min_count} item(s)"
-            }
+                "required": min_count > 0,
+                "selection_mode": req.get("selection_mode", "individual"),
+                "total": (conteos or {}).get(store_as, 0),
+                "info": req.get("info"),
+            })
 
-            form_sections.append(form_field)
-
-        # Build complete form configuration
-        # Get title and description from kwargs or use defaults
-        title = self.kwargs.get("title", "Seleccionar Documentos Requeridos")
-        description = self.kwargs.get("description", "Elige los documentos específicos necesarios para este trámite")
-        submit_text = self.kwargs.get("submit_button_text", "Continuar con Documentos Seleccionados")
-
-        form_config = {
-            "title": title,
-            "description": description,
-            "fields": form_sections,
-            "submit_button_text": submit_text
+        return {
+            "title": self.kwargs.get("title", "Seleccionar Documentos Requeridos"),
+            "description": self.kwargs.get(
+                "description", "Elige los documentos específicos necesarios para este trámite"
+            ),
+            "submit_button_text": self.kwargs.get(
+                "submit_button_text", "Continuar con Documentos Seleccionados"
+            ),
+            "one_per_screen": True,
+            "fields": campos,
         }
 
-        return form_config
+    def _rechazar_seleccion(
+        self,
+        conteos: Dict[str, int],
+        errores: List[str],
+        previas: Dict[str, Any],
+    ) -> TaskResult:
+        """
+        Vuelve a pedir, reconstruyendo el formulario.
+
+        Antes se releía de `self._last_form_config`. El operador es un singleton
+        compartido entre instancias —`DAGInstance` guarda el DAG sin copiarlo—,
+        así que ese atributo mezclaba el formulario de un ciudadano con el de
+        otro, y si no existía (un reinicio entre el pintado y el envío) el paso
+        terminaba en FAILED, que mata la instancia.
+        """
+        # Dentro del `form_config`, no al lado: `input_form` es literalmente el
+        # form_config, así que lo que quede en la raíz del TaskResult no llega
+        # nunca al portal. Es la razón por la que hoy el ciudadano vuelve a la
+        # misma pantalla sin saber por qué se le rechazó.
+        form = self._generate_selection_form(conteos)
+        form["validation_errors"] = errores
+        form["previous_selections"] = previas or {}
+
+        return TaskResult(
+            status=TaskStatus.WAITING,
+            data={
+                "waiting_for": "entity_selection",
+                "form_config": form,
+                "validation_errors": errores,
+                "previous_selections": previas or {},
+            },
+        )
+
+    def _fusionar_selecciones(
+        self, context: Dict[str, Any], nuevas: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Junta lo que llega de una pantalla con lo ya elegido en las anteriores.
+
+        Con un tipo por pantalla, cada una envía por separado. Sin fusionar, un
+        ciudadano que abandona a media captura y vuelve al día siguiente empieza
+        de cero.
+        """
+        fusionadas = dict((context or {}).get("selected_entities") or {})
+        for store_as, ids in (nuevas or {}).items():
+            fusionadas[store_as] = ids
+        return fusionadas
+
+    def _faltan_requisitos(self, selecciones: Dict[str, Any]) -> List[str]:
+        """`store_as` de los requisitos obligatorios que aún no se han cubierto."""
+        pendientes = []
+        for req in self.requirements:
+            if req.get("min_count", 1) <= 0:
+                continue
+            store_as = req.get("store_as") or f"{req['entity_type']}_entities"
+            if len((selecciones or {}).get(store_as) or []) < req.get("min_count", 1):
+                pendientes.append(store_as)
+        return pendientes

@@ -59,7 +59,15 @@ class EntityService:
         """
         # Generate unique entity ID
         entity_id = f"{entity_type}_{uuid.uuid4().hex[:8]}"
-        
+
+        # La vigencia se fija al emitir, leyéndola del `data` que el workflow ya
+        # arma (`vigencia_anos`, o un `valid_until` explícito). Así los workflows
+        # que ya la declaran empiezan a guardar la fecha sin cambiar ni uno, y
+        # deja de haber que deducirla en cada lectura.
+        from .entity_validity import vencimiento_inicial
+
+        kwargs.setdefault("valid_until", vencimiento_inicial(data))
+
         # Create entity
         entity = LegalEntity(
             entity_id=entity_id,

@@ -204,7 +204,16 @@ def test_schedule_wakeup_polling_paused_uses_min_interval():
     assert 14 <= delay <= 16
 
 
-def test_entity_picker_discovery_cache_round_trip():
+def test_el_picker_no_guarda_catalogo_en_el_contexto():
+    """
+    El caché de descubrimiento se eliminó. Guardaba la cartera entera del
+    ciudadano dentro del documento de la instancia —con el `data` de cada
+    entidad, ~107 KB de media— y solo se invalidaba al validar selecciones:
+    nunca en el camino "faltan entidades". Quien creaba la entidad que le
+    faltaba y volvía, releía el snapshot viejo y seguía viendo que le faltaba.
+
+    Esta prueba guarda las dos mitades: no se escribe, y nunca se relee.
+    """
     from app.workflows.operators.entity_picker_operator import EntityPickerOperator
 
     op = object.__new__(EntityPickerOperator)
@@ -213,19 +222,16 @@ def test_entity_picker_discovery_cache_round_trip():
     entity = SimpleNamespace(
         entity_id="e1", entity_type="document", name="Doc", data={"k": "v"}
     )
-    discovery = {"docs": [entity]}
 
     context = {}
-    op._store_discovery_cache(context, discovery)
-    assert op._discovery_cache_key in context
-
-    rehydrated = op._load_cached_discovery(context)
-    assert rehydrated["docs"][0].entity_id == "e1"
-    assert rehydrated["docs"][0].data == {"k": "v"}
-
-    op._invalidate_discovery_cache(context)
+    op._store_discovery_cache(context, {"docs": [entity]})
     assert op._discovery_cache_key not in context
-    assert op._load_cached_discovery({}) is None
+
+    # Un caché dejado por la versión anterior se ignora y se limpia.
+    viejo = {op._discovery_cache_key: {"docs": [{"entity_id": "e1"}]}}
+    assert op._load_cached_discovery(viejo) is None
+    op._invalidate_discovery_cache(viejo)
+    assert op._discovery_cache_key not in viejo
 
 
 def test_schedule_wakeup_running_uses_short_throttle():

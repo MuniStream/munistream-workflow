@@ -124,7 +124,7 @@ async def sync_plugin_dags():
                 # Create new workflow definition for API access
                 workflow_def = WorkflowDefinition(
                     workflow_id=dag_id,
-                    name=dag.description or dag_id,
+                    name=dag.name or dag.description or dag_id,
                     description=dag.description,
                     version="1.0.0",
                     status="active",
@@ -134,11 +134,26 @@ async def sync_plugin_dags():
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )
-                
+
                 await workflow_def.save()
                 print(f"  ✅ Synced DAG to database: {dag_id}")
                 synced_count += 1
-            
+            else:
+                # El código es la fuente de verdad del nombre oficial y la
+                # descripción. Sin este else, una definición creada con un valor
+                # viejo (p. ej. el `name` con el texto de la descripción) se
+                # quedaba rancia para siempre y la lista del admin mostraba la
+                # descripción en vez del nombre oficial del trámite.
+                nuevo_nombre = dag.name or dag.description or dag_id
+                if existing.name != nuevo_nombre or existing.description != dag.description or existing.tags != dag.tags:
+                    existing.name = nuevo_nombre
+                    existing.description = dag.description
+                    existing.tags = dag.tags
+                    existing.updated_at = datetime.utcnow()
+                    await existing.save()
+                    print(f"  ♻️ Updated DAG in database: {dag_id}")
+                    synced_count += 1
+
         except Exception as e:
             print(f"  ⚠️ Failed to sync DAG {dag_id}: {e}")
     
