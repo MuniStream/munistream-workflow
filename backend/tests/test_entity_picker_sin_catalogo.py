@@ -234,3 +234,22 @@ def test_un_requisito_opcional_no_bloquea():
     )
 
     assert picker._faltan_requisitos({"y_ids": ["y1"]}) == []
+
+
+def test_los_errores_viajan_dentro_del_formulario():
+    """
+    `input_form` es literalmente el `form_config`: lo que quede en la raíz del
+    TaskResult no llega al portal. Por eso el motivo del rechazo y lo ya elegido
+    van dentro, no al lado.
+    """
+    picker = _picker()
+
+    resultado = picker._rechazar_seleccion(
+        _conteos(pescador_rnpa_ids=3, embarcacion_ids=120),
+        errores=["Selecciona al menos 1 Embarcaciones"],
+        previas={"pescador_rnpa_ids": ["p1"]},
+    )
+
+    form = resultado.data["form_config"]
+    assert form["validation_errors"] == ["Selecciona al menos 1 Embarcaciones"]
+    assert form["previous_selections"] == {"pescador_rnpa_ids": ["p1"]}

@@ -987,11 +987,19 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         otro, y si no existía (un reinicio entre el pintado y el envío) el paso
         terminaba en FAILED, que mata la instancia.
         """
+        # Dentro del `form_config`, no al lado: `input_form` es literalmente el
+        # form_config, así que lo que quede en la raíz del TaskResult no llega
+        # nunca al portal. Es la razón por la que hoy el ciudadano vuelve a la
+        # misma pantalla sin saber por qué se le rechazó.
+        form = self._generate_selection_form(conteos)
+        form["validation_errors"] = errores
+        form["previous_selections"] = previas or {}
+
         return TaskResult(
             status=TaskStatus.WAITING,
             data={
                 "waiting_for": "entity_selection",
-                "form_config": self._generate_selection_form(conteos),
+                "form_config": form,
                 "validation_errors": errores,
                 "previous_selections": previas or {},
             },
