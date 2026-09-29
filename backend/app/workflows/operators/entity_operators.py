@@ -10,37 +10,62 @@ from .base import BaseOperator, TaskResult, TaskStatus
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity
 from ...services.visualizers.visualizer_factory import VisualizerFactory
+from ...services.entity_naming import resolver_nombre
 
 
 def _resolve_context_path(context: Any, path: str) -> Any:
-    """Resolve a dot-path against context, supporting numeric list indices.
+    """Resolve a dot-path against context.
 
-    Mirrors ConfirmationOperator._resolve_path so paths such as
-    '_selected_entities_data.embarcacion_ids.0.nombre' resolve into a list of
-    selected-entity snapshots. Descends dicts by key and lists by integer index.
-    Returns None if any segment fails to resolve.
+    Soporta:
+      - índices numéricos de lista: `...embarcacion_ids.0.nombre` (el primero).
+      - un comodín `*` (o `[]`) que RECORRE la lista y junta los valores del resto
+        del path para cada elemento, DEDUPLICADOS y conservando el orden de
+        aparición: `...embarcacion_ids.*.matricula` -> ["ABC-1", "XYZ-9"].
+        Así, cuando se elige más de una entidad, el campo no se queda con el de la
+        primera; guarda todas las matrículas (o nombres, o lo que sea) distintas.
+
+    Devuelve None si algún segmento no resuelve. Mirrors ConfirmationOperator.
     """
     if not path:
         return None
-    current: Any = context
-    for part in path.split("."):
-        if isinstance(current, list):
-            try:
-                idx = int(part)
-            except (TypeError, ValueError):
-                return None
-            if 0 <= idx < len(current):
-                current = current[idx]
-            else:
-                return None
-        elif isinstance(current, dict):
-            if part in current:
-                current = current[part]
-            else:
-                return None
-        else:
+    return _resolve_context_parts(context, path.split("."))
+
+
+def _resolve_context_parts(current: Any, parts: List[str]) -> Any:
+    if not parts:
+        return current
+    part, rest = parts[0], parts[1:]
+
+    # Comodín: recorrer la lista y recolectar valores únicos del resto del path.
+    if part in ("*", "[]"):
+        if not isinstance(current, list):
             return None
-    return current
+        unicos: List[Any] = []
+        for item in current:
+            valor = _resolve_context_parts(item, rest)
+            if valor is None:
+                continue
+            candidatos = valor if isinstance(valor, list) else [valor]
+            for c in candidatos:
+                if c not in unicos:
+                    unicos.append(c)
+        return unicos
+
+    if isinstance(current, list):
+        try:
+            idx = int(part)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(current):
+            return _resolve_context_parts(current[idx], rest)
+        return None
+
+    if isinstance(current, dict):
+        if part in current:
+            return _resolve_context_parts(current[part], rest)
+        return None
+
+    return None
 
 
 class EntityCreationOperator(BaseOperator):
@@ -267,31 +292,20 @@ class EntityCreationOperator(BaseOperator):
             if self.entity_subtype:
                 entity_data["entity_subtype"] = self.entity_subtype
 
-            # Get entity name - can be from entity_data, context or static
-            entity_name = None
-            if self.name_source in entity_data:
-                entity_name = entity_data[self.name_source]
-                print(f"   Found entity name in entity_data: {entity_name}")
-            else:
-                entity_name = self._extract_value_from_context(context, self.name_source)
-                if entity_name is not None:
-                    print(f"   Found entity name in context: {entity_name}")
-                else:
-                    # Resolve template variables like {{selected_clave.clave_catastral}}
-                    entity_name = self._resolve_template_string(context, self.name_source)
-                    print(f"   Resolved entity name: {entity_name}")
-
-            # Guard: si name_source es una RUTA de contexto que no resolvió
-            # (p. ej. "_selected_entities_data.embarcacion_ids.0.nombre" cuando la
-            # entidad no trae ese campo), no usar la ruta literal como nombre.
-            # Se cae a un valor seguro (otro campo de la entidad o el entity_type).
-            if isinstance(entity_name, str) and entity_name == self.name_source \
-                    and "{{" not in self.name_source \
-                    and ("." in self.name_source and " " not in self.name_source):
-                fallback = (entity_data.get("nombre") or entity_data.get("name")
-                            or entity_data.get("folio") or self.entity_type)
-                print(f"   ⚠️ name_source '{self.name_source}' no resolvió; usando '{fallback}'")
-                entity_name = fallback
+            # Nombre de la entidad. La regla —y el porqué— viven en
+            # `services/entity_naming.py`: lo que sale nunca puede parecer código.
+            # Aquí se resolvía a mano y el fallo llegaba a la cartera del ciudadano
+            # como "_selected_entities_data.embarcacion_ids.0.nombre"; la guarda
+            # que se añadió después cubría la ruta pelada pero excluía
+            # explícitamente las plantillas `{{ }}`, que fallan igual.
+            entity_name = resolver_nombre(
+                self.name_source,
+                context=context,
+                entity_data=entity_data,
+                entity_type=self.entity_type,
+                extraer=self._extract_value_from_context,
+            )
+            print(f"   Nombre de la entidad: {entity_name}")
 
             # Adjuntar la lista de campos del usuario al display config (sin pisar
             # una lista explícita si el trámite ya la definió). El documento oficial
