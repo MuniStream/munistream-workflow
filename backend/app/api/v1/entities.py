@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import io
 
 from app.services.auth_service import get_current_user_optional
+from app.auth.provider import require_permission
 from app.models.user import UserModel as User
 from app.services.entity_service import EntityService
 from app.services.pdf_generation import EntityReportGenerator
@@ -455,3 +456,121 @@ async def fetch_entity_file(
             status_code=500,
             detail=f"Failed to fetch file: {str(e)}"
         )
+
+# ---------------------------------------------------------------------------
+# Búsqueda de entidades para el personal del admin
+#
+# Las entidades solo se consultaban desde el portal ciudadano, siempre acotadas
+# a su dueño, así que el personal no podía encontrar una embarcación o un
+# permiso sin conocer de antemano de quién era.
+#
+# Estas rutas van al final del archivo a propósito: `/{entity_id}` ensombrecería
+# a `/types` y `/rules/...` si se declarara antes que ellas.
+# ---------------------------------------------------------------------------
+
+@router.get("/")
+async def search_entities(
+    q: Optional[str] = Query(None, description="Texto libre: nombre, identificador, RFC, CURP, RNPA, matrícula, folio"),
+    entity_type: Optional[str] = Query(None, description="Filtra por tipo de entidad"),
+    status: Optional[str] = Query(None, description="Filtra por estado (active, revoked, ...)"),
+    owner_user_id: Optional[str] = Query(None, description="Acota a un titular"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
+):
+    """Busca entidades en todo el tenant. Requiere rol de personal."""
+    from app.models.legal_entity import LegalEntity
+    from app.services.entity_search import construir_consulta
+
+    consulta = construir_consulta(
+        q=q, entity_type=entity_type, status=status, owner_user_id=owner_user_id
+    )
+
+    total = await LegalEntity.find(consulta).count()
+    salto = (page - 1) * page_size
+    encontradas = (
+        await LegalEntity.find(consulta)
+        .sort([("created_at", -1)])
+        .skip(salto)
+        .limit(page_size)
+        .to_list()
+    )
+
+    return {
+        "entities": [_resumen_de_entidad(e) for e in encontradas],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "tipos": await _tipos_disponibles(q, status, owner_user_id),
+    }
+
+
+async def _tipos_disponibles(
+    q: Optional[str], status: Optional[str], owner_user_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """
+    Tipos de entidad con su conteo, para las opciones del filtro.
+
+    Se calculan sobre la búsqueda **sin** el filtro de tipo: si se calcularan con
+    él, al elegir un tipo desaparecerían los demás del selector y no habría
+    forma de cambiar de opción sin limpiar la búsqueda.
+
+    No se usa `/entities/types`, que resuelve otra cosa (las reglas de
+    validación de cada tipo) y hoy responde 500 por su propio servicio.
+    """
+    from app.models.legal_entity import LegalEntity
+    from app.services.entity_search import construir_consulta
+
+    base = construir_consulta(q=q, status=status, owner_user_id=owner_user_id)
+    agregado = await LegalEntity.get_motor_collection().aggregate([
+        {"$match": base},
+        {"$group": {"_id": "$entity_type", "n": {"$sum": 1}}},
+        {"$sort": {"n": -1}},
+    ]).to_list(length=200)
+    return [{"entity_type": t["_id"], "total": t["n"]} for t in agregado if t["_id"]]
+
+
+def _resumen_de_entidad(entidad) -> Dict[str, Any]:
+    """
+    Lo que un listado necesita para ser legible, y nada más.
+
+    Se omite `data` entero: ahí viven imágenes en base64 de megas por entidad
+    (ver el histórico de lentitud de "Mis Entidades" en el portal). El listado
+    solo lleva los identificadores que se muestran en la tabla; el detalle
+    completo se pide por entidad.
+    """
+    datos = entidad.data or {}
+    identificadores = {
+        c: datos.get(c)
+        for c in ("rfc", "curp", "rnpa", "matricula", "folio")
+        if datos.get(c)
+    }
+    return {
+        "entity_id": entidad.entity_id,
+        "entity_type": entidad.entity_type,
+        "name": entidad.name,
+        "status": entidad.status,
+        "verified": entidad.verified,
+        "owner_user_id": entidad.owner_user_id,
+        "created_at": entidad.created_at,
+        "identificadores": identificadores,
+    }
+
+
+@router.get("/{entity_id}")
+async def get_entity_for_staff(
+    entity_id: str,
+    current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
+):
+    """Detalle de una entidad para el personal, sin acotar al titular."""
+    from app.models.legal_entity import LegalEntity
+
+    entidad = await LegalEntity.find_one(LegalEntity.entity_id == entity_id)
+    if not entidad:
+        raise HTTPException(status_code=404, detail="Entidad no encontrada")
+
+    resumen = _resumen_de_entidad(entidad)
+    resumen["data"] = entidad.data or {}
+    resumen["created_by_workflow"] = entidad.created_by_workflow
+    resumen["relationships"] = [r.model_dump() for r in (entidad.relationships or [])]
+    return resumen
