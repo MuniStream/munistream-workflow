@@ -84,3 +84,32 @@ def test_execute_publica_la_clave():
     import inspect
     fuente = inspect.getsource(SignerOperator.execute_async)
     assert "self.signatures_key" in fuente, "execute_async debe publicar la clave configurada"
+
+
+def test_acumula_sobre_las_firmas_del_padre():
+    """Un trámite con dos validaciones admin firma en DOS workflows hijo.
+
+    El hijo recibe el contexto del padre anidado en `_parent_context`, y `firmas`
+    no viaja entre los campos planos que pasa el WorkflowStartOperator. Sin mirar
+    ahí, el segundo firmante arrancaría con la lista vacía y al volver al padre
+    PISARÍA la firma del primero: el oficio saldría con una sola firma.
+    """
+    primera = {"task_id": "firma_validacion", "signer": "JURÍDICO", "signature": "AAA"}
+    ctx = _ctx(_parent_context={"firmas": [primera]})
+    firmas = _op(task_id="firma_dictamen_tecnico").collect_signatures(ctx, CADENA)
+    assert [f["task_id"] for f in firmas] == ["firma_validacion", "firma_dictamen_tecnico"]
+
+
+def test_la_lista_propia_gana_sobre_la_del_padre():
+    """Si el hijo ya tiene la lista al alcance, esa manda: es la más reciente."""
+    padre = {"task_id": "firma_vieja", "signer": "VIEJO", "signature": "AAA"}
+    propia = {"task_id": "firma_validacion", "signer": "ACTUAL", "signature": "BBB"}
+    ctx = _ctx(firmas=[propia], _parent_context={"firmas": [padre]})
+    firmas = _op(task_id="firma_dictamen_tecnico").collect_signatures(ctx, CADENA)
+    assert [f["task_id"] for f in firmas] == ["firma_validacion", "firma_dictamen_tecnico"]
+
+
+def test_parent_context_malformado_no_rompe():
+    for basura in ("no es dict", None, {"firmas": "no es lista"}, {}):
+        firmas = _op().collect_signatures(_ctx(_parent_context=basura), CADENA)
+        assert [f["task_id"] for f in firmas] == ["firma_validacion"]

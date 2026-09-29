@@ -511,9 +511,17 @@ class SignerOperator(BaseOperator):
         ya firmó —el operador se re-ejecuta al reanudar— reemplaza su entrada en
         lugar de duplicarla.
         """
-        previas = context.get(self.signatures_key) or []
-        if not isinstance(previas, list):
-            previas = []
+        previas = context.get(self.signatures_key)
+        if not isinstance(previas, list) or not previas:
+            # Un trámite puede firmarse en varios workflows hijo (p. ej. una
+            # validación jurídica y una técnica). El hijo recibe el contexto del
+            # padre anidado en `_parent_context`, y `firmas` no viaja entre los
+            # campos planos que pasa el WorkflowStartOperator: sin mirar ahí, el
+            # segundo firmante arrancaría con la lista vacía y al volver al padre
+            # pisaría la firma del primero.
+            padre = context.get("_parent_context")
+            heredadas = padre.get(self.signatures_key) if isinstance(padre, dict) else None
+            previas = heredadas if isinstance(heredadas, list) else []
 
         firma = {
             "task_id": self.task_id,
