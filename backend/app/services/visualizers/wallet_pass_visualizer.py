@@ -29,6 +29,7 @@ except ImportError:
 
 from app.models.legal_entity import LegalEntity
 from app.core.config import settings
+from app.services.entity_verification import folio_corto
 
 
 class WalletPassVisualizer:
@@ -58,16 +59,20 @@ class WalletPassVisualizer:
         }
 
     def get_nfc_url(self, entity: LegalEntity) -> str:
-        """Generate NFC verification URL following /verify/{entity_id}/nfc pattern"""
-        entity_type = entity.entity_type.lower().replace(' ', '_')
-        entity_id_short = entity.entity_id[:8].lower() if entity.entity_id else 'unknown'
-        return f"{settings.FRONTEND_BASE_URL}/verify/{entity_type}_{entity_id_short}/nfc"
+        """Liga de verificación por NFC: /verify/{entity_id}/nfc"""
+        return f"{settings.FRONTEND_BASE_URL}/verify/{entity.entity_id}/nfc"
 
     def get_verification_url(self, entity: LegalEntity) -> str:
-        """Generate verification URL following /verify/{entity_id} pattern"""
-        entity_type = entity.entity_type.lower().replace(' ', '_')
-        entity_id_short = entity.entity_id[:8].lower() if entity.entity_id else 'unknown'
-        return f"{settings.FRONTEND_BASE_URL}/verify/{entity_type}_{entity_id_short}"
+        """
+        Liga de verificación del documento: /verify/{entity_id}
+
+        Se armaba como `f"{entity_type}_{entity_id[:8]}"` creyendo que `entity_id`
+        era solo el uuid. Pero los ids ya son `{entity_type}_{uuid8}`, así que esos
+        8 caracteres recortaban el prefijo del tipo: `pescador_rnpa_a1b2c3d4`
+        producía `/verify/pescador_rnpa_pescador`, que no existe. Todas las
+        credenciales del wallet apuntaban a la nada. `entity_id` ya es el folio.
+        """
+        return f"{settings.FRONTEND_BASE_URL}/verify/{entity.entity_id}"
 
     def get_nfc_payload(self, entity: LegalEntity) -> Dict[str, Any]:
         """
@@ -77,7 +82,7 @@ class WalletPassVisualizer:
         return {
             "v": 1,  # Version
             "t": entity.entity_type[:10].upper(),  # Type (truncated)
-            "i": entity.entity_id[:8].upper() if entity.entity_id else "UNKNOWN",
+            "i": folio_corto(entity.entity_id).upper() or "UNKNOWN",
             "n": entity.name[:50] if entity.name else "Unknown LegalEntity",
             "u": self.get_nfc_url(entity),
             "ts": datetime.now().isoformat(),
@@ -281,9 +286,7 @@ class WalletPassVisualizer:
 
     def get_wallet_urls(self, entity: LegalEntity) -> Dict[str, str]:
         """Get all wallet-related URLs for the entity"""
-        entity_type = entity.entity_type.lower().replace(' ', '_')
-        entity_id_short = entity.entity_id[:8].lower() if entity.entity_id else 'unknown'
-        base_path = f"/verify/{entity_type}_{entity_id_short}"
+        base_path = f"/verify/{entity.entity_id}"
 
         return {
             "main": f"{settings.FRONTEND_BASE_URL}{base_path}/wallet",

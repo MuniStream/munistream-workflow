@@ -147,18 +147,13 @@ class EntityReportGenerator:
 
         # Generate QR codes if requested
         if include_qr:
-            # Calculate checksum of critical data for integrity verification
-            import hashlib
-            critical_data = {
-                "entity_id": entity.entity_id,
-                "entity_type": entity.entity_type,
-                "name": entity.name,
-                "status": entity.status,
-                "created_at": entity.created_at.isoformat() if entity.created_at else None
-            }
-            # Sort keys for consistent hashing
-            data_string = str(sorted(critical_data.items()))
-            checksum = hashlib.sha256(data_string.encode()).hexdigest()[:16]
+            # El checksum se calcula en un solo lugar, compartido con el
+            # verificador: aquí se hacía a mano incluyendo `status` (mutable, así
+            # que un QR impreso se autoinvalidaba al cambiar de estado) y un
+            # `created_at` con microsegundos que Mongo trunca al persistir, de modo
+            # que 999 de cada 1000 documentos fallaban la verificación.
+            from ..entity_verification import checksum_de
+            checksum = checksum_de(entity)
 
             # Create verification URL with checksum
             verification_url = f"/verify/{entity.entity_id}?checksum={checksum}"
