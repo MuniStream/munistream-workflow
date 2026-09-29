@@ -13,34 +13,58 @@ from ...services.visualizers.visualizer_factory import VisualizerFactory
 
 
 def _resolve_context_path(context: Any, path: str) -> Any:
-    """Resolve a dot-path against context, supporting numeric list indices.
+    """Resolve a dot-path against context.
 
-    Mirrors ConfirmationOperator._resolve_path so paths such as
-    '_selected_entities_data.embarcacion_ids.0.nombre' resolve into a list of
-    selected-entity snapshots. Descends dicts by key and lists by integer index.
-    Returns None if any segment fails to resolve.
+    Soporta:
+      - índices numéricos de lista: `...embarcacion_ids.0.nombre` (el primero).
+      - un comodín `*` (o `[]`) que RECORRE la lista y junta los valores del resto
+        del path para cada elemento, DEDUPLICADOS y conservando el orden de
+        aparición: `...embarcacion_ids.*.matricula` -> ["ABC-1", "XYZ-9"].
+        Así, cuando se elige más de una entidad, el campo no se queda con el de la
+        primera; guarda todas las matrículas (o nombres, o lo que sea) distintas.
+
+    Devuelve None si algún segmento no resuelve. Mirrors ConfirmationOperator.
     """
     if not path:
         return None
-    current: Any = context
-    for part in path.split("."):
-        if isinstance(current, list):
-            try:
-                idx = int(part)
-            except (TypeError, ValueError):
-                return None
-            if 0 <= idx < len(current):
-                current = current[idx]
-            else:
-                return None
-        elif isinstance(current, dict):
-            if part in current:
-                current = current[part]
-            else:
-                return None
-        else:
+    return _resolve_context_parts(context, path.split("."))
+
+
+def _resolve_context_parts(current: Any, parts: List[str]) -> Any:
+    if not parts:
+        return current
+    part, rest = parts[0], parts[1:]
+
+    # Comodín: recorrer la lista y recolectar valores únicos del resto del path.
+    if part in ("*", "[]"):
+        if not isinstance(current, list):
             return None
-    return current
+        unicos: List[Any] = []
+        for item in current:
+            valor = _resolve_context_parts(item, rest)
+            if valor is None:
+                continue
+            candidatos = valor if isinstance(valor, list) else [valor]
+            for c in candidatos:
+                if c not in unicos:
+                    unicos.append(c)
+        return unicos
+
+    if isinstance(current, list):
+        try:
+            idx = int(part)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(current):
+            return _resolve_context_parts(current[idx], rest)
+        return None
+
+    if isinstance(current, dict):
+        if part in current:
+            return _resolve_context_parts(current[part], rest)
+        return None
+
+    return None
 
 
 class EntityCreationOperator(BaseOperator):
