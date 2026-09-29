@@ -7,6 +7,8 @@ Designed for administrative workflows to provide full visibility into any workfl
 """
 
 from typing import Dict, Any, List, Optional
+import copy
+import json
 import logging
 from datetime import datetime
 
@@ -38,6 +40,7 @@ class ContextExplorerValidator(BaseOperator):
         show_user_info: bool = True,
         show_s3_uploads: bool = True,
         entity_display_fields: Optional[List[str]] = None,
+        editable_fields: Optional[List[Dict[str, Any]]] = None,
         **kwargs
     ):
         """
@@ -68,6 +71,11 @@ class ContextExplorerValidator(BaseOperator):
         self.entity_display_fields = entity_display_fields or [
             "name", "entity_type", "upload_date", "file_size", "status"
         ]
+        # Campos del contexto que el revisor PUEDE corregir antes de aprobar.
+        # Cada def: {name, label, type, required?, options?, helperText?} donde
+        # `name` es la ruta en el contexto revisado (admite anidado "a.b.c").
+        # Sin esta lista, el operador es solo-lectura como siempre.
+        self.editable_fields = editable_fields or []
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
@@ -103,14 +111,19 @@ class ContextExplorerValidator(BaseOperator):
                    has_comments=bool(comments))
 
         if decision == "approved":
+            data = {
+                "validation_decision": "approved",
+                "validation_comments": comments,
+                "validated_at": datetime.utcnow().isoformat(),
+                "validated_by": context.get("user_id", "system")
+            }
+            # Correcciones del revisor: se escriben como claves de PRIMER NIVEL del
+            # contexto (con el nombre que usa el padre), para que al completar el
+            # sub-workflow de validación se copien de vuelta al trámite padre.
+            data.update(self._apply_edits(context, input_data))
             return TaskResult(
                 status=TaskStatus.CONTINUE,
-                data={
-                    "validation_decision": "approved",
-                    "validation_comments": comments,
-                    "validated_at": datetime.utcnow().isoformat(),
-                    "validated_by": context.get("user_id", "system")
-                }
+                data=data
             )
         elif decision == "rejected":
             return TaskResult(
@@ -232,6 +245,11 @@ class ContextExplorerValidator(BaseOperator):
         ]
 
 
+        # Campos editables: el revisor puede corregir estos valores del contexto
+        # antes de aprobar. Se precarga el valor actual leído del contexto revisado.
+        if self.editable_fields:
+            form_config["editable_fields"] = self._build_editable_fields(target_context)
+
         # Set waiting_for in task state (like SelfieOperator does)
         self.state.waiting_for = "context_validation"
 
@@ -261,6 +279,93 @@ class ContextExplorerValidator(BaseOperator):
         else:
             # Simple path
             return context.get(self.context_path)
+
+    # --- Campos editables (correcciones del revisor) -----------------------
+
+    def _resolve_path(self, data: Any, path: str) -> Any:
+        """Lee un valor de `data` por una ruta con puntos ("a.b.c"). None si falta."""
+        current = data
+        for part in path.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return None
+        return current
+
+    def _build_editable_fields(self, target_context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Def de cada campo editable + su valor ACTUAL precargado del contexto."""
+        campos = []
+        for f in self.editable_fields:
+            d = dict(f)
+            d["value"] = self._resolve_path(target_context, f.get("name", ""))
+            campos.append(d)
+        return campos
+
+    def _coerce_value(self, tipo: Optional[str], valor: Any) -> Any:
+        """Reconvierte lo que llega por multipart (todo string) al tipo esperado.
+
+        Espeja UserInputOperator._coerce_structured_fields para los tipos
+        estructurados; los escalares (text/select/date/textarea) pasan tal cual.
+        """
+        if valor is None:
+            return None
+        if tipo in ("array", "address", "daterange", "geo") and isinstance(valor, str):
+            try:
+                return json.loads(valor)
+            except (ValueError, TypeError):
+                return valor
+        if tipo == "number" and isinstance(valor, str) and valor.strip():
+            crudo = valor.strip()
+            try:
+                return int(crudo) if crudo.lstrip("-").isdigit() else float(crudo)
+            except (ValueError, TypeError):
+                return valor
+        return valor
+
+    def _apply_edits(self, context: Dict[str, Any], input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Construye las claves de PRIMER NIVEL del contexto ya corregidas con las
+        ediciones del revisor, para que el executor las mergee y, al completar el
+        sub-workflow, `WorkflowStartOperator._check_child_status` las copie al padre.
+
+        Un campo con ruta "TOP.resto..." reconstruye el dict `TOP` (sobre una copia
+        del valor actual) con el set anidado aplicado. Varias ediciones al mismo
+        `TOP` se acumulan. Un campo de primer nivel se devuelve como `{name: valor}`.
+        """
+        if not self.editable_fields:
+            return {}
+        target = self._get_context_data(context) or {}
+        resultado: Dict[str, Any] = {}
+        trace: Dict[str, Any] = {}
+        for f in self.editable_fields:
+            name = f.get("name")
+            if not name or name not in input_data:
+                continue  # solo se aplica lo que el revisor mandó
+            nuevo = self._coerce_value(f.get("type"), input_data[name])
+            partes = name.split(".")
+            if len(partes) == 1:
+                resultado[name] = nuevo
+            else:
+                top = partes[0]
+                base = resultado.get(top)
+                if base is None:
+                    actual = target.get(top)
+                    base = copy.deepcopy(actual) if isinstance(actual, dict) else {}
+                cur = base
+                for p in partes[1:-1]:
+                    if not isinstance(cur.get(p), dict):
+                        cur[p] = {}
+                    cur = cur[p]
+                cur[partes[-1]] = nuevo
+                resultado[top] = base
+            trace[name] = nuevo
+        if trace:
+            resultado["context_edits"] = {
+                "campos": trace,
+                "editado_por": context.get("user_id", "system"),
+                "editado_en": datetime.utcnow().isoformat(),
+            }
+        return resultado
 
     def _build_user_info_section(self, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Build user information section"""
