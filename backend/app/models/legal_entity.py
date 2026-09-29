@@ -72,6 +72,12 @@ class LegalEntity(Document):
     verified: bool = False
     verification_date: Optional[datetime] = None
     verified_by: Optional[str] = None
+
+    # Vigencia. Hasta ahora no existía: el vencimiento solo podía deducirse de
+    # `data["vigencia_anos"]`, que apenas una parte de las entidades declara, y
+    # que además no sabe de prórrogas ni revocaciones. Indexado porque la
+    # consulta natural ("qué se le vence al ciudadano") es por rango de fecha.
+    valid_until: Optional[datetime] = None
     
     # Tracking
     created_by_workflow: Optional[str] = None  # Workflow instance that created this
@@ -92,7 +98,9 @@ class LegalEntity(Document):
             "owner_user_id",
             "status",
             [("owner_user_id", 1), ("entity_type", 1)],
-            [("entity_id", 1), ("owner_user_id", 1)]
+            [("entity_id", 1), ("owner_user_id", 1)],
+            # "qué se le vence a este ciudadano": rango de fecha acotado por dueño.
+            [("owner_user_id", 1), ("valid_until", 1)],
         ]
     
     def add_relationship(
