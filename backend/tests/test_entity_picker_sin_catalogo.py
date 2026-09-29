@@ -115,7 +115,7 @@ def test_cada_requisito_es_una_pantalla():
         _conteos(pescador_rnpa_ids=3, embarcacion_ids=120)
     )
 
-    assert form["por_pantallas"] is True
+    assert form["one_per_screen"] is True
     assert [c["name"] for c in form["fields"]] == ["pescador_rnpa_ids", "embarcacion_ids"]
 
 

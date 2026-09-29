@@ -553,6 +553,7 @@ def _resumen_de_entidad(entidad) -> Dict[str, Any]:
         "verified": entidad.verified,
         "owner_user_id": entidad.owner_user_id,
         "created_at": entidad.created_at,
+        "valid_until": entidad.valid_until,
         "identificadores": identificadores,
     }
 

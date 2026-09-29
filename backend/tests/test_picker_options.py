@@ -129,7 +129,7 @@ def test_el_resumen_no_arrastra_el_data_completo():
 def test_resuelve_los_campos_a_mostrar_desde_data():
     resumen = resumen_de_candidata(_entidad(), display_fields=["matricula", "puerto_base"])
 
-    valores = {c["campo"]: c["valor"] for c in resumen["campos"]}
+    valores = {c["field"]: c["value"] for c in resumen["fields"]}
     assert valores == {"matricula": "MZT-1234", "puerto_base": "Mazatlán"}
 
 
@@ -140,7 +140,7 @@ def test_resuelve_campos_que_son_atributos_de_la_entidad():
     """
     resumen = resumen_de_candidata(_entidad(), display_fields=["name"])
 
-    assert resumen["campos"][0]["valor"] == "Doña Petra"
+    assert resumen["fields"][0]["value"] == "Doña Petra"
 
 
 def test_resuelve_rutas_con_punto():
@@ -149,7 +149,7 @@ def test_resuelve_rutas_con_punto():
 
     resumen = resumen_de_candidata(entidad, display_fields=["clave_catastral_data.clave_catastral"])
 
-    assert resumen["campos"][0]["valor"] == "001-234"
+    assert resumen["fields"][0]["value"] == "001-234"
 
 
 def test_los_campos_que_no_existen_se_omiten():
@@ -159,13 +159,13 @@ def test_los_campos_que_no_existen_se_omiten():
     """
     resumen = resumen_de_candidata(_entidad(), display_fields=["matricula", "fecha_arribo"])
 
-    assert [c["campo"] for c in resumen["campos"]] == ["matricula"]
+    assert [c["field"] for c in resumen["fields"]] == ["matricula"]
 
 
 def test_el_orden_de_los_campos_respeta_el_configurado():
     resumen = resumen_de_candidata(_entidad(), display_fields=["puerto_base", "matricula"])
 
-    assert [c["campo"] for c in resumen["campos"]] == ["puerto_base", "matricula"]
+    assert [c["field"] for c in resumen["fields"]] == ["puerto_base", "matricula"]
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +177,8 @@ def test_la_vigencia_se_deriva_de_los_anos_declarados():
 
     vig = vigencia_de(entidad)
 
-    assert vig["hasta"].year == 2026
-    assert vig["hasta"].month == 3
+    assert vig["until"].year == 2026
+    assert vig["until"].month == 3
 
 
 def test_sin_anos_de_vigencia_no_se_inventa_una_fecha():
@@ -192,14 +192,14 @@ def test_sin_anos_de_vigencia_no_se_inventa_una_fecha():
 def test_una_vigencia_ya_cumplida_se_marca_vencida():
     entidad = _entidad(created_at=datetime(2019, 1, 1), data={"vigencia_anos": 1})
 
-    assert vigencia_de(entidad)["vencida"] is True
+    assert vigencia_de(entidad)["expired"] is True
 
 
 def test_una_vigencia_en_curso_no_se_marca_vencida():
     entidad = _entidad(created_at=datetime.utcnow().replace(year=datetime.utcnow().year - 1),
                        data={"vigencia_anos": 10})
 
-    assert vigencia_de(entidad)["vencida"] is False
+    assert vigencia_de(entidad)["expired"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +220,8 @@ def test_la_fecha_guardada_gana_sobre_la_derivada():
 
     vig = vigencia_de(entidad)
 
-    assert vig["hasta"] == datetime(2030, 1, 15)
-    assert vig["origen"] == "guardada"
+    assert vig["until"] == datetime(2030, 1, 15)
+    assert vig["source"] == "stored"
 
 
 def test_sin_fecha_guardada_se_deriva_y_se_dice():
@@ -231,13 +231,13 @@ def test_sin_fecha_guardada_se_deriva_y_se_dice():
     """
     entidad = _entidad(created_at=datetime(2024, 3, 1), data={"vigencia_anos": 2})
 
-    assert vigencia_de(entidad)["origen"] == "derivada"
+    assert vigencia_de(entidad)["source"] == "derived"
 
 
 def test_una_fecha_guardada_ya_pasada_se_marca_vencida():
     entidad = _entidad(valid_until=datetime(2020, 1, 1), data={})
 
-    assert vigencia_de(entidad)["vencida"] is True
+    assert vigencia_de(entidad)["expired"] is True
 
 
 def test_calcular_vencimiento_desde_los_anos_declarados():

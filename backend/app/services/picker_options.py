@@ -66,13 +66,13 @@ def resumen_de_candidata(entidad, display_fields: List[str]) -> Dict[str, Any]:
         valor = _valor_en(entidad, ruta)
         if valor in (None, "", [], {}):
             continue
-        campos.append({"campo": ruta, "valor": valor})
+        campos.append({"field": ruta, "value": valor})
 
     return {
         "entity_id": getattr(entidad, "entity_id", None),
         "entity_type": getattr(entidad, "entity_type", None),
         "name": getattr(entidad, "name", None),
         "status": getattr(entidad, "status", None),
-        "campos": campos,
-        "vigencia": vigencia_de(entidad),
+        "fields": campos,
+        "validity": vigencia_de(entidad),
     }

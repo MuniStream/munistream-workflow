@@ -1295,5 +1295,5 @@ async def picker_candidatas(
         "total": total,
         "page": page,
         "page_size": page_size,
-        "candidatas": [resumen_de_candidata(e, display_fields) for e in encontradas],
+        "candidates": [resumen_de_candidata(e, display_fields) for e in encontradas],
     }

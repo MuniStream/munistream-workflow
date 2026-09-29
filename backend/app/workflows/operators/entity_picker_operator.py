@@ -968,7 +968,7 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
             "submit_button_text": self.kwargs.get(
                 "submit_button_text", "Continuar con Documentos Seleccionados"
             ),
-            "por_pantallas": True,
+            "one_per_screen": True,
             "fields": campos,
         }
 

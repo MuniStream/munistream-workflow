@@ -63,6 +63,7 @@ class EntityCreationOperator(BaseOperator):
         visualizer: Optional[str] = None,  # Visualizer type for entity PDF generation
         field_blacklist: Optional[List[str]] = None,  # Fields to exclude from entity data
         folio_config: Optional[Dict[str, Any]] = None,  # Auto-assign a sequential folio at creation
+        vigencia: Optional[Dict[str, Any]] = None,  # Cómo derivar la vigencia (valid_until) de la entidad
         **kwargs
     ):
         """
@@ -94,6 +95,13 @@ class EntityCreationOperator(BaseOperator):
         # Cuando está presente, se asigna un número consecutivo único a la entidad al
         # crearse (p. ej. el número de cédula RNPA), salvo que el campo ya venga poblado.
         self.folio_config = folio_config or None
+        # Vigencia solicitada -> valid_until de la entidad. Formas admitidas:
+        #   {"source": "periodo_concesion", "unidad_default": "anos"}  # lee y parsea un campo
+        #   {"anos": 4} | {"meses": 6} | {"dias": 30}                  # fija
+        #   {"dias_habiles": 3, "desde": "fecha_embarque"}             # días hábiles desde una fecha
+        # Cuando resuelve, se inyecta `valid_until` en el data de la entidad, que
+        # es de donde EntityService lo toma al crear. Nunca bloquea la emisión.
+        self.vigencia = vigencia or None
 
         # Merge visualizer into entity_display_config
         self.entity_display_config = entity_display_config or {
@@ -129,7 +137,60 @@ class EntityCreationOperator(BaseOperator):
             return False
 
         return True
-    
+
+    def _resolver_vigencia(self, entity_data: Dict[str, Any], context: Dict[str, Any]):
+        """
+        Traduce el parámetro `vigencia` del trámite a una fecha de vencimiento.
+
+        Devuelve un datetime o None. La lógica de unidades vive en
+        `entity_validity` para no duplicar el parseo que también usa EntityService.
+        """
+        if not self.vigencia:
+            return None
+
+        from datetime import datetime
+        from app.services.entity_validity import (
+            parse_duracion, sumar_periodo, sumar_dias_habiles,
+        )
+
+        cfg = self.vigencia
+        emitida = datetime.utcnow()
+
+        # Base de cálculo: una fecha del contexto/entidad si el trámite la nombra
+        # (p. ej. la fecha de embarque de la guía), o el momento de emisión.
+        desde = emitida
+        campo_desde = cfg.get("desde")
+        if campo_desde:
+            crudo = entity_data.get(campo_desde) or context.get(campo_desde)
+            if isinstance(crudo, datetime):
+                desde = crudo
+            elif isinstance(crudo, str) and crudo.strip():
+                try:
+                    desde = datetime.fromisoformat(crudo.strip()[:19])
+                except ValueError:
+                    desde = emitida
+
+        # Días hábiles (p. ej. la guía de pesca: 3 días hábiles).
+        if cfg.get("dias_habiles"):
+            return sumar_dias_habiles(desde, int(cfg["dias_habiles"]))
+
+        # Periodo fijo declarado en el trámite.
+        for unidad, clave in (("anos", "anos"), ("meses", "meses"), ("dias", "dias"), ("semanas", "semanas")):
+            if cfg.get(clave):
+                return sumar_periodo(desde, int(cfg[clave]), unidad)
+
+        # Vigencia solicitada leída de un campo (o varios) del formulario.
+        fuentes = cfg.get("source")
+        if isinstance(fuentes, str):
+            fuentes = [fuentes]
+        for fuente in (fuentes or []):
+            valor = entity_data.get(fuente, context.get(fuente))
+            parsed = parse_duracion(valor, cfg.get("unidad_default", "anos"))
+            if parsed:
+                return sumar_periodo(desde, parsed["cantidad"], parsed["unidad"])
+
+        return None
+
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Create the entity based on workflow context"""
         try:
@@ -244,6 +305,17 @@ class EntityCreationOperator(BaseOperator):
                     if f not in _INTERNAL
                     and not f.endswith(("_url", "_ids", "_result", "_file"))
                 ]
+
+            # Vigencia solicitada -> valid_until, si el trámite la declaró vía el
+            # parámetro `vigencia`. Se deja en el data como ISO; EntityService lo
+            # toma de ahí al crear (gana sobre la inferencia por `vigencia_anos`).
+            try:
+                vence = self._resolver_vigencia(entity_data, context)
+                if vence is not None:
+                    entity_data.setdefault("valid_until", vence.isoformat())
+                    print(f"   🗓️ Vigencia resuelta: valid_until={entity_data['valid_until']}")
+            except Exception as e:
+                print(f"   ⚠️ No se pudo resolver la vigencia declarada: {e}")
 
             # For async operations, we'll handle this in execute_async
             # Store the parameters for async execution
