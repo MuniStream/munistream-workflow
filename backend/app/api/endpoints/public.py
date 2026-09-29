@@ -1222,3 +1222,78 @@ async def _get_workflow_data(workflow: WorkflowDefinition, dag: Optional[DAG], l
         "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,
         "metadata": metadata
     }
+
+@router.get("/instances/{instance_id}/picker/{store_as}")
+async def picker_candidatas(
+    instance_id: str,
+    store_as: str,
+    q: Optional[str] = Query(None, description="Texto libre sobre nombre, identificador y campos identificadores"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    current_customer: Customer = Depends(get_current_customer),
+):
+    """
+    Candidatas para un requisito del selector de entidades, paginadas.
+
+    Existe para sacar el catálogo del documento de la instancia. El picker las
+    metía dentro del `form_config`, que el executor mezcla al contexto y Mongo
+    persiste, y las duplicaba en el caché de descubrimiento y en un snapshot por
+    cada tarea posterior: con una entidad pesando ~107 KB de media, unas decenas
+    bastan para empujar la instancia contra el tope de 16 MB y dejarla atorada.
+
+    Además había un techo duro: el descubrimiento pedía 100 sin `skip` y sin
+    paginación en la interfaz, así que la entidad 101 era inalcanzable y el
+    trámite imposible de completar por el portal.
+    """
+    from ...services.entity_search import construir_consulta
+    from ...services.picker_options import encontrar_requisito, resumen_de_candidata
+
+    db_instance = await WorkflowInstance.find_one(
+        WorkflowInstance.instance_id == instance_id
+    )
+    if not db_instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    require_instance_owner(db_instance, current_customer)
+
+    dag = await workflow_service.get_dag(db_instance.workflow_id)
+    if not dag:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    encontrado = encontrar_requisito(dag, store_as)
+    if not encontrado:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Este trámite no pide '{store_as}'",
+        )
+    _, requisito = encontrado
+
+    consulta = construir_consulta(
+        q=q,
+        entity_type=requisito.get("entity_types") or requisito.get("entity_type"),
+        owner_user_id=db_instance.user_id,
+        filtros=requisito.get("filters"),
+    )
+
+    total = await LegalEntity.find(consulta).count()
+    salto = (page - 1) * page_size
+    encontradas = (
+        await LegalEntity.find(consulta)
+        .sort([("created_at", -1)])
+        .skip(salto)
+        .limit(page_size)
+        .to_list()
+    )
+
+    display_fields = requisito.get("display_fields") or []
+    return {
+        "store_as": store_as,
+        "display_title": requisito.get("display_title"),
+        "min_count": requisito.get("min_count", 1),
+        "max_count": requisito.get("max_count", requisito.get("min_count", 1)),
+        "selection_mode": requisito.get("selection_mode", "individual"),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "candidatas": [resumen_de_candidata(e, display_fields) for e in encontradas],
+    }
