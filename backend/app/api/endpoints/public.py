@@ -149,7 +149,10 @@ async def submit_data(
         from app.services import s3_storage
         form = await request.form()
         data = {}
-        for key, value in form.items():
+        # multi_items() preserva claves repetidas: un campo `file` con `multiple`
+        # manda varios archivos bajo la misma clave. Se acumulan en lista; un solo
+        # archivo queda como dict (el operador/S3UploadOperator aceptan ambos).
+        for key, value in form.multi_items():
             if hasattr(value, 'filename'):
                 file_content = await value.read()
                 ref = s3_storage.upload_pending_file(
@@ -160,7 +163,12 @@ async def submit_data(
                     content_type=value.content_type,
                     file_content=file_content,
                 )
-                data[key] = ref
+                if key in data and isinstance(data[key], dict) and data[key].get("s3_key"):
+                    data[key] = [data[key], ref]
+                elif key in data and isinstance(data[key], list):
+                    data[key].append(ref)
+                else:
+                    data[key] = ref
             else:
                 data[key] = value
     else:
