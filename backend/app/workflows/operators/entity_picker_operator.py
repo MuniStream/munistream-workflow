@@ -552,6 +552,21 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         max_count = requirement.get("max_count", min_count)
         auto_select = requirement.get("auto_select", False)
 
+        # Regla -1: hay selecciones que el sistema no puede hacer por el ciudadano.
+        #
+        # Un trámite se presenta **a nombre de** una persona física o moral, y esa
+        # es la decisión con consecuencias jurídicas de todo el expediente: quién
+        # queda como titular, a quién se le factura, quién responde. Elegirla en
+        # silencio porque "solo había una opción" le quita al ciudadano el único
+        # momento en que podía notar que va a nombre de quien no quería.
+        #
+        # `auto_select` no servía: solo añade autoselección, nunca la quita.
+        if requirement.get("always_confirm", False):
+            logger.debug("Requisito que exige confirmación explícita",
+                        entity_type=entity_type,
+                        available=len(entities))
+            return False
+
         # Rule 0: Never auto-select optional entities (min_count=0) - user must explicitly choose
         if min_count == 0:
             logger.debug("Optional entity requirement - user selection required",
@@ -956,6 +971,9 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 "max_count": max_count,
                 "required": min_count > 0,
                 "selection_mode": req.get("selection_mode", "individual"),
+                # El portal lo necesita para redactar la pantalla: pedir que se
+                # confirme no se lee igual que pedir que se elija.
+                "always_confirm": bool(req.get("always_confirm", False)),
                 "total": (conteos or {}).get(store_as, 0),
                 "info": req.get("info"),
             })
