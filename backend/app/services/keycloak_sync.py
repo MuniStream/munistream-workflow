@@ -15,6 +15,51 @@ import os
 logger = logging.getLogger(__name__)
 
 
+# Marca de "esta cuenta no tiene contraseña local". Los usuarios que vienen de
+# Keycloak se autentican contra el IdP, nunca con contraseña aquí, pero
+# `UserModel.hashed_password` es obligatorio. No puede ser una cadena vacía ni un
+# hash fabricado: tiene que ser algo que `bcrypt` no pueda satisfacer nunca, para
+# que no exista ninguna contraseña que abra la cuenta sin pasar por el IdP.
+SIN_CONTRASENA_LOCAL = "sso-keycloak-sin-contrasena-local"
+
+
+def datos_de_usuario_importado(kc_user: Dict) -> Dict:
+    """
+    Traduce un usuario de Keycloak a los campos de `UserModel`.
+
+    Vive aparte de la clase para poder probarlo sin Keycloak ni Mongo: la
+    importación fallaba con TODOS los usuarios —no ponía `hashed_password`, que es
+    obligatorio— y nadie lo notaba porque los revisores entran como `admin`, que
+    cortocircuita las comprobaciones de acceso. Sin usuarios internos no hay a
+    quién meter en un equipo, y la asignación por área queda decorativa.
+    """
+    nombre = f"{kc_user.get('firstName', '') or ''} {kc_user.get('lastName', '') or ''}".strip()
+    usuario = kc_user.get("username") or kc_user["email"]
+
+    datos = {
+        "email": kc_user["email"],
+        "username": usuario,
+        # `full_name` es obligatorio; vacío deja la fila sin nada que mostrar.
+        "full_name": nombre or usuario,
+        "hashed_password": SIN_CONTRASENA_LOCAL,
+        "status": "active" if kc_user.get("enabled", True) else "inactive",
+    }
+
+    atributos = kc_user.get("attributes") or {}
+    if atributos.get("department"):
+        datos["department"] = atributos["department"][0]
+    if atributos.get("phone"):
+        datos["phone"] = atributos["phone"][0]
+    if atributos.get("role"):
+        try:
+            datos["role"] = UserRole(atributos["role"][0])
+        except ValueError:
+            # Un valor inesperado en el realm no puede impedir que el usuario exista.
+            datos["role"] = UserRole.VIEWER
+
+    return datos
+
+
 class KeycloakSyncService:
     """Service for synchronizing data between MuniStream and Keycloak"""
 
@@ -477,25 +522,7 @@ class KeycloakSyncService:
         # Check if user already exists
         existing_user = await UserModel.find_one(UserModel.email == kc_user["email"])
 
-        # Map Keycloak attributes to MuniStream user
-        user_data = {
-            "email": kc_user["email"],
-            "username": kc_user.get("username", kc_user["email"]),
-            "full_name": f"{kc_user.get('firstName', '')} {kc_user.get('lastName', '')}".strip(),
-            "status": "active" if kc_user.get("enabled", True) else "inactive"
-        }
-
-        # Extract custom attributes
-        attributes = kc_user.get("attributes", {})
-        if "department" in attributes and attributes["department"]:
-            user_data["department"] = attributes["department"][0]
-        if "phone" in attributes and attributes["phone"]:
-            user_data["phone"] = attributes["phone"][0]
-        if "role" in attributes and attributes["role"]:
-            try:
-                user_data["role"] = UserRole(attributes["role"][0])
-            except ValueError:
-                user_data["role"] = UserRole.VIEWER
+        user_data = datos_de_usuario_importado(kc_user)
 
         if existing_user:
             # Update existing user
