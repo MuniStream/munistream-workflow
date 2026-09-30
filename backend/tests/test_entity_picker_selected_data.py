@@ -179,3 +179,33 @@ async def test_attach_skips_when_already_present(monkeypatch):
     await picker._attach_selected_entities_data(result, {"user_id": "user-1"})
 
     assert result.data["_selected_entities_data"] is preexisting
+
+
+# ─── Vigencia de la entidad elegida ─────────────────────────────────────────
+#
+# La vigencia vive en el MODELO (`valid_until`), no en `data`. El picker ya la
+# mostraba al ciudadano ("Vigente hasta …") pero el trámite no podía leerla, así
+# que las prórrogas le volvían a pedir a mano la fecha de vencimiento del título
+# que estaba eligiendo —una fecha que el sistema ya conoce y que él podía
+# teclear distinta de la registrada—.
+
+def test_el_snapshot_expone_la_vigencia_de_la_entidad():
+    from datetime import datetime
+
+    entidad = _entity("concesion_pesca_comercial_1", "concesion_pesca_comercial",
+                      "Concesión REINA II", {"embarcacion": "REINA II"})
+    entidad.valid_until = datetime(2029, 9, 30, 12, 0, 0)
+
+    snapshot = _make_picker()._entity_data_snapshot(entidad)
+
+    assert snapshot["_entity_valid_until"] == "2029-09-30T12:00:00"
+    # Y sigue trayendo lo de siempre.
+    assert snapshot["embarcacion"] == "REINA II"
+    assert snapshot["_entity_id"] == "concesion_pesca_comercial_1"
+
+
+def test_una_entidad_sin_vigencia_no_inventa_una():
+    entidad = _entity("pescador_rnpa_1", "pescador_rnpa", "Pescador", {"numero_rnpa": "RNPA-1"})
+    entidad.valid_until = None
+
+    assert _make_picker()._entity_data_snapshot(entidad)["_entity_valid_until"] is None
