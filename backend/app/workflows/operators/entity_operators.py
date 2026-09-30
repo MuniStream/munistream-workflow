@@ -24,10 +24,35 @@ def _resolve_context_path(context: Any, path: str) -> Any:
         Así, cuando se elige más de una entidad, el campo no se queda con el de la
         primera; guarda todas las matrículas (o nombres, o lo que sea) distintas.
 
+      - alternativas separadas por `|`: `a.b|c.d` toma la PRIMERA que resuelva.
+        No son un lujo. De 38 solicitantes seleccionados, 25 traen
+        `nombre_completo` y 13 `razon_social` —físicas y morales, sin solapamiento
+        y sin huecos—, así que cualquier ruta sola deja el documento a medias para
+        un tercio de la gente. Y los snapshots cambiaron de claves con el tiempo:
+        `nombre` vivía donde hoy vive `nombre_embarcacion`.
+
     Devuelve None si algún segmento no resuelve. Mirrors ConfirmationOperator.
     """
     if not path:
         return None
+
+    # Las alternativas se resuelven aquí y no en cada consumidor para que la
+    # sintaxis sea una sola en todo el motor: `data_mapping`, `name_source`,
+    # filtros y lo que venga después.
+    if "|" in path:
+        for alternativa in path.split("|"):
+            alternativa = alternativa.strip()
+            if not alternativa:
+                continue
+            valor = _resolve_context_path(context, alternativa)
+            # Un vacío no cuenta como resuelto: en el documento es tan inútil como
+            # el campo ausente, y encima oculta que había una alternativa buena
+            # detrás. Cero y False sí cuentan — son datos.
+            if valor is None or (isinstance(valor, (str, list, dict, tuple)) and len(valor) == 0):
+                continue
+            return valor
+        return None
+
     return _resolve_context_parts(context, path.split("."))
 
 
