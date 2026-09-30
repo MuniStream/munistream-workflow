@@ -11,6 +11,7 @@ import logging
 from .pdf_visualizer import PDFVisualizer
 from ..signature.signature_verifier import SignatureVerifier
 from ...models.legal_entity import LegalEntity
+from ..signature_extraction import signature_block
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class SignedPDFVisualizer(PDFVisualizer):
                 raise ValueError(f"Entity validation failed: {validation['errors']}")
 
             # Check if entity has signature data
-            signature_data = entity.data.get("signature") if entity.data else None
+            signature_data = signature_block(entity.data)
             if not signature_data:
                 logger.warning(f"Entity {entity.entity_id} has no signature data, using basic PDF generation")
                 return await super().generate_pdf(entity)
@@ -218,7 +219,7 @@ class SignedPDFVisualizer(PDFVisualizer):
 
         # Additional validation for signed entities
         if entity and entity.data:
-            signature_data = entity.data.get("signature")
+            signature_data = signature_block(entity.data)
 
             if not signature_data:
                 result["warnings"].append("Entity has no signature data")

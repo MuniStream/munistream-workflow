@@ -23,6 +23,7 @@ from app.services.signature.certificate_manager import CertificateManager
 from app.services.signature.signature_verifier import SignatureVerifier
 from app.services.visualizers.visualizer_factory import VisualizerFactory
 from app.services.entity_service import EntityService
+from app.services.signature_extraction import signature_block
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +280,7 @@ async def verify_entity_signature(
             raise HTTPException(status_code=404, detail="Entity not found")
 
         # Check if entity has signature
-        signature_data = entity.data.get("signature") if entity.data else None
+        signature_data = signature_block(entity.data)
         if not signature_data:
             raise HTTPException(status_code=404, detail="Entity has no signature data")
 
