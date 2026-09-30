@@ -75,3 +75,38 @@ def test_sin_firma_avisa_pero_no_falla():
 
     assert resultado["valid"] is True
     assert any("signature" in str(a).lower() for a in resultado["warnings"])
+
+
+# ─── Plantilla ──────────────────────────────────────────────────────────────
+#
+# Con el bloque de firma ya normalizado, la vista previa seguía dando 500: el
+# visualizador pedía `signed_entity.html` y el motor le añade la extensión él
+# mismo, así que buscaba `signed_entity.html.html` — una plantilla que además no
+# existe ni compartida ni en ningún tenant. Y la plantilla que el trámite sí
+# declara viaja como `pdf_template`, clave que aquí no se leía.
+
+def test_la_plantilla_no_lleva_extension():
+    """El motor añade `.html`; traerla puesta pedía `x.html.html`."""
+    assert not SignedPDFVisualizer(config={}).config["template"].endswith(".html")
+
+
+def test_por_defecto_usa_una_plantilla_que_existe():
+    # Se resuelve desde el paquete instalado, no desde la ruta del test: al
+    # correrlo dentro del contenedor el archivo vive fuera de `/app`.
+    import pathlib as _pl
+    from app.services.pdf_generation import template_engine
+
+    plantilla = SignedPDFVisualizer(config={}).config["template"]
+    compartidas = _pl.Path(template_engine.__file__).parent / "templates"
+    assert (compartidas / f"{plantilla}.html").is_file(), f"no existe {plantilla}.html"
+
+
+def test_respeta_la_plantilla_que_declara_el_tramite():
+    """Los trámites la declaran como `pdf_template` en entity_display_config."""
+    v = SignedPDFVisualizer(config={"pdf_template": "documento_oficial"})
+    assert v.config["template"] == "documento_oficial"
+
+
+def test_template_explicito_gana():
+    v = SignedPDFVisualizer(config={"template": "credencial_rnpa", "pdf_template": "otra"})
+    assert v.config["template"] == "credencial_rnpa"
