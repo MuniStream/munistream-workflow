@@ -15,7 +15,11 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.services.signature_extraction import extract_signatures, format_signature_chain
+from app.services.signature_extraction import (
+    extract_signatures,
+    format_signature_chain,
+    signature_block,
+)
 
 CADENA = "Be60Gu1C3gA4mmQFQKLL2hNEHdXxwE7AG3r1ezU/Colw1ZFzfw2UFV9IuzKQDL63fVJfNcfi"
 
@@ -83,3 +87,45 @@ def test_disponible_como_filtro_en_las_plantillas():
         "{% for f in data|firmas %}{{ f.signer }}|{{ f.signature_chain_display }}{% endfor %}"
     ).render(data={"firmas": [_firma("t")]})
     assert "PAOLA VILLARREAL RODRIGUEZ" in salida and CADENA[:32] in salida
+
+
+# ─── Forma del bloque de firma ──────────────────────────────────────────────
+#
+# `entity.data["signature"]` circula de dos maneras y los consumidores asumían
+# solo la anidada: con la plana reventaban con `'str' object has no attribute
+# 'get'` y tumbaban la vista previa del documento con un 500, que el revisor
+# veía como "Error al cargar el HTML del documento".
+
+
+def test_bloque_anidado_se_devuelve_tal_cual():
+    firma = {"signature": CADENA, "algorithm": "RSA-SHA256", "signer": "Quien firma"}
+    assert signature_block({"signature": firma}) is firma
+
+
+def test_bloque_plano_se_arma_con_los_metadatos_hermanos():
+    data = {
+        "signature": CADENA,
+        "algorithm": "RSA-SHA256",
+        "cert_subject": "E2E Test CONAPESCA",
+        "signer": "E2E Test CONAPESCA",
+        "certificate_info": {"subject": "E2E Test CONAPESCA"},
+        "signature_valid": True,
+        "timestamp": "2026-09-30T00:33:40.726624",
+        "numero_rnpa": "RNPA-2026-000003",  # ajeno a la firma: no debe colarse
+    }
+    bloque = signature_block(data)
+
+    assert bloque["signature"] == CADENA
+    assert bloque["algorithm"] == "RSA-SHA256"
+    assert bloque["certificate_info"] == {"subject": "E2E Test CONAPESCA"}
+    assert bloque["signer"] == "E2E Test CONAPESCA"
+    assert "numero_rnpa" not in bloque
+    # Lo que de verdad se rompía: pedirle `.get` al bloque.
+    assert bloque.get("certificate_info", {}).get("subject") == "E2E Test CONAPESCA"
+
+
+def test_sin_firma_devuelve_none():
+    assert signature_block(None) is None
+    assert signature_block({}) is None
+    assert signature_block({"signature": ""}) is None
+    assert signature_block({"numero_rnpa": "RNPA-1"}) is None

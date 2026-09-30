@@ -464,6 +464,11 @@ class DAGExecutor:
                 "tenant": getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
             })
 
+            # La causa del fallo, para que sobreviva hasta la rama FAILED: se
+            # guarda en el task_state y de ahí la copia el StepExecution. Sin
+            # esto el paso quedaba en `failed` con `error_message=None` y el
+            # ciudadano veía un trámite muerto sin decirle por qué.
+            causa_del_fallo: Optional[str] = None
             try:
                 # Set instance and workflow IDs on the task for logging
                 task._instance_id = instance_id
@@ -518,6 +523,7 @@ class DAGExecutor:
                     "tenant": getattr(db_instance, 'tenant', None) or db_instance.context.get('tenant')
                 })
 
+                causa_del_fallo = f"{type(e).__name__}: {e}"
                 result = TaskStatus.FAILED
             
             # Update task status based on result
@@ -549,11 +555,21 @@ class DAGExecutor:
                 # The instance will be re-queued in the main loop since it's PAUSED
                 break  # Stop processing for now, will resume via polling
             elif result == TaskStatus.FAILED:
-                print(f"[EXECUTOR] TASK FAILED: {task_id} in instance {instance_id}")
-                if hasattr(task, '_last_result') and task._last_result:
-                    print(f"[EXECUTOR] Task failure data: {task._last_result.data}")
-                    print(f"[EXECUTOR] Task failure error: {getattr(task._last_result, 'error', 'No error message')}")
-                dag_instance.update_task_status(task_id, "failed")
+                # El operador explica por qué rechazó (`TaskResult.error`); si el
+                # fallo vino de una excepción, la causa se capturó arriba.
+                ultimo = getattr(task, '_last_result', None)
+                causa_del_fallo = getattr(ultimo, 'error', None) or causa_del_fallo
+                logger.error(
+                    "❌ Paso fallido: %s — %s", task_id, causa_del_fallo or "sin causa declarada",
+                    extra={
+                        "workflow_step": task_id,
+                        "workflow_action": "step_failed",
+                        "error_message": causa_del_fallo,
+                        "instance_id": instance_id,
+                        "workflow_id": db_instance.workflow_id,
+                    },
+                )
+                dag_instance.update_task_status(task_id, "failed", error=causa_del_fallo)
                 break  # Stop processing, task failed
             elif result == TaskStatus.SKIP:
                 # Short-circuit: this task and its skip-only descendants drop out

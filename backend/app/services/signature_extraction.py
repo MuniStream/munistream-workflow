@@ -45,3 +45,45 @@ def extract_signatures(
             f.get("signature_chain") or f.get("signature")
         )
     return firmas
+
+
+# Metadatos que acompañan a la firma. Son los MISMOS nombres en las dos formas
+# en que se guarda; lo único que cambia es si cuelgan de `signature` o de la
+# raíz de `data`.
+_METADATOS_DE_FIRMA = (
+    "algorithm", "certificate", "certificate_info", "cert_subject",
+    "signature_chain", "signature_valid", "signed_at", "signer",
+    "signed_fields", "task_id", "timestamp", "data_hash",
+)
+
+
+def signature_block(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """El bloque de firma de una entidad, venga anidado o aplanado.
+
+    `entity.data["signature"]` tiene dos formas en circulación:
+
+    * **anidada** — un dict con la firma y sus metadatos dentro;
+    * **plana** — la firma es una CADENA base64 y sus metadatos (`algorithm`,
+      `certificate_info`, `signer`…) son hermanos suyos en la raíz de `data`.
+
+    Quien asumía siempre la primera reventaba con la segunda
+    (`'str' object has no attribute 'get'`) y tumbaba la vista previa del
+    documento con un 500, que el revisor veía como "Error al cargar el HTML".
+    Devuelve siempre un dict —o `None` si no hay firma—, para que el consumidor
+    no tenga que distinguir.
+    """
+    if not data:
+        return None
+
+    firma = data.get("signature")
+    if isinstance(firma, dict):
+        return firma
+    if not isinstance(firma, str) or not firma:
+        return None
+
+    bloque: Dict[str, Any] = {"signature": firma}
+    for clave in _METADATOS_DE_FIRMA:
+        valor = data.get(clave)
+        if valor is not None:
+            bloque[clave] = valor
+    return bloque

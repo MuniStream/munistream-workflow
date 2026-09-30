@@ -530,6 +530,16 @@ async def track_instance(
     workflow = await workflow_service.get_workflow_definition(db_instance.workflow_id)
     workflow_name = workflow.name if workflow else db_instance.workflow_id
 
+    # Cuando el trámite muere, la causa es lo único que le sirve al ciudadano:
+    # sin ella solo ve "fallido" y no puede saber si le toca corregir algo (un
+    # archivo que no era del formato pedido, por ejemplo) o esperar.
+    error_message = None
+    if db_instance.status == "failed" and dag_instance:
+        for estado in (dag_instance.task_states or {}).values():
+            if estado.get("status") == "failed" and estado.get("error"):
+                error_message = str(estado["error"])
+                break
+
     return {
         "instance_id": instance_id,
         "workflow_id": db_instance.workflow_id,
@@ -549,6 +559,7 @@ async def track_instance(
         "route_label": route_label,
         "emitted_entities": emitted_entities,
         "estimated_completion": None,
+        "error_message": error_message,
         "message": f"Workflow {db_instance.status}"
     }
 
