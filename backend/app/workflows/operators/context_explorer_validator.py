@@ -292,12 +292,32 @@ class ContextExplorerValidator(BaseOperator):
                 return None
         return current
 
+    def _path_exists(self, data: Any, path: str) -> bool:
+        """True si todas las claves de la ruta existen (el valor final puede ser None)."""
+        current = data
+        for part in path.split("."):
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return False
+        return True
+
     def _build_editable_fields(self, target_context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Def de cada campo editable + su valor ACTUAL precargado del contexto."""
+        """Def de cada campo editable + su valor ACTUAL precargado del contexto.
+
+        Auto-scope: como el workflow de validación admin es COMPARTIDO por muchos
+        trámites, un campo solo se muestra si su ruta EXISTE en el contexto de este
+        trámite. Así un mismo `editable_fields` (p. ej. las superficies/polígonos de
+        acuacultura) sirve para varios trámites sin mostrar campos ajenos en los que
+        no aplican. `always_show: True` fuerza mostrarlo aunque falte.
+        """
         campos = []
         for f in self.editable_fields:
+            name = f.get("name", "")
+            if not f.get("always_show") and not self._path_exists(target_context, name):
+                continue
             d = dict(f)
-            d["value"] = self._resolve_path(target_context, f.get("name", ""))
+            d["value"] = self._resolve_path(target_context, name)
             campos.append(d)
         return campos
 
