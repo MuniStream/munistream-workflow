@@ -276,6 +276,48 @@ def _drop_superseded(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [a for a in attachments if not superseded(a)]
 
 
+# Origen de un adjunto que archivó el personal, no el ciudadano. Se distingue en la
+# lista porque no valen lo mismo al resolver: uno es lo que la persona aportó, el
+# otro lo que la dependencia sumó después.
+ORIGEN_REVISOR = "staff"
+
+
+def registro_de_adjunto_del_revisor(
+    *,
+    s3_key: str,
+    s3_bucket: str,
+    filename: str,
+    content_type: Optional[str],
+    size: Optional[int],
+    uploaded_by: Optional[str],
+    uploaded_at: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Un adjunto archivado por el personal, en la misma forma que los demás.
+
+    El `attachment_id` se calcula igual que para el resto: la descarga y el token
+    se resuelven por ese id, así que si se calculara distinto el archivo aparecería
+    en la lista y no se podría abrir.
+
+    Queda `uploaded_by` porque un documento que aparece en el expediente sin saber
+    quién lo puso es peor que no tenerlo: no se puede contrastar ni pedir cuentas.
+    """
+    return {
+        "attachment_id": _attachment_id(s3_bucket, s3_key),
+        "task_id": None,
+        "field": None,
+        "filename": filename or _filename_from_key(s3_key),
+        "content_type": content_type,
+        "size": size,
+        "s3_bucket": s3_bucket,
+        "s3_key": s3_key,
+        "origin": ORIGEN_REVISOR,
+        "uploaded_by": uploaded_by,
+        "uploaded_at": uploaded_at,
+        "available": True,
+    }
+
+
 def collect_instance_attachments(instance) -> List[Dict[str, Any]]:
     """Devuelve los adjuntos de una instancia en un unico shape.
 
@@ -287,9 +329,24 @@ def collect_instance_attachments(instance) -> List[Dict[str, Any]]:
     from . import s3_storage
 
     context = getattr(instance, "context", None) or {}
-    if not isinstance(context, dict):
-        return []
-    return _attachments_de(context)
+    adjuntos = _attachments_de(context) if isinstance(context, dict) else []
+
+    # Los del personal viven en un campo propio y no en el contexto —el contexto es
+    # dato del trámite: lo recorren los `data_mapping`, acaba en los documentos
+    # emitidos y se copia en cada snapshot—, pero se leen junto con los demás:
+    # quien abre el expediente quiere los documentos del caso, no dos listas que
+    # tiene que cruzar.
+    vistos = {a["attachment_id"] for a in adjuntos}
+    for registro in (getattr(instance, "staff_attachments", None) or []):
+        if not isinstance(registro, dict) or not registro.get("s3_key"):
+            # Un registro mal formado no puede impedir ver el expediente entero.
+            continue
+        if registro.get("attachment_id") in vistos:
+            continue
+        vistos.add(registro.get("attachment_id"))
+        adjuntos.append(registro)
+
+    return adjuntos
 
 
 def collect_origin_attachments(instance, origin_instance=None) -> List[Dict[str, Any]]:

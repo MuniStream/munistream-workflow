@@ -290,6 +290,17 @@ class WorkflowInstance(Document):
         description="Pre-execution context snapshots per task_id, used to support rewind to upstream tasks"
     )
 
+    # Documentos que el personal archiva en el expediente: un oficio de otra
+    # dependencia, el acuse de una notificación, una constancia que el ciudadano
+    # llevó en papel. Va en un campo propio y NO dentro de `context` a propósito:
+    # el contexto es dato del trámite —lo recorren los `data_mapping`, acaba en los
+    # documentos emitidos y se copia en cada `pre_task_context_snapshots`—, y un
+    # oficio que archiva el revisor no es una respuesta del ciudadano.
+    staff_attachments: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Adjuntos archivados por el personal (no forman parte del contexto del trámite)",
+    )
+
     # Timing
     started_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = Field(None, description="When instance completed")

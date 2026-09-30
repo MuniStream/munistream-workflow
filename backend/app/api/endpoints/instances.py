@@ -1,6 +1,7 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends, Request, UploadFile, File, Form
 from datetime import datetime
+import os
 import uuid
 import logging
 from beanie import PydanticObjectId
@@ -49,6 +50,12 @@ from ...models.team import TeamModel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Tope de un documento archivado por el personal. No es una cifra sagrada: es que
+# un expediente con adjuntos de decenas de MB se vuelve imposible de abrir en el
+# navegador del revisor, y el error hay que darlo antes de subirlo, no después.
+MAX_ADJUNTO_BYTES = 25 * 1024 * 1024
+
 
 
 async def check_instance_access(instance: WorkflowInstance, current_user: dict) -> bool:
@@ -1965,6 +1972,81 @@ async def get_instance_citizen_entity(
         "updated_at": entity.updated_at,
         "relationships_count": len([r for r in entity.relationships if r.is_active]),
     }
+
+
+@router.post("/{instance_id}/attachments")
+async def upload_instance_attachment(
+    instance_id: str,
+    file: UploadFile = File(..., description="Documento a archivar en el expediente"),
+    description: Optional[str] = Form(None, description="Para qué es este documento"),
+    db_instance: WorkflowInstance = Depends(require_instance_access),
+    current_user: dict = Depends(require_permission("MANAGE_INSTANCES")),
+):
+    """
+    Archiva un documento en el expediente.
+
+    De los adjuntos solo había lectura: listar, descargar y emitir un token. La
+    única escritura era `submit-data`, que exige un paso en espera — eso es
+    contestar el formulario, no agregar un documento al caso. Así que cuando al
+    revisor le llegaba algo por fuera (un oficio de otra dependencia, el acuse de
+    una notificación, una constancia en papel) no tenía dónde ponerlo: se quedaba
+    en su correo y el expediente mentía por omisión.
+
+    El archivo NO entra al `context`. El contexto es dato del trámite —lo recorren
+    los `data_mapping`, acaba en los documentos emitidos y se copia en cada
+    snapshot—, y un oficio que archiva la dependencia no es una respuesta del
+    ciudadano. Va a `staff_attachments`, y se lee junto con los demás.
+
+    Pide `MANAGE_INSTANCES` y no solo `VIEW_INSTANCES`: leer un expediente y
+    añadirle documentos no son el mismo permiso.
+    """
+    contenido = await file.read()
+    if not contenido:
+        raise HTTPException(status_code=400, detail="El archivo llegó vacío")
+    if len(contenido) > MAX_ADJUNTO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"El archivo supera el máximo de {MAX_ADJUNTO_BYTES // (1024 * 1024)} MB",
+        )
+
+    from ...services import s3_storage
+    from ...services.instance_attachments import registro_de_adjunto_del_revisor
+
+    nombre = os.path.basename(file.filename or "documento")
+    bucket = s3_storage.default_bucket()
+    # El uuid evita que dos documentos con el mismo nombre se pisen, y mantiene el
+    # expediente agrupado bajo la instancia.
+    key = f"expedientes/{instance_id}/staff/{uuid.uuid4().hex}/{nombre}"
+
+    try:
+        s3_storage.upload_bytes(
+            bucket=bucket,
+            key=key,
+            content=contenido,
+            content_type=file.content_type or "application/octet-stream",
+            metadata={"instance_id": instance_id, "origin": "staff"},
+        )
+    except Exception as e:
+        logger.error(f"No se pudo archivar el adjunto en {instance_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="No se pudo guardar el documento")
+
+    registro = registro_de_adjunto_del_revisor(
+        s3_key=key,
+        s3_bucket=bucket,
+        filename=nombre,
+        content_type=file.content_type,
+        size=len(contenido),
+        uploaded_by=current_user.get("email") or current_user.get("username") or current_user.get("sub"),
+        uploaded_at=datetime.utcnow().isoformat(),
+    )
+    if description:
+        registro["description"] = description
+
+    db_instance.staff_attachments = (db_instance.staff_attachments or []) + [registro]
+    db_instance.updated_at = datetime.utcnow()
+    await db_instance.save()
+
+    return registro
 
 
 @router.get("/{instance_id}/attachments/{attachment_id}/content")
