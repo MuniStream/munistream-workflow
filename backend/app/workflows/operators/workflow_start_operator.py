@@ -64,7 +64,12 @@ class WorkflowStartOperator(BaseOperator):
         timeout_minutes: int = 1440,  # 24 hours default
         pass_context: bool = True,
         context_mapping: Optional[Dict[str, str]] = None,
-        required_status: str = "approved",
+        # "completed" y no "approved": NADA en la plataforma escribe
+        # `terminal_status`, así que el hijo siempre se lee como "completed" y un
+        # default de "approved" no lo cumplía nunca. Los trámites que no lo
+        # declaraban —aviso de siembra, arribo de menores, pesca deportiva—
+        # morían justo DESPUÉS de que el revisor los aprobaba.
+        required_status: str = "completed",
         priority: int = 5,
         auto_assign: bool = False,
         assignee_role: Optional[str] = None,
@@ -216,6 +221,7 @@ class WorkflowStartOperator(BaseOperator):
                 logger.error(f"Child instance creation returned None")
                 return TaskResult(
                     status=TaskStatus.FAILED,
+                    error="Child workflow instance creation returned None",
                     data={
                         "error": "Child workflow instance creation returned None",
                         "workflow_id": self.workflow_id
@@ -293,6 +299,7 @@ class WorkflowStartOperator(BaseOperator):
             logger.error(f"Exception in WorkflowStartOperator.execute, error_type={type(e).__name__}, workflow_id={self.workflow_id}, parent_instance_id={context.get('instance_id')}", exc_info=True)
             return TaskResult(
                 status=TaskStatus.FAILED,
+                    error=f"Failed to start workflow: {str(e)}",
                 data={
                     "error": f"Failed to start workflow: {str(e)}",
                     "error_type": type(e).__name__,
@@ -669,6 +676,7 @@ class WorkflowStartOperator(BaseOperator):
             logger.error(f"No child workflow instance ID to check")
             return TaskResult(
                 status=TaskStatus.FAILED,
+                error="No hay validación administrativa que consultar",
                 data={"error": "No child workflow instance to check"}
             )
 
@@ -682,6 +690,7 @@ class WorkflowStartOperator(BaseOperator):
             logger.error(f"Child workflow instance not found in database")
             return TaskResult(
                 status=TaskStatus.FAILED,
+                    error=f"Child workflow {self.child_instance_id} not found",
                 data={
                     "error": f"Child workflow {self.child_instance_id} not found",
                     "child_workflow_id": self.child_instance_id
@@ -695,6 +704,7 @@ class WorkflowStartOperator(BaseOperator):
                 logger.warning(f"Child workflow timed out")
                 return TaskResult(
                     status=TaskStatus.FAILED,
+                    error=f"Timeout waiting for child workflow after {self.timeout_minutes} minutes",
                     data={
                         "error": f"Timeout waiting for child workflow after {self.timeout_minutes} minutes",
                         "child_workflow_id": self.child_instance_id,
@@ -775,6 +785,7 @@ class WorkflowStartOperator(BaseOperator):
                 logger.warning(f"Child workflow completed with unexpected status")
                 return TaskResult(
                     status=TaskStatus.FAILED,
+                    error=f"Child workflow completed with status {terminal_status}, expected {self.required_status}",
                     data={
                         "error": f"Child workflow completed with status {terminal_status}, expected {self.required_status}",
                         "child_workflow_id": self.child_instance_id,
