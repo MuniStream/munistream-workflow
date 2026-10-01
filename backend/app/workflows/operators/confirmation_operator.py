@@ -25,10 +25,23 @@ logger = get_workflow_logger(__name__)
 def _resolve_path(context: Dict[str, Any], path: str) -> Any:
     """
     Resuelve un dot-path contra el contexto. Soporta acceso por índice numérico
-    cuando el segmento es un entero (por ejemplo: "uploads.0.filename"). Devuelve
-    None si la ruta no resuelve.
+    cuando el segmento es un entero (por ejemplo: "uploads.0.filename").
+
+    Admite ALTERNATIVAS separadas por `|`, igual que `name_source` y
+    `data_mapping`: gana la primera que resuelva. Hace falta porque las entidades
+    de una misma clase no son homogéneas —los registros RNPA de distinta época
+    llevan `nombre_completo` o `razon_social`, no siempre los dos—, y con una
+    sola ruta el resumen enseñaba un renglón vacío en vez del dato que sí está.
+
+    Devuelve None si no resuelve ninguna.
     """
     if not path:
+        return None
+    if "|" in path:
+        for alternativa in path.split("|"):
+            valor = _resolve_path(context, alternativa.strip())
+            if valor is not None and valor != "":
+                return valor
         return None
     parts = path.split(".")
     current: Any = context
@@ -168,6 +181,20 @@ class ConfirmationOperator(BaseOperator):
                     "format": field.get("format"),
                     "value": value,
                 })
+            # Nota condicional de la sección: `{"when": <clave>, "text": ...}`.
+            # Existe para los pasos que legítimamente no capturaron nada —un
+            # pago exento no tiene importe, fecha ni folio— y que sin ella se
+            # presentaban como una columna de rayas, indistinguible de un paso
+            # que el ciudadano dejó a medias. La nota EXPLICA el vacío; los
+            # campos se siguen mostrando, porque esconderlos taparía también
+            # los que sí deberían traer dato.
+            nota = section.get("note") or {}
+            texto_nota = None
+            if nota.get("text"):
+                condicion = nota.get("when")
+                if not condicion or _resolve_path(context, condicion):
+                    texto_nota = nota["text"]
+
             resolved_sections.append({
                 "id": section.get("id"),
                 "title": section.get("title"),
@@ -175,6 +202,7 @@ class ConfirmationOperator(BaseOperator):
                 "source_task_id": section.get("source_task_id"),
                 "operator_kind": section.get("operator_kind"),
                 "editable": bool(section.get("editable", True)),
+                "note": texto_nota,
                 "fields": resolved_fields,
             })
         return resolved_sections

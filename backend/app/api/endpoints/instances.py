@@ -58,36 +58,97 @@ MAX_ADJUNTO_BYTES = 25 * 1024 * 1024
 
 
 
+# Roles del sistema que, perteneciendo al equipo asignado, dan acceso al trámite.
+# Se incluye a `reviewer` y `viewer` y no solo a `manager`: un equipo al que solo
+# pueden entrar los jefes no es una bandeja, y quien de verdad dictamina es el
+# revisor del área.
+ROLES_CON_ACCESO_POR_EQUIPO = ("admin", "manager", "reviewer", "approver", "viewer")
+
+
+def puede_ver_instancia(instance, user_roles, user_id, user_teams) -> bool:
+    """
+    La decisión de acceso, separada de dónde salen los datos para poder probarla.
+
+    - admin: todo.
+    - asignación directa: al titular de la asignación.
+    - asignación por equipo: a quien pertenece a ese equipo y tiene rol del sistema.
+    """
+    if "admin" in (user_roles or []):
+        return True
+
+    if user_id and getattr(instance, "assigned_user_id", None) == user_id:
+        return True
+
+    equipo = getattr(instance, "assigned_team_id", None)
+    if equipo and equipo in (user_teams or []):
+        if any(r in ROLES_CON_ACCESO_POR_EQUIPO for r in (user_roles or [])):
+            return True
+
+    return False
+
+
+async def equipos_del_usuario(current_user: Dict[str, Any]) -> List[str]:
+    """
+    Equipos activos a los que pertenece quien pregunta.
+
+    Se resuelven desde la base y no desde el token: meterlos como claim exigiría
+    mapear grupos en Keycloak y mantener esa correspondencia en los tres entornos,
+    y el equipo ya vive en Mongo con su lista de miembros — que es la fuente de
+    verdad y la que editan los endpoints de administración.
+
+    El cruce va por **correo** porque es como el resto del sistema une la cuenta de
+    Keycloak con el usuario interno (`keycloak_sync` hace lo mismo): los miembros
+    de un equipo se guardan con el id interno de Mongo, no con el `sub` del token.
+    Se acepta también el `sub` por si algún equipo se pobló con él.
+    """
+    from ...models.team import TeamModel
+    from ...models.user import UserModel
+
+    identidades = set()
+    sub = current_user.get("sub")
+    if sub:
+        identidades.add(sub)
+
+    correo = current_user.get("email")
+    if correo:
+        interno = await UserModel.find_one(UserModel.email == correo)
+        if interno:
+            identidades.add(str(interno.id))
+            if getattr(interno, "user_id", None):
+                identidades.add(str(interno.user_id))
+
+    if not identidades:
+        return []
+
+    equipos = await TeamModel.find(
+        {"is_active": True, "members.user_id": {"$in": list(identidades)}}
+    ).to_list()
+    return [
+        t.team_id
+        for t in equipos
+        if any(m.user_id in identidades and m.is_active for m in (t.members or []))
+    ]
+
+
 async def check_instance_access(instance: WorkflowInstance, current_user: dict) -> bool:
     """
-    Check if current user has access to view/modify a specific instance based on their role and assignment.
+    Comprueba si el usuario puede ver o tocar esta instancia.
 
-    Access rules:
-    - admin: can access all instances
-    - manager: can access instances assigned to their teams
-    - reviewer/approver: can access instances directly assigned to them only
-    - viewer: can access instances directly assigned to them only
+    La rama de equipo no concedía acceso a NADIE: leía `current_user["teams"]` y
+    `get_user_info` nunca pone esa clave —devuelve `sub`, `email`, `username`,
+    `name` y `roles`—, así que la lista era siempre vacía. Los trámites asignados a
+    un área solo los veía quien entrara como `admin`, y la separación por equipos
+    era decorativa.
     """
     user_roles = current_user.get("roles", [])
     user_id = current_user.get("sub")
-    user_teams = current_user.get("teams", [])
 
-    # Admin has access to everything
-    if "admin" in user_roles:
+    # Atajo: el admin no necesita que se consulte su pertenencia a equipos.
+    if "admin" in user_roles or getattr(instance, "assigned_user_id", None) == user_id:
         return True
 
-    # Check if instance is assigned to the user directly
-    if instance.assigned_user_id == user_id:
-        return True
-
-    # Manager: check if instance is assigned to their team
-    if "manager" in user_roles:
-        if instance.assigned_team_id and instance.assigned_team_id in user_teams:
-            return True
-
-    # Reviewer, approver, and viewer: only direct assignments (already checked above)
-    # If we reach here, access is denied
-    return False
+    user_teams = current_user.get("teams") or await equipos_del_usuario(current_user)
+    return puede_ver_instancia(instance, user_roles, user_id, user_teams)
 
 
 async def require_instance_access(instance_id: str, current_user: dict = Depends(require_permission("VIEW_INSTANCES"))) -> WorkflowInstance:

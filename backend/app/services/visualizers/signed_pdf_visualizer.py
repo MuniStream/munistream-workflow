@@ -11,6 +11,7 @@ import logging
 from .pdf_visualizer import PDFVisualizer
 from ..signature.signature_verifier import SignatureVerifier
 from ...models.legal_entity import LegalEntity
+from ..signature_extraction import signature_block
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +30,31 @@ class SignedPDFVisualizer(PDFVisualizer):
 
         Args:
             config: Configuration options including:
-                - template: Template name (defaults to signed-specific template)
+                - template / pdf_template: Nombre de la plantilla, SIN extensión
+                  (el motor añade `.html`). Por defecto, `default`.
                 - include_qr: Whether to include QR codes
                 - verify_signatures: Whether to verify signatures before display
                 - show_signature_details: Whether to show detailed signature info
                 - signature_section: Configuration for signature display section
         """
-        # Set default template for signed documents
         if config is None:
             config = {}
 
+        # La plantilla, con dos correcciones sobre lo que había:
+        #
+        # 1. Los trámites declaran la suya como `pdf_template` en
+        #    `entity_display_config` —el endpoint vuelca ese dict tal cual en la
+        #    config—, pero aquí solo se leía `template`. La plantilla del tenant
+        #    no llegaba nunca.
+        # 2. El valor por defecto era `signed_entity.html`, y el motor añade la
+        #    extensión él mismo (`f"{template_name}.html"`), así que pedía
+        #    `signed_entity.html.html`. Además esa plantilla no existe en el
+        #    repositorio, ni compartida ni en ningún tenant: la vista previa del
+        #    documento respondía 500 siempre que caía en este visualizador.
+        #
+        # El respaldo es `default`, que sí existe y trae bloque de firma.
         if "template" not in config:
-            config["template"] = "signed_entity.html"
+            config["template"] = config.get("pdf_template") or "default"
 
         # Enable signature-related features by default
         config.setdefault("include_signatures", True)
@@ -69,7 +83,7 @@ class SignedPDFVisualizer(PDFVisualizer):
                 raise ValueError(f"Entity validation failed: {validation['errors']}")
 
             # Check if entity has signature data
-            signature_data = entity.data.get("signature") if entity.data else None
+            signature_data = signature_block(entity.data)
             if not signature_data:
                 logger.warning(f"Entity {entity.entity_id} has no signature data, using basic PDF generation")
                 return await super().generate_pdf(entity)
@@ -132,7 +146,7 @@ class SignedPDFVisualizer(PDFVisualizer):
             # Generate PDF with signature information
             pdf_data = await self.report_generator.generate_entity_report(
                 entity=temp_entity,
-                template_name=self.config.get("template", "signed_entity.html"),
+                template_name=self.config.get("template", "default"),
                 include_qr=self.config.get("include_qr", True),
                 include_signatures=True,
                 format="pdf",
@@ -218,7 +232,7 @@ class SignedPDFVisualizer(PDFVisualizer):
 
         # Additional validation for signed entities
         if entity and entity.data:
-            signature_data = entity.data.get("signature")
+            signature_data = signature_block(entity.data)
 
             if not signature_data:
                 result["warnings"].append("Entity has no signature data")

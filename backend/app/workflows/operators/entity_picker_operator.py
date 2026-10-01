@@ -394,6 +394,12 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
         snapshot["_entity_id"] = getattr(entity, "entity_id", None)
         snapshot["_entity_name"] = getattr(entity, "name", None)
         snapshot["_entity_type"] = getattr(entity, "entity_type", None)
+        # La vigencia vive en el MODELO (`valid_until`), no en `data`: el picker
+        # ya la muestra ("Vigente hasta …") pero el trámite no podía leerla, así
+        # que trámites como las prórrogas volvían a pedirle al ciudadano una
+        # fecha que el sistema ya conoce —y que él podía teclear distinta—.
+        vence = getattr(entity, "valid_until", None)
+        snapshot["_entity_valid_until"] = vence.isoformat() if vence else None
         return snapshot
 
     def _build_selected_entities_data(

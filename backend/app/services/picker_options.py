@@ -37,13 +37,20 @@ def encontrar_requisito(dag, store_as: str) -> Optional[Tuple[str, Dict[str, Any
     return None
 
 
-def _valor_en(entidad, ruta: str) -> Any:
-    """
-    Resuelve un campo a mostrar: atributo de la entidad, clave de `data`, o una
-    ruta con punto dentro de `data`.
-    """
-    if "." not in ruta and hasattr(entidad, ruta):
-        return getattr(entidad, ruta)
+# Claves que el picker añade al fotografiar la entidad seleccionada y que no
+# viven en `data`. Se aceptan también aquí para que un `display_fields` pueda
+# usar la misma alternativa en la tarjeta y en la confirmación.
+_SINONIMOS_DE_ENTIDAD = {
+    "_entity_name": "name",
+    "_entity_id": "entity_id",
+    "_entity_type": "entity_type",
+}
+
+
+def _valor_simple(entidad, ruta: str) -> Any:
+    atributo = _SINONIMOS_DE_ENTIDAD.get(ruta, ruta)
+    if "." not in atributo and hasattr(entidad, atributo):
+        return getattr(entidad, atributo)
 
     nodo: Any = getattr(entidad, "data", None) or {}
     for parte in ruta.split("."):
@@ -51,6 +58,26 @@ def _valor_en(entidad, ruta: str) -> Any:
             return None
         nodo = nodo[parte]
     return nodo
+
+
+def _valor_en(entidad, ruta: str) -> Any:
+    """
+    Resuelve un campo a mostrar: atributo de la entidad, clave de `data`, o una
+    ruta con punto dentro de `data`.
+
+    Admite alternativas separadas por `|` —`"nombre|_entity_name"`— y devuelve
+    la primera con dato. El mismo contrato que usa la confirmación: una entidad
+    llama `nombre` a lo que otra llama `nombre_completo`, y sin alternativas la
+    tarjeta se quedaba en blanco justo en el campo que identifica a la persona.
+    """
+    for alternativa in ruta.split("|"):
+        alternativa = alternativa.strip()
+        if not alternativa:
+            continue
+        valor = _valor_simple(entidad, alternativa)
+        if valor not in (None, "", [], {}):
+            return valor
+    return None
 
 
 def resumen_de_candidata(entidad, display_fields: List[str]) -> Dict[str, Any]:
@@ -66,7 +93,10 @@ def resumen_de_candidata(entidad, display_fields: List[str]) -> Dict[str, Any]:
         valor = _valor_en(entidad, ruta)
         if valor in (None, "", [], {}):
             continue
-        campos.append({"field": ruta, "value": valor})
+        # La etiqueta sale de la PRIMERA alternativa: `|` es contrato de
+        # resolución, no de presentación, y rotular la cadena entera dejaba
+        # "Nombre| entity name" en la tarjeta.
+        campos.append({"field": ruta.split("|")[0].strip(), "value": valor})
 
     return {
         "entity_id": getattr(entidad, "entity_id", None),

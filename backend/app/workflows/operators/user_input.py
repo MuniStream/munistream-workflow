@@ -210,7 +210,7 @@ class UserInputOperator(BaseOperator):
                             errors.append(f"{label} no puede ser anterior a la fecha actual")
 
         # Address fields: valor es un objeto {calle, no_ext, no_int, colonia,
-        # municipio, estado, cp}. Validar subcampos requeridos (no_int opcional).
+        # municipio, estado, cp, pais}. Validar subcampos requeridos (no_int opcional).
         ADDRESS_REQUIRED = [
             ("calle", "Calle"),
             ("no_ext", "No. Ext"),
@@ -219,6 +219,38 @@ class UserInputOperator(BaseOperator):
             ("municipio", "Municipio"),
             ("estado", "Estado"),
         ]
+        # Domicilio mundial: no se puede exigir colonia ni código postal (hay
+        # países sin código postal y sin división equivalente a la colonia), y
+        # sí se exige el país. Tiene que espejear al portal: si el backend
+        # siguiera pidiendo colonia y CP, el extranjero llenaría el formulario
+        # que el portal le muestra y el envío se rechazaría sin remedio.
+        ADDRESS_REQUIRED_INTL = [
+            ("pais", "País"),
+            ("calle", "Calle"),
+            ("no_ext", "No. Ext"),
+            ("municipio", "Ciudad"),
+        ]
+
+        def _domicilio_mundial(cfg: Dict[str, Any]) -> bool:
+            if cfg.get("international"):
+                return True
+            cond = cfg.get("international_if")
+            if not isinstance(cond, dict):
+                return False
+            ref = user_input.get(cond.get("field"))
+            def coincide(esperado):
+                if esperado is None:
+                    return False
+                if isinstance(esperado, (list, tuple, set)):
+                    return ref in esperado
+                return ref == esperado
+            if "value" in cond:
+                return coincide(cond.get("value"))
+            if "not_value" in cond:
+                if ref is None or str(ref).strip() == "":
+                    return False
+                return not coincide(cond.get("not_value"))
+            return False
         for field_cfg in fields_schema:
             if field_cfg.get("type") != "address":
                 continue
@@ -232,11 +264,15 @@ class UserInputOperator(BaseOperator):
                 continue
             # `region_only`: solo se captura CP, Municipio y Estado (sin calle,
             # número ni colonia), p. ej. "Lugar de embarque".
-            required_subfields = (
-                [("cp", "Código Postal"), ("municipio", "Municipio"), ("estado", "Estado")]
-                if field_cfg.get("region_only")
-                else ADDRESS_REQUIRED
-            )
+            mundial = _domicilio_mundial(field_cfg)
+            if field_cfg.get("region_only"):
+                required_subfields = (
+                    [("pais", "País"), ("municipio", "Ciudad")]
+                    if mundial
+                    else [("cp", "Código Postal"), ("municipio", "Municipio"), ("estado", "Estado")]
+                )
+            else:
+                required_subfields = ADDRESS_REQUIRED_INTL if mundial else ADDRESS_REQUIRED
             for sub_key, sub_label in required_subfields:
                 sub_val = value.get(sub_key)
                 if sub_val is None or str(sub_val).strip() == "":
