@@ -105,3 +105,31 @@ def test_incluye_el_subject_real_del_certificado():
 def test_marca_la_firma_como_valida():
     """Catastro imprime `Validez: ✓ Firma válida`; el objeto debe traer el dato."""
     assert _firma_publicada(_contexto())["signature_valid"] is True
+
+
+async def test_la_firma_publicada_lleva_el_mismo_firmante_que_firmas():
+    """`<task>_signature` (lo que se mapea a la entidad) y la entrada de
+    `firmas` deben nombrar al mismo firmante. El objeto suelto no recibía el
+    respaldo del nombre y la ficha del documento decía "Firmante: Unknown"
+    aunque el PDF mostraba la firma válida."""
+    op = SignerOperator(task_id="firma_validacion", context_fields_to_sign=["instance_id"])
+    op.log_info = _sin_log
+    op.log_error = _sin_log
+    op.log_warning = _sin_log
+    ctx = {**_contexto(), "firma_validacion_input": {
+        "digital_signature": CADENA,
+        "digital_signature_certificate": CERT,
+        "certificate_info": {"subject": "PAOLA VILLARREAL RODRIGUEZ"},
+        "algorithm": "RSA-SHA256",
+        "timestamp": "2026-09-09T14:38:34.880Z",
+    }}
+    res = await op.execute_async(ctx)
+    datos = res.data or {}
+    firma = datos.get("firma_validacion_signature")
+    assert firma, f"no publicó la firma: {sorted(datos)}"
+    assert firma["signer"], "la firma publicada no lleva firmante"
+    assert firma["signer"] == datos["firmas"][-1]["signer"] == datos["firma_validacion_signer"]
+
+
+async def _sin_log(*a, **k):
+    return None
