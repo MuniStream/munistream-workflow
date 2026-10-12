@@ -289,6 +289,11 @@ class DAGInstance:
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
         self.updated_at = datetime.utcnow()
+
+        # Desenlace de negocio (p. ej. "rejected") y su motivo. None = la
+        # instancia terminó por recorrer el DAG completo.
+        self.terminal_status: Optional[str] = None
+        self.terminal_message: Optional[str] = None
         
         # Initialize task states
         for task_id in dag.tasks.keys():
@@ -432,6 +437,22 @@ class DAGInstance:
         elif status == "skipped":
             self.task_states[task_id]["completed_at"] = datetime.utcnow()
             self.skipped_tasks.add(task_id)
+
+    def terminate(self, status: str, message: Optional[str] = None) -> Set[str]:
+        """
+        Cierra la instancia con un desenlace de negocio: lo que no terminó se
+        marca omitido, así `is_completed()` es verdadero y la instancia no
+        queda como fallida. Devuelve las tareas que se omitieron.
+        """
+        self.terminal_status = status
+        self.terminal_message = message
+        pendientes = (
+            set(self.dag.tasks)
+            - self.completed_tasks - self.failed_tasks - self.skipped_tasks
+        )
+        for task_id in pendientes:
+            self.update_task_status(task_id, "skipped")
+        return pendientes
 
     def is_completed(self) -> bool:
         """Check if all tasks are resolved (completed or skipped)."""

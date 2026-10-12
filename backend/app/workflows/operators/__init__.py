@@ -28,6 +28,7 @@ from .facial_verification_operator import FacialVerificationOperator
 from .catalog_selector_operator import CatalogSelectorOperator
 from .assertion_operator import AssertionOperator
 from .confirmation_operator import ConfirmationOperator
+from .terminate_if import TerminateIfOperator
 
 __all__ = [
     # Base classes
@@ -39,6 +40,7 @@ __all__ = [
     # Python operators
     "PythonOperator",
     "ShortCircuitOperator",
+    "TerminateIfOperator",
 
     # User interaction operators
     "UserInputOperator",

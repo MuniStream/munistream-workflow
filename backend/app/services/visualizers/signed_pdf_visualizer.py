@@ -125,20 +125,10 @@ class SignedPDFVisualizer(PDFVisualizer):
                 "verification_enabled": self.config.get("verify_signatures", True)
             }
 
-            # Create a temporary entity copy with enhanced data
-            temp_entity = LegalEntity(
-                entity_id=entity.entity_id,
-                entity_type=entity.entity_type,
-                owner_user_id=entity.owner_user_id,
-                name=entity.name,
-                data=enhanced_entity_data,
-                visualization_config=entity.visualization_config,
-                entity_display_config=entity.entity_display_config,
-                status=entity.status,
-                verified=entity.verified,
-                created_at=entity.created_at,
-                updated_at=entity.updated_at
-            )
+            # Copia temporal con los datos enriquecidos. Se copia la entidad
+            # entera: armarla campo por campo dejaba fuera `valid_until`, y un
+            # título prorrogado imprimía sin su vigencia nueva.
+            temp_entity = entity.model_copy(update={"data": enhanced_entity_data})
 
             # Get base_url from config if available
             base_url = self.config.get("base_url")

@@ -93,6 +93,100 @@ def _resolve_context_parts(current: Any, parts: List[str]) -> Any:
     return None
 
 
+def resolver_vigencia(
+    cfg: Dict[str, Any],
+    entity_data: Dict[str, Any],
+    context: Dict[str, Any],
+    ahora: datetime,
+    vigente_hasta: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """
+    Traduce una configuración de `vigencia` a una fecha de vencimiento.
+
+    `cfg["desde"]` elige la base de cálculo:
+      - ausente: el momento de emisión (`ahora`);
+      - "valid_until_actual": el vencimiento vigente de la entidad que se
+        reemite (`vigente_hasta`), aunque ya haya pasado —una prórroga corre
+        desde ahí—; si la entidad no tiene vencimiento, desde `ahora`;
+      - cualquier otra clave: una fecha del data/contexto (p. ej. la fecha de
+        embarque de la guía).
+    """
+    from app.services.entity_validity import (
+        parse_duracion, sumar_periodo, sumar_dias_habiles,
+    )
+
+    desde = ahora
+    campo_desde = cfg.get("desde")
+    if campo_desde == "valid_until_actual":
+        desde = vigente_hasta or ahora
+    elif campo_desde:
+        crudo = entity_data.get(campo_desde) or context.get(campo_desde)
+        if isinstance(crudo, datetime):
+            desde = crudo
+        elif isinstance(crudo, str) and crudo.strip():
+            try:
+                desde = datetime.fromisoformat(crudo.strip()[:19])
+            except ValueError:
+                desde = ahora
+
+    # Días hábiles (p. ej. la guía de pesca: 3 días hábiles).
+    if cfg.get("dias_habiles"):
+        return sumar_dias_habiles(desde, int(cfg["dias_habiles"]))
+
+    # Periodo fijo declarado en el trámite.
+    for unidad, clave in (("anos", "anos"), ("meses", "meses"), ("dias", "dias"), ("semanas", "semanas")):
+        if cfg.get(clave):
+            return sumar_periodo(desde, int(cfg[clave]), unidad)
+
+    # Vigencia leída de un campo (o varios) del formulario o la resolución.
+    fuentes = cfg.get("source")
+    if isinstance(fuentes, str):
+        fuentes = [fuentes]
+    # Cada fuente es una ruta con la sintaxis de `data_mapping` (`a.b|c`): los
+    # formularios dejan su captura anidada en `<task>_data`.
+    for fuente in (fuentes or []):
+        valor = _resolve_context_path(entity_data, fuente)
+        if valor is None:
+            valor = _resolve_context_path(context, fuente)
+        parsed = parse_duracion(valor, cfg.get("unidad_default", "anos"))
+        if parsed:
+            return sumar_periodo(desde, parsed["cantidad"], parsed["unidad"])
+
+    return None
+
+
+def armar_reemision(
+    actual_data: Optional[Dict[str, Any]],
+    actual_valid_until: Optional[datetime],
+    updates_data: Dict[str, Any],
+    nuevo_valid_until: Optional[datetime],
+    historial: Optional[str],
+    instance_id: Optional[str],
+    ahora: datetime,
+) -> Dict[str, Any]:
+    """
+    Arma el `updates` de una reemisión: los cambios de `data`, el vencimiento
+    nuevo (si lo hay) y, si se pide, un registro en `data[historial]` con el
+    vencimiento y la firma que la entidad tenía antes. Así la entidad sigue
+    siendo la misma —mismo folio, mismo id— y no se pierde lo que se reemplazó.
+    """
+    data = dict(updates_data)
+    if historial:
+        previos = list((actual_data or {}).get(historial) or [])
+        previos.append({
+            "fecha": ahora.isoformat(),
+            "instance_id": instance_id,
+            "valid_until_anterior": actual_valid_until.isoformat() if actual_valid_until else None,
+            "valid_until_nuevo": nuevo_valid_until.isoformat() if nuevo_valid_until else None,
+            "signature_anterior": (actual_data or {}).get("signature"),
+        })
+        data[historial] = previos
+    updates: Dict[str, Any] = {"data": data}
+    if nuevo_valid_until:
+        updates["valid_until"] = nuevo_valid_until
+    return updates
+
+
 class EntityCreationOperator(BaseOperator):
     """
     Operator that creates a new legal entity during workflow execution.
@@ -192,54 +286,12 @@ class EntityCreationOperator(BaseOperator):
         """
         Traduce el parámetro `vigencia` del trámite a una fecha de vencimiento.
 
-        Devuelve un datetime o None. La lógica de unidades vive en
-        `entity_validity` para no duplicar el parseo que también usa EntityService.
+        Devuelve un datetime o None. La lógica vive en `resolver_vigencia`, que
+        también usa `EntityUpdateOperator` al reemitir una entidad.
         """
         if not self.vigencia:
             return None
-
-        from datetime import datetime
-        from app.services.entity_validity import (
-            parse_duracion, sumar_periodo, sumar_dias_habiles,
-        )
-
-        cfg = self.vigencia
-        emitida = datetime.utcnow()
-
-        # Base de cálculo: una fecha del contexto/entidad si el trámite la nombra
-        # (p. ej. la fecha de embarque de la guía), o el momento de emisión.
-        desde = emitida
-        campo_desde = cfg.get("desde")
-        if campo_desde:
-            crudo = entity_data.get(campo_desde) or context.get(campo_desde)
-            if isinstance(crudo, datetime):
-                desde = crudo
-            elif isinstance(crudo, str) and crudo.strip():
-                try:
-                    desde = datetime.fromisoformat(crudo.strip()[:19])
-                except ValueError:
-                    desde = emitida
-
-        # Días hábiles (p. ej. la guía de pesca: 3 días hábiles).
-        if cfg.get("dias_habiles"):
-            return sumar_dias_habiles(desde, int(cfg["dias_habiles"]))
-
-        # Periodo fijo declarado en el trámite.
-        for unidad, clave in (("anos", "anos"), ("meses", "meses"), ("dias", "dias"), ("semanas", "semanas")):
-            if cfg.get(clave):
-                return sumar_periodo(desde, int(cfg[clave]), unidad)
-
-        # Vigencia solicitada leída de un campo (o varios) del formulario.
-        fuentes = cfg.get("source")
-        if isinstance(fuentes, str):
-            fuentes = [fuentes]
-        for fuente in (fuentes or []):
-            valor = entity_data.get(fuente, context.get(fuente))
-            parsed = parse_duracion(valor, cfg.get("unidad_default", "anos"))
-            if parsed:
-                return sumar_periodo(desde, parsed["cantidad"], parsed["unidad"])
-
-        return None
+        return resolver_vigencia(self.vigencia, entity_data, context, datetime.utcnow())
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """Create the entity based on workflow context"""
@@ -646,6 +698,9 @@ class EntityUpdateOperator(BaseOperator):
         static_data: Optional[Dict[str, Any]] = None,
         preserve_as: Optional[Dict[str, str]] = None,
         owner_scoped: bool = False,
+        vigencia: Optional[Dict[str, Any]] = None,
+        historial: Optional[str] = None,
+        vigencia_requerida: bool = False,
         **kwargs
     ):
         """
@@ -660,6 +715,13 @@ class EntityUpdateOperator(BaseOperator):
                 titular previo al sustituirlo.
             owner_scoped: Si es True, sólo actualiza si la entidad pertenece al
                 usuario del contexto; por defecto False (flujo validado por admin).
+            vigencia: Misma configuración que en EntityCreationOperator; fija
+                `valid_until` del modelo. Con `"desde": "valid_until_actual"`
+                cuenta desde el vencimiento vigente de la entidad (prórroga).
+            historial: Campo de `data` (lista) donde se agrega un registro con el
+                vencimiento y la firma anteriores en cada reemisión.
+            vigencia_requerida: Si la vigencia no se puede resolver, falla en vez
+                de reemitir sin extender (p. ej. una prórroga sin años).
         """
         super().__init__(task_id, **kwargs)
         self.entity_id_source = entity_id_source
@@ -667,6 +729,9 @@ class EntityUpdateOperator(BaseOperator):
         self.static_data = static_data or {}
         self.preserve_as = preserve_as or {}
         self.owner_scoped = owner_scoped
+        self.vigencia = vigencia or None
+        self.historial = historial
+        self.vigencia_requerida = vigencia_requerida
 
     def _resolve_entity_id(self, context: Dict[str, Any]) -> Optional[str]:
         value = _resolve_context_path(context, self.entity_id_source)
@@ -713,14 +778,44 @@ class EntityUpdateOperator(BaseOperator):
             details={"fields": list(params['updates'].get('data', {}).keys())}
         )
         try:
-            # Conservar valores actuales antes de sobrescribir (p.ej. titular anterior)
-            if self.preserve_as:
+            current = None
+            if self.preserve_as or self.vigencia or self.historial:
                 current = await EntityService.get_entity(params["entity_id"], params["owner_user_id"])
-                if current is not None:
-                    for src_field, target_field in self.preserve_as.items():
-                        old_value = (current.data or {}).get(src_field)
-                        if old_value is not None:
-                            params["updates"]["data"][target_field] = old_value
+
+            # Conservar valores actuales antes de sobrescribir (p.ej. titular anterior)
+            if self.preserve_as and current is not None:
+                for src_field, target_field in self.preserve_as.items():
+                    old_value = (current.data or {}).get(src_field)
+                    if old_value is not None:
+                        params["updates"]["data"][target_field] = old_value
+
+            # Reemisión: vencimiento nuevo e historial de lo que se reemplaza.
+            if (self.vigencia or self.historial) and current is not None:
+                ahora = datetime.utcnow()
+                nuevo = None
+                if self.vigencia:
+                    # La vigencia sale del CONTEXTO de esta reemisión (la
+                    # resolución nueva), nunca del data del título: ahí está la
+                    # de su resolución original.
+                    nuevo = resolver_vigencia(
+                        self.vigencia, {}, context, ahora, current.valid_until)
+                    if nuevo is None:
+                        if self.vigencia_requerida:
+                            return TaskResult(
+                                status=TaskStatus.FAILED,
+                                error=(
+                                    "La resolución no fijó la vigencia: el título no se "
+                                    f"reemitió sin extenderla ({self.vigencia.get('source')})"
+                                ),
+                            )
+                        await self.log_info(
+                            "La vigencia declarada no se pudo resolver; valid_until no cambia",
+                            details={"vigencia": self.vigencia},
+                        )
+                params["updates"] = armar_reemision(
+                    current.data or {}, current.valid_until, params["updates"]["data"],
+                    nuevo, self.historial, context.get("instance_id"), ahora,
+                )
 
             entity = await EntityService.update_entity(
                 params["entity_id"], params["updates"], params["owner_user_id"]

@@ -41,6 +41,7 @@ class ContextExplorerValidator(BaseOperator):
         show_s3_uploads: bool = True,
         entity_display_fields: Optional[List[str]] = None,
         editable_fields: Optional[List[Dict[str, Any]]] = None,
+        on_reject: str = "terminate",
         **kwargs
     ):
         """
@@ -57,6 +58,13 @@ class ContextExplorerValidator(BaseOperator):
             show_user_info: Whether to show user/customer information
             show_s3_uploads: Whether to show uploaded files from S3
             entity_display_fields: Fields to display for each entity
+            on_reject: Qué hace un rechazo del revisor.
+                - "terminate" (default): la instancia termina con desenlace
+                  `rejected` y el comentario como motivo; el padre lo hereda.
+                - "continue": registra el rechazo (`<task>_decision`,
+                  `<task>_comments`) y sigue el flujo, para que el workflow lo
+                  resuelva —p. ej. firmando y emitiendo un oficio de rechazo—.
+                - "fail": comportamiento anterior, fallo técnico con causa.
             **kwargs: Additional arguments passed to BaseOperator
         """
         super().__init__(task_id=task_id, **kwargs)
@@ -76,6 +84,7 @@ class ContextExplorerValidator(BaseOperator):
         # `name` es la ruta en el contexto revisado (admite anidado "a.b.c").
         # Sin esta lista, el operador es solo-lectura como siempre.
         self.editable_fields = editable_fields or []
+        self.on_reject = on_reject
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
         """
@@ -112,6 +121,7 @@ class ContextExplorerValidator(BaseOperator):
 
         if decision == "approved":
             data = {
+                f"{self.task_id}_decision": "approved",
                 "validation_decision": "approved",
                 "validation_comments": comments,
                 "validated_at": datetime.utcnow().isoformat(),
@@ -125,9 +135,32 @@ class ContextExplorerValidator(BaseOperator):
                 status=TaskStatus.CONTINUE,
                 data=data
             )
+        elif decision == "rejected" and self.on_reject == "continue":
+            return TaskResult(
+                status=TaskStatus.CONTINUE,
+                data={
+                    f"{self.task_id}_decision": "rejected",
+                    f"{self.task_id}_comments": comments,
+                    "rejected_at": datetime.utcnow().isoformat(),
+                    "rejected_by": context.get("user_id", "system"),
+                },
+            )
+        elif decision == "rejected" and self.on_reject == "terminate":
+            data = {
+                f"{self.task_id}_decision": "rejected",
+                f"{self.task_id}_comments": comments,
+                "rejected_at": datetime.utcnow().isoformat(),
+                "rejected_by": context.get("user_id", "system"),
+                "terminal_status": "rejected",
+                "terminal_message": comments or "La solicitud fue rechazada en la revisión.",
+            }
+            self.state.output_data = data
+            return TaskResult(status=TaskStatus.TERMINATE, data=data)
         elif decision == "rejected":
             return TaskResult(
                 status=TaskStatus.FAILED,
+                error=f"Solicitud rechazada en la revisión: {comments}" if comments
+                else "Solicitud rechazada en la revisión",
                 data={
                     "validation_decision": "rejected",
                     "validation_comments": comments,

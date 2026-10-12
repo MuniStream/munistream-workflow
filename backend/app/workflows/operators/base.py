@@ -84,6 +84,9 @@ class TaskStatus(str, Enum):
     RETRY = "retry"
     SKIP = "skip"
     WAITING = "waiting"
+    # El trámite termina aquí con un desenlace de negocio (p. ej. "rejected"):
+    # no es un fallo técnico. El resto de los pasos se cierra como omitido.
+    TERMINATE = "terminate"
 
 
 class TaskState(BaseModel):
@@ -341,6 +344,10 @@ class BaseOperator(ABC):
                 self.state.retry_count += 1
             elif result.status == TaskStatus.SKIP:
                 self.state.status = TaskStatus.SKIP
+                self.state.completed_at = datetime.utcnow()
+            elif result.status == TaskStatus.TERMINATE:
+                self.state.status = TaskStatus.TERMINATE
+                self.state.output_data = result.data or {}
                 self.state.completed_at = datetime.utcnow()
             
             return result.status

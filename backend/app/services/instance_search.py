@@ -22,6 +22,8 @@ una entrada como `(a+)+` degrada la base con una sola petición.
 import re
 from typing import Any, Dict, List, Optional
 
+from .estado_instancia import filtro_estado
+
 # Copias del ciudadano que viven dentro del propio documento de la instancia.
 CAMPOS_DE_CONTEXTO = (
     "context.customer_name",
@@ -42,7 +44,8 @@ def construir_consulta(
     if workflow_id:
         consulta["workflow_id"] = workflow_id
     if status:
-        consulta["status"] = status
+        # Por estado efectivo: "completed" ya no incluye a los rechazados.
+        consulta.update(filtro_estado(status))
 
     texto = (q or "").strip()
     if not texto:

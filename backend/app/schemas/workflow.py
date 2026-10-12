@@ -87,6 +87,9 @@ class InstanceStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    # Estado efectivo: completado con desenlace `rejected` (ver
+    # services/estado_instancia.py). No se guarda en `status`.
+    REJECTED = "rejected"
     FAILED = "failed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
@@ -127,6 +130,9 @@ class InstanceResponse(BaseModel):
     citizen_email: Optional[str] = None
     assigned_to_name: Optional[str] = None
     completion_percentage: float = 0
+    # Desenlace de negocio y su motivo (p. ej. "rejected").
+    terminal_status: Optional[str] = None
+    terminal_message: Optional[str] = None
     
     class Config:
         use_enum_values = True

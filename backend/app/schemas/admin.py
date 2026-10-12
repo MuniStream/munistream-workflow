@@ -73,6 +73,8 @@ class WorkflowMetrics(BaseModel):
     active_instances: int
     completed_instances: int
     failed_instances: int
+    # Completados con desenlace `rejected` (no cuentan como completados).
+    rejected_instances: int = 0
     average_processing_time_hours: float
     success_rate: float
     pending_approvals: int
@@ -102,6 +104,7 @@ class PerformanceMetrics(BaseModel):
     success_rate: float
     failure_rate: float
     abandonment_rate: float
+    rejection_rate: float = 0
     bottleneck_steps: List[Dict[str, Any]]
 
 

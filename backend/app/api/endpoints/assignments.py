@@ -26,6 +26,7 @@ from ...schemas.assignment import (
 from ...core.logging_config import get_workflow_logger
 from ...models.workflow import StepExecution
 from ...services.workflow_service import workflow_service
+from ...services.estado_instancia import estado_efectivo
 
 logger = get_workflow_logger(__name__)
 
@@ -261,7 +262,8 @@ async def list_assignments(
                 workflow_type=inst.workflow_type,
                 workflow_name=workflow_def.name if workflow_def else inst.workflow_id,
                 status=inst.assignment_status,  # Keep assignment status for compatibility
-                workflow_status=inst.status,  # Add workflow status as new field
+                # Estado efectivo: un trámite rechazado no se lee "completado".
+                workflow_status=estado_efectivo(inst),
                 assigned_to_user=inst.assigned_user_id,
                 assigned_to_team=inst.assigned_team_id,
                 assigned_at=inst.assigned_at,
@@ -405,7 +407,7 @@ async def assign_workflow(
         "instance_id": instance_id,
         "assigned_to": request.assign_to,
         "assignment_status": instance.assignment_status,
-        "status": instance.status,
+        "status": estado_efectivo(instance),
         "message": "Workflow assigned successfully"
     }
 

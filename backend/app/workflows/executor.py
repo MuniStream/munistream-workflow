@@ -128,6 +128,12 @@ def _registrar_paso(dag_instance, task_id: str, task, output: dict) -> None:
         pass
 
 
+def sincronizar_desenlace(dag_instance, db_instance) -> None:
+    """Copia a la instancia en memoria el desenlace persistido (o su ausencia)."""
+    dag_instance.terminal_status = getattr(db_instance, "terminal_status", None)
+    dag_instance.terminal_message = getattr(db_instance, "terminal_message", None)
+
+
 class DAGExecutor:
     """
     Simple executor that always fetches fresh instances from database.
@@ -377,6 +383,9 @@ class DAGExecutor:
 
         # ALWAYS use database context as source of truth
         dag_instance.context = db_instance.context or {}
+        # El desenlace también: un rewind lo limpia en la base, y la instancia
+        # en memoria lo volvería a escribir en el siguiente guardado.
+        sincronizar_desenlace(dag_instance, db_instance)
         logger.debug(f"Loaded context for {instance_id}: {list(dag_instance.context.keys())}")
         
         # Log execution start
@@ -583,6 +592,27 @@ class DAGExecutor:
                         f"Cascaded skip from {task_id} to descendants: {sorted(newly_skipped)}",
                         extra={"instance_id": instance_id, "source_task": task_id},
                     )
+            elif result == TaskStatus.TERMINATE:
+                # Desenlace de negocio (p. ej. la resolución que RECHAZA): el paso
+                # se completa, su salida entra al contexto y la instancia se
+                # cierra omitiendo lo pendiente. No es un fallo: el trámite
+                # terminó, con un resultado que el ciudadano debe ver y entender.
+                dag_instance.update_task_status(task_id, "completed")
+                output = task.get_output()
+                if output:
+                    dag_instance.context.update(output)
+                    _registrar_paso(dag_instance, task_id, task, output)
+                ultimo = getattr(task, '_last_result', None)
+                datos = (getattr(ultimo, 'data', None) or {}) if ultimo else {}
+                omitidas = dag_instance.terminate(
+                    datos.get("terminal_status") or "terminado",
+                    datos.get("terminal_message"),
+                )
+                logger.info(
+                    "Instancia %s terminada con desenlace '%s' en %s; omitidos: %s",
+                    instance_id, dag_instance.terminal_status, task_id, sorted(omitidas),
+                )
+                break
             elif result == TaskStatus.RETRY:
                 # Handle workflow recovery logic if next_task is specified
                 if hasattr(task, '_last_result') and task._last_result and hasattr(task._last_result, 'next_task') and task._last_result.next_task:
@@ -937,6 +967,12 @@ class DAGExecutor:
 
         if new_status:
             db_instance.status = new_status
+
+        # Desenlace de negocio (p. ej. "rejected"): solo se escribe cuando existe,
+        # para no borrar uno ya persistido al volver a guardar la instancia.
+        if getattr(dag_instance, "terminal_status", None):
+            db_instance.terminal_status = dag_instance.terminal_status
+            db_instance.terminal_message = dag_instance.terminal_message
 
         if dag_instance.completed_at:
             db_instance.completed_at = dag_instance.completed_at
