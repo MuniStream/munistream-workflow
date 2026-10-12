@@ -73,3 +73,22 @@ def test_la_busqueda_filtra_rechazados():
     from app.services.instance_search import construir_consulta
     assert construir_consulta(status="rejected") == {"status": "completed", "terminal_status": "rejected"}
     assert construir_consulta(status="completed")["terminal_status"] == {"$ne": "rejected"}
+
+
+async def test_el_expediente_del_admin_muestra_rechazado(monkeypatch):
+    # El encabezado del expediente (admin-detail) decía "Completado" en un
+    # trámite rechazado: no pasaba por el estado efectivo.
+    from app.services import instance_dossier as dossier
+
+    async def nada(*a, **k):
+        return None
+
+    monkeypatch.setattr(dossier, "collect_instance_attachments", lambda i: [])
+    monkeypatch.setattr(dossier, "collect_origin_attachments", lambda i, o: [])
+    monkeypatch.setattr(dossier, "load_origin_instance", nada)
+    monkeypatch.setattr(dossier, "resolve_citizen", nada)
+    monkeypatch.setattr(dossier, "resolve_origin", nada)
+    inst = _inst(terminal_status="rejected", terminal_message="Motivo")
+    detalle = await dossier.build_admin_detail(inst, SimpleNamespace(name="Trámite"))
+    assert detalle["instance"]["status"] == "rejected"
+    assert detalle["instance"]["terminal_message"] == "Motivo"

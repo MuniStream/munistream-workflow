@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..models.customer import Customer
 from .entity_serialization import DETAIL_MAX_BYTES
+from .estado_instancia import estado_efectivo
 from .instance_attachments import collect_instance_attachments, collect_origin_attachments
 
 # Claves cuyo valor no debe salir nunca del backend. Los tramites con firma
@@ -427,13 +428,15 @@ async def build_admin_detail(instance, dag) -> Dict[str, Any]:
     citizen = await resolve_citizen(instance)
     origin = await resolve_origin(instance)
 
-    status = getattr(instance, "status", None)
     return {
         "instance": {
             "instance_id": instance.instance_id,
             "workflow_id": instance.workflow_id,
             "workflow_name": getattr(dag, "name", None) or instance.workflow_id,
-            "status": status.value if hasattr(status, "value") else status,
+            # Estado efectivo: un trámite rechazado no se lee "Completado".
+            "status": estado_efectivo(instance),
+            "terminal_status": getattr(instance, "terminal_status", None),
+            "terminal_message": getattr(instance, "terminal_message", None),
             "current_step": getattr(instance, "current_step", None),
             "created_at": getattr(instance, "created_at", None),
             "updated_at": getattr(instance, "updated_at", None),
