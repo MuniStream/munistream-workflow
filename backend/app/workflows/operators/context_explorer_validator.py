@@ -321,19 +321,32 @@ class ContextExplorerValidator(BaseOperator):
             campos.append(d)
         return campos
 
+    # Tipos escalares: su valor viaja tal cual (no se intenta parsear como JSON,
+    # para no malinterpretar un texto que casualmente empiece con "[" o "{").
+    _SCALAR_TYPES = ("text", "select", "date", "textarea", "number", "radio", "checkbox")
+
     def _coerce_value(self, tipo: Optional[str], valor: Any) -> Any:
         """Reconvierte lo que llega por multipart (todo string) al tipo esperado.
 
         Espeja UserInputOperator._coerce_structured_fields para los tipos
-        estructurados; los escalares (text/select/date/textarea) pasan tal cual.
+        estructurados conocidos (array/address/daterange/geo). Además, cualquier
+        tipo COMPUESTO que no sea escalar (p. ej. un campo custom de un tenant que
+        emite una lista/objeto) se reconvierte si el string tiene forma de JSON;
+        así el operador queda genérico, sin acoplarse a ningún tipo de tenant.
+        Los escalares (text/select/date/textarea) pasan tal cual.
         """
         if valor is None:
             return None
-        if tipo in ("array", "address", "daterange", "geo") and isinstance(valor, str):
-            try:
-                return json.loads(valor)
-            except (ValueError, TypeError):
-                return valor
+        if isinstance(valor, str):
+            crudo = valor.strip()
+            parece_json = crudo[:1] in ("[", "{")
+            if tipo in ("array", "address", "daterange", "geo") or (
+                tipo not in self._SCALAR_TYPES and parece_json
+            ):
+                try:
+                    return json.loads(valor)
+                except (ValueError, TypeError):
+                    return valor
         if tipo == "number" and isinstance(valor, str) and valor.strip():
             crudo = valor.strip()
             try:
@@ -359,9 +372,19 @@ class ContextExplorerValidator(BaseOperator):
         trace: Dict[str, Any] = {}
         for f in self.editable_fields:
             name = f.get("name")
-            if not name or name not in input_data:
-                continue  # solo se aplica lo que el revisor mandó
-            nuevo = self._coerce_value(f.get("type"), input_data[name])
+            if not name:
+                continue
+            # El admin envía los campos con ruta punteada ANIDADOS en el multipart
+            # (`a.b` -> `{a: {b: ...}}`); algunos clientes podrían mandarlos planos
+            # (clave literal `a.b`). Se busca el valor submitido por ambas formas;
+            # si no vino, no se toca (solo se aplica lo que el revisor mandó).
+            if name in input_data:
+                crudo = input_data[name]
+            elif self._path_exists(input_data, name):
+                crudo = self._resolve_path(input_data, name)
+            else:
+                continue
+            nuevo = self._coerce_value(f.get("type"), crudo)
             partes = name.split(".")
             if len(partes) == 1:
                 resultado[name] = nuevo

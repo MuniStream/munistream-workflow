@@ -75,12 +75,23 @@ class UserInputOperator(BaseOperator):
         if not isinstance(user_input, dict):
             return user_input
         fields_schema = self.form_config.get("fields", []) if isinstance(self.form_config, dict) else []
-        # tipo -> contenedor esperado tras el parse
+        # tipo -> contenedor esperado tras el parse (estructurados conocidos)
         expected = {"address": dict, "daterange": dict, "geo": dict, "array": list}
+        # Tipos ESCALARES: su valor viaja como string plano y NO se parsea (ni
+        # aunque empiece con "[" o "{"). Todo lo demás —los estructurados
+        # conocidos y cualquier tipo COMPUESTO/custom de un tenant que emita una
+        # lista/objeto (p. ej. un campo propio de catálogo)— puede llegar como
+        # string JSON y hay que reconstituirlo. Así el operador queda genérico,
+        # sin acoplarse a ningún tipo de tenant.
+        scalar = {
+            "text", "select", "date", "textarea", "number", "radio", "checkbox",
+            "file", "camera", "catalog_autocomplete", "entity_select",
+            "entity_multi_select", "email", "tel", "password", "hidden",
+        }
         types_by_name = {
             f.get("name"): f.get("type")
             for f in fields_schema
-            if f.get("type") in expected and f.get("name")
+            if f.get("name") and (f.get("type") in expected or f.get("type") not in scalar)
         }
         if not types_by_name:
             return user_input
@@ -90,15 +101,26 @@ class UserInputOperator(BaseOperator):
             if not isinstance(val, str):
                 continue
             stripped = val.strip()
-            opener = "[" if ftype == "array" else "{"
-            if not stripped.startswith(opener):
-                continue
-            try:
-                parsed = _json.loads(stripped)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(parsed, expected[ftype]):
-                coerced[name] = parsed
+            if ftype in expected:
+                opener = "[" if expected[ftype] is list else "{"
+                if not stripped.startswith(opener):
+                    continue
+                try:
+                    parsed = _json.loads(stripped)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(parsed, expected[ftype]):
+                    coerced[name] = parsed
+            else:
+                # Tipo compuesto/custom: parsear si tiene forma de JSON.
+                if stripped[:1] not in ("[", "{"):
+                    continue
+                try:
+                    parsed = _json.loads(stripped)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(parsed, (list, dict)):
+                    coerced[name] = parsed
         return coerced
 
     def execute(self, context: Dict[str, Any]) -> TaskResult:
