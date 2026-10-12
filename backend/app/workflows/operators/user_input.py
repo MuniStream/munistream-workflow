@@ -327,11 +327,21 @@ class UserInputOperator(BaseOperator):
                 errors.append(f"{label}: fechas inválidas")
 
         for field_cfg in fields_schema:
-            if field_cfg.get("type") != "array":
-                continue
-
+            # Además de `array`, cualquier campo cuyo valor sea una LISTA y declare
+            # config de lista (min_items/max_items/item_fields) se valida igual. Así
+            # un tipo COMPUESTO/custom de un tenant (p. ej. una selección de
+            # especies) hereda la validación de tamaño y de subcampos requeridos,
+            # sin que el shared conozca el tipo.
+            ftype = field_cfg.get("type")
             name = field_cfg.get("name")
             value = user_input.get(name)
+            tiene_config_lista = (
+                field_cfg.get("min_items") is not None
+                or field_cfg.get("max_items") is not None
+                or field_cfg.get("item_fields")
+            )
+            if ftype != "array" and not (isinstance(value, list) and tiene_config_lista):
+                continue
             if value is None:
                 continue
 
