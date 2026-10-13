@@ -189,22 +189,27 @@ class DAGExecutor:
     async def load_incomplete_instances(self):
         """Load incomplete instances from database and queue them for processing"""
         from ..models.workflow import WorkflowInstance
-        from beanie.operators import In
 
         try:
             # Find all instances that are not completed, failed, or cancelled
             # Exclude pending_assignment and waiting_for_start (these require manual intervention)
-            incomplete_instances = await WorkflowInstance.find(
-                In(WorkflowInstance.status, ["pending", "running", "paused"])
-            ).to_list()
-
-            pending_ids = [
-                instance.instance_id
-                for instance in incomplete_instances
+            # Solo id y estado: cargar los documentos completos —con su
+            # contexto— de cientos de trámites en espera solo para leer el id
+            # disparaba la memoria del backend en cada arranque.
+            cursor = WorkflowInstance.get_motor_collection().find(
+                {"status": {"$in": ["pending", "running", "paused"]}},
+                {"instance_id": 1, "status": 1, "_id": 0},
+            )
+            pending_ids = []
+            async for doc in cursor:
+                iid = doc.get("instance_id")
                 # Skip instances that need assignment or manual start
-                if instance.status not in ["pending_assignment", "waiting_for_start"]
-                and instance.instance_id not in self.waiting_queue
-            ]
+                if (
+                    iid
+                    and doc.get("status") not in ["pending_assignment", "waiting_for_start"]
+                    and iid not in self.waiting_queue
+                ):
+                    pending_ids.append(iid)
 
             self._schedule_boot_instances(pending_ids)
             return len(pending_ids)
@@ -871,7 +876,9 @@ class DAGExecutor:
         self._instance_failure_counts.pop(instance_id, None)
 
         execution_time = _time.time() - start_time
-        self._task_execution_times.setdefault(instance_id, []).append(execution_time)
+        tiempos = self._task_execution_times.setdefault(instance_id, [])
+        tiempos.append(execution_time)
+        del tiempos[:-20]  # solo los recientes: la lista crecía en cada sondeo
         self._last_execution_time[instance_id] = datetime.utcnow()
         if execution_time > 1.0:
             logger.warning(
@@ -880,6 +887,23 @@ class DAGExecutor:
 
         if can_continue:
             self._schedule_next_wakeup(instance_id)
+        self._liberar_si_no_corre(instance_id)
+
+    def _liberar_si_no_corre(self, instance_id: str) -> None:
+        """
+        Saca de la caché del DAGBag la instancia que no está corriendo. Una en
+        pausa espera a un humano o a un evento y se reconstruye desde la base
+        cuando vuelve a ejecutarse (la misma ruta que tras un reinicio); una
+        terminada ya no se ejecuta. Sin esto la caché retenía para siempre el
+        contexto de cada trámite que el ejecutor tocaba.
+
+        Va DESPUÉS de programar el siguiente despertar: esa decisión lee la
+        instancia de la caché para saber si está en pausa.
+        """
+        bag = self.workflow_service.dag_bag
+        instancia = bag.instances.get(instance_id)
+        if instancia is not None and instancia.status != InstanceStatus.RUNNING:
+            bag.instances.pop(instance_id, None)
 
     async def _handle_execution_failure(self, instance_id: str, error: Exception) -> None:
         """Reprograma con backoff, o da la instancia por fallida al agotarse."""
