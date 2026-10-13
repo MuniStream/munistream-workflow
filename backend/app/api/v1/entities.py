@@ -473,17 +473,43 @@ async def search_entities(
     q: Optional[str] = Query(None, description="Texto libre: nombre, identificador, RFC, CURP, RNPA, matrícula, folio"),
     entity_type: Optional[str] = Query(None, description="Filtra por tipo de entidad"),
     status: Optional[str] = Query(None, description="Filtra por estado (active, revoked, ...)"),
+    entity_subtype: Optional[str] = Query(None, description="Filtra por subtipo (data.entity_subtype)"),
+    validity: Optional[str] = Query(None, description="valid | expired | no_expiry (derivado de valid_until)"),
+    f: Optional[List[str]] = Query(None, description="Facetas genéricas, repetible: 'campo:valor' (p. ej. data.domicilio_solicitante.estado:Sinaloa, data.zona_poligono:has_location)"),
     owner_user_id: Optional[str] = Query(None, description="Acota a un titular"),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     current_user: dict = Depends(require_permission("VIEW_INSTANCES")),
 ):
-    """Busca entidades en todo el tenant. Requiere rol de personal."""
+    """Busca entidades en todo el tenant con faceteo genérico. Requiere rol de personal."""
     from app.models.legal_entity import LegalEntity
-    from app.services.entity_search import construir_consulta
+    from app.services.entity_search import construir_consulta, facets
+
+    # Generic facet filters (field:value). Several values of the same field => OR
+    # ($in). Geo has/no location => presence of the field.
+    filtros: Dict[str, Any] = {}
+    for item in (f or []):
+        if ":" not in item:
+            continue
+        campo, _, valor = item.partition(":")
+        campo = campo.strip()
+        if not campo:
+            continue
+        if valor == "has_location":
+            filtros[campo] = {"$ne": None}
+        elif valor == "no_location":
+            filtros[campo] = None
+        else:
+            filtros.setdefault(campo, [])
+            if isinstance(filtros[campo], list):
+                filtros[campo].append(valor)
+
+    if entity_subtype:
+        filtros["data.entity_subtype"] = entity_subtype
 
     consulta = construir_consulta(
-        q=q, entity_type=entity_type, status=status, owner_user_id=owner_user_id
+        q=q, entity_type=entity_type, status=status, owner_user_id=owner_user_id,
+        filtros=filtros, validity=validity,
     )
 
     total = await LegalEntity.find(consulta).count()
@@ -496,12 +522,18 @@ async def search_entities(
         .to_list()
     )
 
+    # Las facetas se calculan sobre la búsqueda SIN los filtros de faceta (solo el
+    # texto y el titular), para que elegir un valor no colapse las demás opciones
+    # y se puedan combinar libremente.
+    base_facetas = construir_consulta(q=q, owner_user_id=owner_user_id)
+
     return {
         "entities": [_resumen_de_entidad(e) for e in encontradas],
         "total": total,
         "page": page,
         "page_size": page_size,
         "tipos": await _tipos_disponibles(q, status, owner_user_id),
+        "facets": await facets(base_facetas),
     }
 
 
