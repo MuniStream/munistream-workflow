@@ -11,6 +11,7 @@ import statistics
 from ...models.document import DocumentModel, DocumentStatus, VerificationMethod
 from ...models.workflow import WorkflowInstance, StepExecution, WorkflowDefinition, AssignmentStatus
 from ...auth.provider import get_current_user, require_permission
+from ...services.estado_instancia import estado_efectivo
 from ...schemas.admin import (
     PendingApprovalResponse,
     PendingDocumentResponse,
@@ -472,7 +473,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
 
         # Calculate workflow-specific metrics
         workflow_metrics_dict = defaultdict(lambda: {
-            "total": 0, "active": 0, "completed": 0, "failed": 0,
+            "total": 0, "active": 0, "completed": 0, "failed": 0, "rejected": 0,
             "processing_times": [], "pending_approvals": 0
         })
 
@@ -482,6 +483,8 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
 
             if instance.status in ["running", "awaiting_input"]:
                 workflow_metrics_dict[wf_id]["active"] += 1
+            elif estado_efectivo(instance) == "rejected":
+                workflow_metrics_dict[wf_id]["rejected"] += 1
             elif instance.status == "completed":
                 workflow_metrics_dict[wf_id]["completed"] += 1
                 if instance.duration_seconds:
@@ -508,6 +511,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
                 active_instances=metrics["active"],
                 completed_instances=metrics["completed"],
                 failed_instances=metrics["failed"],
+                rejected_instances=metrics["rejected"],
                 average_processing_time_hours=round(avg_time, 2),
                 success_rate=round(success_rate, 2),
                 pending_approvals=metrics["pending_approvals"]
@@ -521,9 +525,12 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
         completed_count = 0
         failed_count = 0
         abandoned_count = 0
+        rejected_count = 0
 
         for instance in all_instances:
-            if instance.status == "completed":
+            if estado_efectivo(instance) == "rejected":
+                rejected_count += 1
+            elif instance.status == "completed":
                 completed_count += 1
                 if instance.duration_seconds:
                     all_processing_times.append(instance.duration_seconds / 3600)
@@ -532,7 +539,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
             elif instance.status == "abandoned":
                 abandoned_count += 1
 
-        total_finished = completed_count + failed_count + abandoned_count
+        total_finished = completed_count + failed_count + abandoned_count + rejected_count
 
         performance_metrics = PerformanceMetrics(
             average_processing_time_hours=round(statistics.mean(all_processing_times), 2) if all_processing_times else 0,
@@ -540,6 +547,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
             success_rate=round((completed_count / total_finished * 100), 2) if total_finished > 0 else 0,
             failure_rate=round((failed_count / total_finished * 100), 2) if total_finished > 0 else 0,
             abandonment_rate=round((abandoned_count / total_finished * 100), 2) if total_finished > 0 else 0,
+            rejection_rate=round((rejected_count / total_finished * 100), 2) if total_finished > 0 else 0,
             bottleneck_steps=[]  # Would need step execution analysis
         )
 

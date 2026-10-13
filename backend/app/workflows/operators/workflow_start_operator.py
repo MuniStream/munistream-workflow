@@ -5,7 +5,7 @@ This operator allows a workflow to start another workflow (typically administrat
 and optionally wait for its completion. Supports automatic assignment to teams or users.
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -14,6 +14,30 @@ from ...models.workflow import WorkflowInstance, WorkflowType, AssignmentType, A
 from ...core.logging_config import get_workflow_logger, set_workflow_context
 
 logger = get_workflow_logger(__name__)
+
+
+def desenlace_a_propagar(
+    estado: Optional[str],
+    mensaje: Optional[str],
+    propagables: Tuple[str, ...],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Desenlace del hijo que el padre debe heredar, o None si no aplica."""
+    if estado and estado in propagables:
+        return {"terminal_status": estado, "terminal_message": mensaje}
+    return None
+
+
+def entidades_del_hijo(child_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Referencias a las entidades que emitió el hijo (`created_entity_<tipo>`,
+    `<paso>_entity_id`, `<paso>_entity_type`). Cuando el hijo cierra al padre
+    con un desenlace, el documento que lo acredita —p. ej. el Oficio de
+    Rechazo— tiene que quedar en el trámite del ciudadano.
+    """
+    return {
+        k: v for k, v in (child_context or {}).items()
+        if k.startswith("created_entity_") or k.endswith(("_entity_id", "_entity_type"))
+    }
 
 
 class WorkflowStartOperator(BaseOperator):
@@ -64,11 +88,12 @@ class WorkflowStartOperator(BaseOperator):
         timeout_minutes: int = 1440,  # 24 hours default
         pass_context: bool = True,
         context_mapping: Optional[Dict[str, str]] = None,
-        # "completed" y no "approved": NADA en la plataforma escribe
-        # `terminal_status`, así que el hijo siempre se lee como "completed" y un
-        # default de "approved" no lo cumplía nunca. Los trámites que no lo
-        # declaraban —aviso de siembra, arribo de menores, pesca deportiva—
-        # morían justo DESPUÉS de que el revisor los aprobaba.
+        # "completed" y no "approved": `terminal_status` solo lo escribe un
+        # desenlace de negocio (`TaskStatus.TERMINATE`, p. ej. "rejected"); un hijo
+        # que recorre su DAG completo se lee como "completed", y un default de
+        # "approved" no lo cumplía nunca. Los trámites que no lo declaraban
+        # —aviso de siembra, arribo de menores, pesca deportiva— morían justo
+        # DESPUÉS de que el revisor los aprobaba.
         required_status: str = "completed",
         priority: int = 5,
         auto_assign: bool = False,
@@ -79,6 +104,8 @@ class WorkflowStartOperator(BaseOperator):
         retry_target_task: Optional[str] = None,
         max_child_retries: int = 1,
         clear_completed_tasks: Optional[List[str]] = None,
+        propagate_terminal: Tuple[str, ...] = ("rejected",),
+        child_static: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         """
@@ -103,6 +130,11 @@ class WorkflowStartOperator(BaseOperator):
             retry_target_task: Target task for "goto_task" recovery
             max_child_retries: Maximum retry attempts before permanent failure
             clear_completed_tasks: List of tasks to clear on recovery
+            propagate_terminal: Desenlaces del hijo que cierran también al padre
+                con el mismo desenlace y motivo (por defecto, "rejected").
+            child_static: Valores fijos que se ponen en el contexto del hijo
+                (p. ej. el modo en que debe correr una validación compartida).
+                `context_mapping` solo copia claves que existen en el padre.
             **kwargs: Additional arguments passed to BaseOperator
         """
         # Lanzar un sub-workflow (p.ej. validación administrativa) es orquestación
@@ -126,6 +158,8 @@ class WorkflowStartOperator(BaseOperator):
         self.retry_target_task = retry_target_task
         self.max_child_retries = max_child_retries
         self.clear_completed_tasks = clear_completed_tasks or []
+        self.propagate_terminal = tuple(propagate_terminal)
+        self.child_static = dict(child_static or {})
 
         # State key will be set per instance to ensure uniqueness
         self._state_key = None
@@ -356,6 +390,9 @@ class WorkflowStartOperator(BaseOperator):
             for field in default_fields:
                 if field in parent_context:
                     child_context[field] = parent_context[field]
+
+        # Valores fijos del trámite: van al final para que ganen sobre lo copiado.
+        child_context.update(self.child_static)
 
         return child_context
 
@@ -716,6 +753,20 @@ class WorkflowStartOperator(BaseOperator):
         # Check if completed
         print(f"[DEBUG] child.status = '{child.status}'")
         if child.status == "completed":
+            # Un desenlace de negocio del hijo (la validación que RECHAZA) cierra
+            # al padre antes de mirar `required_status`: con "any" el padre
+            # seguía y emitía el título de una solicitud rechazada.
+            propagado = desenlace_a_propagar(
+                child.terminal_status, child.terminal_message, self.propagate_terminal)
+            if propagado:
+                data = {
+                    "child_instance_id": self.child_instance_id,
+                    **entidades_del_hijo(child.context),
+                    **propagado,
+                }
+                self.state.output_data = data
+                return TaskResult(status=TaskStatus.TERMINATE, data=data)
+
             # Check terminal status matches requirement
             terminal_status = child.terminal_status or "completed"
             print(f"[DEBUG] child.terminal_status = '{child.terminal_status}'")

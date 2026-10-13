@@ -315,7 +315,9 @@ class SignerOperator(BaseOperator):
                 output_data[f"{self.task_id}_signature"] = self.build_signature_object(
                     context,
                     signature_data,
-                    signer_name=signer_name,
+                    # Mismo respaldo que la entrada de `firmas`: la ficha del
+                    # documento leía este objeto y mostraba "Unknown".
+                    signer_name=signer_name or output_data[f"{self.task_id}_signer"],
                     signed_at=firmado_en,
                     cert_subject=cert_subject,
                 )

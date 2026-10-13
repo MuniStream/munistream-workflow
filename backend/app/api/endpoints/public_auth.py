@@ -560,6 +560,7 @@ async def track_instance(
         "emitted_entities": emitted_entities,
         "estimated_completion": None,
         "error_message": error_message,
+        **desenlace_publico(db_instance),
         "message": f"Workflow {db_instance.status}"
     }
 
@@ -592,12 +593,25 @@ async def get_customer_instances(
                 "created_at": inst.created_at,
                 "updated_at": inst.updated_at,
                 "completed_at": inst.completed_at,
+                **desenlace_publico(inst),
                 # Only include essential context data, not the full context object
                 "progress_percentage": _calculate_progress_percentage(inst)
             }
             for inst in instances
         ],
         "total": len(instances)
+    }
+
+
+def desenlace_publico(instance) -> Dict[str, Optional[str]]:
+    """
+    Desenlace de negocio de la instancia (p. ej. "rejected") y su motivo. Un
+    trámite rechazado termina como `completed`: sin esto el portal lo mostraría
+    como concluido con éxito.
+    """
+    return {
+        "terminal_status": getattr(instance, "terminal_status", None),
+        "terminal_message": getattr(instance, "terminal_message", None),
     }
 
 

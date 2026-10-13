@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
 from ...services.workflow_service import workflow_service
+from ...services.estado_instancia import EXPRESION_ESTADO_EFECTIVO, estado_efectivo
 
 router = APIRouter()
 
@@ -95,6 +96,9 @@ class EfficiencyKPIs(BaseModel):
     active_instances: int
     completed_instances: int
     failed_instances: int
+    # Rechazados: completados con desenlace `rejected`. No cuentan como
+    # completados (ver services/estado_instancia.py).
+    rejected_instances: int = 0
     completion_rate: float
     avg_duration_seconds: Optional[float] = None
     median_duration_seconds: Optional[float] = None
@@ -171,7 +175,8 @@ async def get_workflow_analytics(
             {"$group": {
                 "_id": None,
                 "total": {"$sum": 1},
-                "completed": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+                "completed": {"$sum": {"$cond": [{"$eq": [EXPRESION_ESTADO_EFECTIVO, "completed"]}, 1, 0]}},
+                "rejected": {"$sum": {"$cond": [{"$eq": [EXPRESION_ESTADO_EFECTIVO, "rejected"]}, 1, 0]}},
                 "failed": {"$sum": {"$cond": [{"$eq": ["$status", "failed"]}, 1, 0]}},
                 "active": {"$sum": {"$cond": [{"$in": ["$status", active_statuses]}, 1, 0]}},
                 "avg_duration": {"$avg": "$_dur"},
@@ -183,13 +188,14 @@ async def get_workflow_analytics(
             row = kpi_rows[0]
             total = row.get("total", 0)
             completed = row.get("completed", 0)
+            rejected = row.get("rejected", 0)
             failed = row.get("failed", 0)
             active = row.get("active", 0)
             durations = [d for d in row.get("durations", []) if d is not None]
             median_duration = _median(durations)
             avg_duration = row.get("avg_duration")
         else:
-            total = completed = failed = active = 0
+            total = completed = rejected = failed = active = 0
             median_duration = None
             avg_duration = None
 
@@ -202,6 +208,7 @@ async def get_workflow_analytics(
             active_instances=active,
             completed_instances=completed,
             failed_instances=failed,
+            rejected_instances=rejected,
             completion_rate=round(completion_rate, 2),
             avg_duration_seconds=round(avg_duration, 2) if avg_duration is not None else None,
             median_duration_seconds=round(median_duration, 2) if median_duration is not None else None,
@@ -290,7 +297,7 @@ async def get_workflow_analytics(
         # ---- (c) Status distribution ---------------------------------------
         status_pipeline = [
             {"$match": {"workflow_id": workflow_id}},
-            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+            {"$group": {"_id": EXPRESION_ESTADO_EFECTIVO, "count": {"$sum": 1}}},
             {"$sort": {"count": -1}},
         ]
         status_rows = await WorkflowInstance.aggregate(status_pipeline).to_list()
@@ -554,7 +561,7 @@ async def get_workflow_performance(
         
         # Calculate workflow-level metrics from instances
         total_instances = len(instances)
-        completed_instances = len([i for i in instances if i.status == "completed"])
+        completed_instances = len([i for i in instances if estado_efectivo(i) == "completed"])
         completion_rate = (completed_instances / total_instances * 100) if total_instances > 0 else 0
         
         # Average completion time from completed instances
@@ -814,9 +821,10 @@ async def get_workflow_stats():
         )
         
         # Success rate
+        # Terminados: completados, rechazados y fallidos; solo el completado es éxito.
         finished_instances = [i for i in all_instances if i.status in ["completed", "failed"]]
         success_rate = (
-            len([i for i in finished_instances if i.status == "completed"]) / len(finished_instances)
+            len([i for i in finished_instances if estado_efectivo(i) == "completed"]) / len(finished_instances)
             if finished_instances else 0
         )
         
@@ -829,7 +837,7 @@ async def get_workflow_stats():
         # Group by status
         by_status = {}
         for instance in all_instances:
-            status = instance.status
+            status = estado_efectivo(instance)
             by_status[status] = by_status.get(status, 0) + 1
         
         stats = {

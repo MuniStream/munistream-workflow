@@ -37,6 +37,7 @@ from ...core.database import get_database
 # fallido todo lo que estaba por empezar.
 from ...workflows.dag import DAGInstance
 from ...services.workflow_service import workflow_service
+from ...services.estado_instancia import estado_efectivo, filtro_estado
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity, EntityType
 from ...auth.provider import require_permission, get_current_user
@@ -499,7 +500,8 @@ def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse
     # no acusa a nadie; si aparece aqui, lo que hay que hacer es anadir el estado
     # al enum, no reetiquetarlo.
     try:
-        status = InstanceStatus(instance.status)
+        # Estado efectivo: un trámite rechazado se muestra como rechazado.
+        status = InstanceStatus(estado_efectivo(instance))
     except ValueError:
         logger.warning(
             f"Estado desconocido '{instance.status}' en la instancia "
@@ -525,7 +527,9 @@ def convert_instance_to_response(instance: WorkflowInstance) -> InstanceResponse
         assignment_type=instance.assignment_type.value if instance.assignment_type else None,
         assigned_at=instance.assigned_at,
         assigned_by=instance.assigned_by,
-        assignment_notes=instance.assignment_notes
+        assignment_notes=instance.assignment_notes,
+        terminal_status=getattr(instance, "terminal_status", None),
+        terminal_message=getattr(instance, "terminal_message", None),
     )
 
 
@@ -691,7 +695,7 @@ async def get_active_instances(
     query_filters = {}
     
     if status:
-        query_filters["status"] = status
+        query_filters.update(filtro_estado(status))
     
     if user_id:
         query_filters["user_id"] = {"$regex": user_id, "$options": "i"}
@@ -720,7 +724,8 @@ async def get_active_instances(
             "workflow_id": instance.workflow_id,
             "workflow_name": workflow.name if workflow else "Unknown",
             "user_id": instance.user_id,
-            "status": instance.status,
+            "status": estado_efectivo(instance),
+            "terminal_status": getattr(instance, "terminal_status", None),
             "current_step": instance.current_step,
             "progress_percentage": round(progress_percentage, 2),
             "started_at": instance.started_at,
@@ -1050,7 +1055,8 @@ async def get_instance(
         else dag_instance.status.value
     )
     try:
-        response.status = InstanceStatus(live_status)
+        response.status = InstanceStatus(
+            estado_efectivo(live_status, getattr(db_instance, "terminal_status", None)))
     except ValueError:
         pass  # estado no reconocido: se conserva el persistido
 
@@ -1092,7 +1098,7 @@ async def get_instance_history(instance: WorkflowInstance = Depends(require_inst
         "workflow_id": instance.workflow_id,
         "history": history,
         "current_step": instance.current_step,
-        "overall_status": instance.status,
+        "overall_status": estado_efectivo(instance),
         "completed_steps": instance.completed_steps,
         "failed_steps": instance.failed_steps,
         "pending_approvals": instance.pending_approvals
@@ -1143,7 +1149,7 @@ async def get_instance_progress(instance: WorkflowInstance = Depends(require_ins
         "failed_steps": failed_steps_count,
         "pending_steps": total_steps - completed_steps_count - failed_steps_count,
         "current_step": instance.current_step,
-        "status": instance.status,
+        "status": estado_efectivo(instance),
         "total_duration_seconds": total_duration,
         "started_at": instance.started_at,
         "updated_at": instance.updated_at,
@@ -1262,7 +1268,9 @@ async def track_instance_for_admin(
         "instance_id": instance_id,
         "workflow_id": db_instance.workflow_id,
         "workflow_name": workflow_name,
-        "status": db_instance.status,
+        "status": estado_efectivo(db_instance),
+        "terminal_status": getattr(db_instance, "terminal_status", None),
+        "terminal_message": getattr(db_instance, "terminal_message", None),
         "progress_percentage": progress_percentage,
         "current_step": db_instance.current_step,
         "created_at": db_instance.created_at.isoformat() if db_instance.created_at else None,
@@ -1276,7 +1284,7 @@ async def track_instance_for_admin(
         "waiting_for": waiting_for,
         "emitted_entities": emitted_entities,
         "estimated_completion": None,  # Could calculate based on average step time
-        "message": f"Workflow {db_instance.status}"
+        "message": f"Workflow {estado_efectivo(db_instance)}"
     }
 
 
