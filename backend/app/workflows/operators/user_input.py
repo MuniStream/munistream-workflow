@@ -221,6 +221,20 @@ class UserInputOperator(BaseOperator):
                     errors.append(f"{label} no debe tener más de {max_len} caracteres")
                 if pattern and not re.fullmatch(pattern, text):
                     errors.append(f"{label} tiene un formato inválido")
+            elif ftype == "geo":
+                # Un "Polygon" de 1 o 2 puntos no es un polígono (GeoJSON
+                # inválido) y el mapa del portal lo emitía igual. Se cuentan
+                # vértices distintos: el anillo cerrado repite el primero.
+                if isinstance(value, dict) and value.get("type") == "Polygon":
+                    anillo = (value.get("coordinates") or [[]])[0] or []
+                    distintos = []
+                    for punto in anillo:
+                        clave = tuple(punto) if isinstance(punto, (list, tuple)) else punto
+                        if clave not in distintos:
+                            distintos.append(clave)
+                    minimo = int(_constraint(field_cfg, "min_vertices") or 3)
+                    if len(distintos) < minimo:
+                        errors.append(f"{label}: el polígono necesita al menos {minimo} vértices")
             elif ftype == "date":
                 if field_cfg.get("minToday"):
                     try:
