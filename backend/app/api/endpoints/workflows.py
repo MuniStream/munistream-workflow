@@ -160,23 +160,31 @@ async def get_workflow(workflow_id: str):
 
     response = await convert_workflow_to_response(workflow)
 
+    from ...services.workflow_service import workflow_service
+    dag = await workflow_service.get_dag(workflow_id)
+
     # If no steps in DB, try to build them from DAGBag
-    if not response.steps:
-        from ...services.workflow_service import workflow_service
-        dag = await workflow_service.get_dag(workflow_id)
-        if dag:
-            for task_id, task in dag.tasks.items():
-                step_type = workflow_service.get_step_type_from_operator(task)
-                response.steps.append(StepSchema(
-                    step_id=task_id,
-                    name=task.name,
-                    step_type=step_type,
-                    description=f"{task.__class__.__name__} operation",
-                    required_inputs=[],
-                    optional_inputs=[],
-                    next_steps=[t.task_id for t in task.downstream_tasks],
-                    operator_class=task.__class__.__name__
-                ))
+    if not response.steps and dag:
+        for task_id, task in dag.tasks.items():
+            step_type = workflow_service.get_step_type_from_operator(task)
+            response.steps.append(StepSchema(
+                step_id=task_id,
+                name=task.name,
+                step_type=step_type,
+                description=f"{task.__class__.__name__} operation",
+                required_inputs=[],
+                optional_inputs=[],
+                next_steps=[t.task_id for t in task.downstream_tasks],
+                operator_class=task.__class__.__name__
+            ))
+
+    # Los parámetros del operador salen siempre del trámite en código, también
+    # cuando los pasos vienen de la base: ahí no se guardan.
+    if dag:
+        for step in response.steps:
+            task = dag.tasks.get(step.step_id)
+            if task is not None:
+                step.operator_config = workflow_service.describe_operator(task)
 
     return response
 
