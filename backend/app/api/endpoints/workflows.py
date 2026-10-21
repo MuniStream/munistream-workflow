@@ -130,6 +130,10 @@ async def list_workflows(
     workflow_responses = []
     for wf in page_workflows:
         wf_status = WorkflowStatus(wf.status) if wf.status in valid_statuses else WorkflowStatus.ACTIVE
+        # Code-defined workflows have their steps as DAG tasks; the
+        # WorkflowStep collection only holds steps of legacy workflows.
+        dag = workflow_service.dag_bag.get_dag(wf.workflow_id)
+        db_steps = steps_by_wf.get(wf.workflow_id, [])
         workflow_responses.append(WorkflowResponse(
             workflow_id=wf.workflow_id,
             name=wf.name,
@@ -137,7 +141,8 @@ async def list_workflows(
             metadata=wf.metadata,
             version=wf.version,
             status=wf_status,
-            steps=steps_by_wf.get(wf.workflow_id, []),
+            steps=db_steps,
+            step_count=len(dag.tasks) if dag else len(db_steps),
             start_step_id=getattr(wf, 'start_step_id', None),
             created_at=wf.created_at,
             updated_at=wf.updated_at

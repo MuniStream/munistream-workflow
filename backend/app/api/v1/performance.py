@@ -830,9 +830,14 @@ async def get_workflow_stats():
         
         # Group by workflow
         by_workflow = {}
+        active_by_workflow = {}
         for instance in all_instances:
             workflow_id = instance.workflow_id
             by_workflow[workflow_id] = by_workflow.get(workflow_id, 0) + 1
+            # In progress, same criterion as the per-workflow analytics:
+            # "paused" means waiting on the citizen or the reviewer.
+            if instance.status in ["pending", "running", "paused"]:
+                active_by_workflow[workflow_id] = active_by_workflow.get(workflow_id, 0) + 1
         
         # Group by status
         by_status = {}
@@ -847,6 +852,7 @@ async def get_workflow_stats():
             "avg_completion_time_hours": round(avg_completion_time_hours, 2),
             "success_rate": round(success_rate, 2),
             "by_workflow": by_workflow,
+            "active_by_workflow": active_by_workflow,
             "by_status": by_status
         }
         
