@@ -66,6 +66,10 @@ class NotificationChannelConfig(Document):
         default=None,
         description="Default address/number used by the 'send test' action",
     )
+    options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Non-secret channel settings, e.g. WhatsApp default_country_code",
+    )
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -134,6 +138,10 @@ class NotificationTrigger(Document):
         default=False,
         description="System-seeded trigger. Admin can toggle `active` but should not delete.",
     )
+    attach_documents: bool = Field(
+        default=False,
+        description="Attach as PDF the entities issued by the event (ENTITY_CREATED) or by the whole request (COMPLETED)",
+    )
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -184,6 +192,14 @@ class NotificationDelivery(Document):
     context_snapshot: Dict[str, Any] = Field(
         default_factory=dict,
         description="Rendering context at enqueue time, for retries and debugging",
+    )
+    attachments: List[str] = Field(
+        default_factory=list,
+        description="entity_id of the documents to attach as PDF; the worker renders them at send time",
+    )
+    attachments_sent: List[str] = Field(
+        default_factory=list,
+        description="Filenames actually attached",
     )
 
     class Settings:

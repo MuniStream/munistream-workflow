@@ -2307,22 +2307,13 @@ async def get_instance_entity_document(
     """
     import io as _io
     from fastapi.responses import Response, StreamingResponse
-    from ...core.config import settings as _settings
-    from ...services.visualizers.visualizer_factory import VisualizerFactory
-    from .signatures import _select_entity_visualizer
+    from ...services.visualizers.entity_pdf import entity_visualizer
 
     entity = await EntityService.get_entity(entity_id)
     if not entity or entity.owner_user_id != db_instance.user_id:
         raise HTTPException(status_code=404, detail="Entity not found")
 
-    config = {
-        **(entity.entity_display_config or {}),
-        "base_url": _settings.FRONTEND_BASE_URL,
-    }
-    visualizer = VisualizerFactory.get_visualizer(
-        visualizer_type=_select_entity_visualizer(entity),
-        config=config,
-    )
+    visualizer = entity_visualizer(entity)
     if not visualizer:
         raise HTTPException(status_code=404, detail="Esta entidad no tiene visualizador configurado")
 

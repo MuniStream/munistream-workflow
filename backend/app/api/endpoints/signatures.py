@@ -330,19 +330,9 @@ async def verify_entity_signature(
         raise HTTPException(status_code=500, detail="Signature verification failed")
 
 
-def _select_entity_visualizer(entity) -> str:
-    """Select the visualizer for an entity.
-
-    Single source of truth so the downloaded PDF, the in-browser HTML view and
-    the printed output all render with the SAME template. The entity's
-    configured visualizer always wins; ``signed_pdf`` is only a fallback for
-    signed entities that have no configured visualizer.
-    """
-    if entity.entity_display_config and entity.entity_display_config.get("visualizer"):
-        return entity.entity_display_config["visualizer"]
-    if entity.data and "signature" in entity.data:
-        return "signed_pdf"
-    return "pdf_report"
+# Single source shared with the per-instance download and the notification
+# attachments: same template for view, print, download and email.
+from ...services.visualizers.entity_pdf import select_entity_visualizer as _select_entity_visualizer  # noqa: E402
 
 
 @router.get("/entities/{entity_id}/pdf")

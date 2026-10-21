@@ -136,6 +136,11 @@ class BaseOperator(ABC):
     # callback override get_polling_config() to declare a polling interval.
     polling_config: PollingConfig = PollingConfig.event_driven()
 
+    # Whether finishing this step notifies the citizen (STEP_ADVANCED).
+    # Capture subclasses turn it off: telling citizens about what they just
+    # submitted is noise. Each step can override it with notify=True/False.
+    default_notify: bool = True
+
     def __init__(self, task_id: str, name: Optional[str] = None, group: Optional[str] = None, **kwargs):
         """
         Initialize base operator.
@@ -157,6 +162,7 @@ class BaseOperator(ABC):
         # (el admin lo sigue viendo). Útil para pasos internos como la
         # validación administrativa. Ver public_auth.track_instance.
         self.visible = kwargs.get("visible", True)
+        self.notify = bool(kwargs.get("notify", self.default_notify))
         self._instance_id: Optional[str] = None  # Set during execution
         self._workflow_id: Optional[str] = None  # Set during execution
         

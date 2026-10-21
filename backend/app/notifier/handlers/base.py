@@ -1,7 +1,7 @@
 """Shared types for notification delivery handlers."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class DeliveryError(Exception):
@@ -24,6 +24,13 @@ class HandlerResult:
 
 
 @dataclass
+class Attachment:
+    filename: str
+    data: bytes
+    content_type: str = "application/pdf"
+
+
+@dataclass
 class OutboundMessage:
     recipient: str
     subject: Optional[str]
@@ -31,10 +38,13 @@ class OutboundMessage:
     from_address: Optional[str] = None
     channel_credentials: Dict[str, Any] = None
     tenant_id: Optional[str] = None
+    attachments: List[Attachment] = None
 
     def __post_init__(self):
         if self.channel_credentials is None:
             self.channel_credentials = {}
+        if self.attachments is None:
+            self.attachments = []
 
 
 class NotificationHandler(ABC):

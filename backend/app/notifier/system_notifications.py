@@ -36,6 +36,7 @@ class SystemNotification:
     title_i18n: Dict[str, str]
     description_i18n: Dict[str, str]
     default_channels: Tuple[NotificationChannel, ...]
+    attach_documents: bool = False
     templates: Dict[Tuple[str, NotificationChannel], SystemTemplate] = field(default_factory=dict)
 
     def title(self, locale: str) -> str:
@@ -61,153 +62,214 @@ def _whatsapp(body: str) -> SystemTemplate:
     return SystemTemplate(subject="", body=body)
 
 
+# Template variables (see hook.NotificationDispatcher._build_context):
+# remitente, ciudadano.{nombre,email,telefono}, workflow.{id,nombre},
+# instancia.{id,folio}, paso.{id,nombre}, url_tramite, resultado.{codigo,
+# rechazado,mensaje}, documento.{id,nombre,tipo,folio}, documentos[], adjuntos,
+# evento.{id,tipo,datos}. Every key is always defined.
+
 _TRAMITE_RECIBIDO_ES_EMAIL = _email(
-    subject="Confirmación de recepción de su trámite",
+    subject="Recibimos su trámite: {{ workflow.nombre }}",
     body=(
         "Estimado(a) {{ ciudadano.nombre }}:\n\n"
-        "Le confirmamos que hemos recibido su trámite con identificador "
-        "{{ instancia.id }}.\n\n"
-        "Puede consultar el estado de su trámite en cualquier momento desde el "
-        "portal del ciudadano.\n\n"
-        "Atentamente,\nMuniStream"
+        "Le confirmamos que recibimos su trámite \"{{ workflow.nombre }}\" "
+        "con folio {{ instancia.folio }}.\n\n"
+        "{% if url_tramite %}Puede consultar su estado en cualquier momento en: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
     ),
 )
 _TRAMITE_RECIBIDO_ES_WA = _whatsapp(
-    "Estimado(a) {{ ciudadano.nombre }}: hemos recibido su trámite "
-    "{{ instancia.id }}. Le notificaremos cuando avance."
+    "Estimado(a) {{ ciudadano.nombre }}: recibimos su trámite "
+    "\"{{ workflow.nombre }}\" (folio {{ instancia.folio }}). Le avisaremos cuando avance."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 _TRAMITE_RECIBIDO_EN_EMAIL = _email(
-    subject="Your request has been received",
+    subject="We received your request: {{ workflow.nombre }}",
     body=(
         "Dear {{ ciudadano.nombre }}:\n\n"
-        "We confirm that your request has been received with identifier "
-        "{{ instancia.id }}.\n\n"
-        "You can check its status at any time from the citizen portal.\n\n"
-        "Sincerely,\nMuniStream"
+        "We confirm that we received your request \"{{ workflow.nombre }}\" "
+        "with reference {{ instancia.folio }}.\n\n"
+        "{% if url_tramite %}You can check its status at any time at: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
     ),
 )
 _TRAMITE_RECIBIDO_EN_WA = _whatsapp(
-    "Dear {{ ciudadano.nombre }}: we have received your request "
-    "{{ instancia.id }}. We will let you know when it progresses."
+    "Dear {{ ciudadano.nombre }}: we received your request "
+    "\"{{ workflow.nombre }}\" (reference {{ instancia.folio }}). We will let you know when it progresses."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 
 
 _PASO_AVANZADO_ES_EMAIL = _email(
-    subject="Su trámite avanzó a una nueva etapa",
+    subject="Su trámite avanzó: {{ workflow.nombre }}",
     body=(
         "Estimado(a) {{ ciudadano.nombre }}:\n\n"
-        "Su trámite {{ instancia.id }} avanzó al paso "
-        "\"{{ evento.datos.current_step }}\".\n\n"
-        "Puede revisar el detalle desde el portal del ciudadano.\n\n"
-        "Atentamente,\nMuniStream"
+        "Su trámite \"{{ workflow.nombre }}\" (folio {{ instancia.folio }}) "
+        "concluyó la etapa \"{{ paso.nombre }}\".\n\n"
+        "{% if url_tramite %}Puede revisar el detalle en: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
     ),
 )
 _PASO_AVANZADO_ES_WA = _whatsapp(
-    "Estimado(a) {{ ciudadano.nombre }}: su trámite {{ instancia.id }} "
-    "avanzó al paso: {{ evento.datos.current_step }}."
+    "Estimado(a) {{ ciudadano.nombre }}: su trámite \"{{ workflow.nombre }}\" "
+    "(folio {{ instancia.folio }}) concluyó la etapa \"{{ paso.nombre }}\"."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 _PASO_AVANZADO_EN_EMAIL = _email(
-    subject="Your request advanced to a new stage",
+    subject="Your request advanced: {{ workflow.nombre }}",
     body=(
         "Dear {{ ciudadano.nombre }}:\n\n"
-        "Your request {{ instancia.id }} advanced to the step "
-        "\"{{ evento.datos.current_step }}\".\n\n"
-        "You can review the details from the citizen portal.\n\n"
-        "Sincerely,\nMuniStream"
+        "Your request \"{{ workflow.nombre }}\" (reference {{ instancia.folio }}) "
+        "completed the stage \"{{ paso.nombre }}\".\n\n"
+        "{% if url_tramite %}You can review the details at: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
     ),
 )
 _PASO_AVANZADO_EN_WA = _whatsapp(
-    "Dear {{ ciudadano.nombre }}: your request {{ instancia.id }} "
-    "advanced to the step: {{ evento.datos.current_step }}."
+    "Dear {{ ciudadano.nombre }}: your request \"{{ workflow.nombre }}\" "
+    "(reference {{ instancia.folio }}) completed the stage \"{{ paso.nombre }}\"."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 
 
 _MODIFICACIONES_ES_EMAIL = _email(
-    subject="Se requieren modificaciones en su trámite",
+    subject="Su trámite requiere modificaciones: {{ workflow.nombre }}",
     body=(
         "Estimado(a) {{ ciudadano.nombre }}:\n\n"
-        "El revisor asignado a su trámite {{ instancia.id }} ha solicitado "
-        "modificaciones.\n\n"
-        "Por favor ingrese al portal del ciudadano para atender la "
-        "solicitud.\n\n"
-        "Atentamente,\nMuniStream"
+        "El revisor de su trámite \"{{ workflow.nombre }}\" (folio "
+        "{{ instancia.folio }}) solicitó modificaciones.\n\n"
+        "{% if url_tramite %}Ingrese para atender la solicitud: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
     ),
 )
 _MODIFICACIONES_ES_WA = _whatsapp(
-    "Estimado(a) {{ ciudadano.nombre }}: su trámite {{ instancia.id }} "
-    "requiere modificaciones. Ingrese al portal para atender la solicitud."
+    "Estimado(a) {{ ciudadano.nombre }}: su trámite \"{{ workflow.nombre }}\" "
+    "(folio {{ instancia.folio }}) requiere modificaciones. Ingrese al portal para atenderlas."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 _MODIFICACIONES_EN_EMAIL = _email(
-    subject="Modifications required on your request",
+    subject="Your request requires changes: {{ workflow.nombre }}",
     body=(
         "Dear {{ ciudadano.nombre }}:\n\n"
-        "The reviewer assigned to your request {{ instancia.id }} has "
-        "requested modifications.\n\n"
-        "Please sign in to the citizen portal to respond to the request.\n\n"
-        "Sincerely,\nMuniStream"
+        "The reviewer of your request \"{{ workflow.nombre }}\" (reference "
+        "{{ instancia.folio }}) requested changes.\n\n"
+        "{% if url_tramite %}Sign in to respond: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
     ),
 )
 _MODIFICACIONES_EN_WA = _whatsapp(
-    "Dear {{ ciudadano.nombre }}: your request {{ instancia.id }} "
-    "requires modifications. Sign in to the citizen portal to respond."
+    "Dear {{ ciudadano.nombre }}: your request \"{{ workflow.nombre }}\" "
+    "(reference {{ instancia.folio }}) requires changes. Sign in to the citizen portal to respond."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 
 
+_DOCUMENTOS_ES = (
+    "{% if documentos %}"
+    "{% if adjuntos %}Se adjunta{% if documentos|length > 1 %}n los documentos emitidos{% else %} el documento emitido{% endif %}:"
+    "{% else %}Documentos emitidos, disponibles en el portal:{% endif +%}\n"
+    "{% for d in documentos %}- {{ d.nombre }}{% if d.folio %} (folio {{ d.folio }}){% endif +%}\n{% endfor +%}\n"
+    "{% endif %}"
+)
+_DOCUMENTOS_EN = (
+    "{% if documentos %}"
+    "{% if adjuntos %}Attached {% if documentos|length > 1 %}are the issued documents{% else %}is the issued document{% endif %}:"
+    "{% else %}Issued documents, available on the portal:{% endif +%}\n"
+    "{% for d in documentos %}- {{ d.nombre }}{% if d.folio %} (reference {{ d.folio }}){% endif +%}\n{% endfor +%}\n"
+    "{% endif %}"
+)
+
 _RESOLUCION_ES_EMAIL = _email(
-    subject="Resolución final de su trámite",
+    subject=(
+        "{% if resultado.rechazado %}Su trámite fue rechazado{% else %}Su trámite concluyó{% endif %}"
+        ": {{ workflow.nombre }}"
+    ),
     body=(
         "Estimado(a) {{ ciudadano.nombre }}:\n\n"
-        "Su trámite {{ instancia.id }} ha sido resuelto.\n\n"
-        "Puede consultar el resultado en el portal del ciudadano.\n\n"
-        "Atentamente,\nMuniStream"
+        "{% if resultado.rechazado %}"
+        "Le informamos que su trámite \"{{ workflow.nombre }}\" (folio {{ instancia.folio }}) fue rechazado.\n\n"
+        "{% if resultado.mensaje %}Motivo: {{ resultado.mensaje }}\n\n{% endif %}"
+        "{% else %}"
+        "Le informamos que su trámite \"{{ workflow.nombre }}\" (folio {{ instancia.folio }}) concluyó.\n\n"
+        "{% endif %}"
+        + _DOCUMENTOS_ES +
+        "{% if url_tramite %}Puede consultar el detalle en: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
     ),
 )
 _RESOLUCION_ES_WA = _whatsapp(
-    "Estimado(a) {{ ciudadano.nombre }}: su trámite {{ instancia.id }} "
-    "ha sido resuelto. Consulte el detalle en el portal del ciudadano."
+    "Estimado(a) {{ ciudadano.nombre }}: su trámite \"{{ workflow.nombre }}\" "
+    "(folio {{ instancia.folio }}) "
+    "{% if resultado.rechazado %}fue rechazado.{% if resultado.mensaje %} Motivo: {{ resultado.mensaje }}{% endif %}"
+    "{% else %}concluyó.{% endif %}"
+    "{% if documentos and adjuntos %} Le enviamos {% if documentos|length > 1 %}los documentos emitidos{% else %}el documento emitido{% endif %} a continuación.{% endif %}"
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 _RESOLUCION_EN_EMAIL = _email(
-    subject="Final resolution of your request",
+    subject=(
+        "{% if resultado.rechazado %}Your request was rejected{% else %}Your request is complete{% endif %}"
+        ": {{ workflow.nombre }}"
+    ),
     body=(
         "Dear {{ ciudadano.nombre }}:\n\n"
-        "Your request {{ instancia.id }} has been resolved.\n\n"
-        "You can review the outcome from the citizen portal.\n\n"
-        "Sincerely,\nMuniStream"
+        "{% if resultado.rechazado %}"
+        "Your request \"{{ workflow.nombre }}\" (reference {{ instancia.folio }}) was rejected.\n\n"
+        "{% if resultado.mensaje %}Reason: {{ resultado.mensaje }}\n\n{% endif %}"
+        "{% else %}"
+        "Your request \"{{ workflow.nombre }}\" (reference {{ instancia.folio }}) is complete.\n\n"
+        "{% endif %}"
+        + _DOCUMENTOS_EN +
+        "{% if url_tramite %}You can review the details at: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
     ),
 )
 _RESOLUCION_EN_WA = _whatsapp(
-    "Dear {{ ciudadano.nombre }}: your request {{ instancia.id }} "
-    "has been resolved. Review the details on the citizen portal."
+    "Dear {{ ciudadano.nombre }}: your request \"{{ workflow.nombre }}\" "
+    "(reference {{ instancia.folio }}) "
+    "{% if resultado.rechazado %}was rejected.{% if resultado.mensaje %} Reason: {{ resultado.mensaje }}{% endif %}"
+    "{% else %}is complete.{% endif %}"
+    "{% if documentos and adjuntos %} The issued {% if documentos|length > 1 %}documents follow{% else %}document follows{% endif %}.{% endif %}"
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 
 
 _ENTIDAD_ES_EMAIL = _email(
-    subject="Documento disponible en su trámite",
+    subject="Documento emitido: {{ documento.nombre }}",
     body=(
         "Estimado(a) {{ ciudadano.nombre }}:\n\n"
-        "Se ha emitido un nuevo documento en su trámite "
-        "{{ instancia.id }}.\n\n"
-        "Puede descargarlo desde el portal del ciudadano.\n\n"
-        "Atentamente,\nMuniStream"
+        "Se emitió el documento \"{{ documento.nombre }}\""
+        "{% if documento.folio %} con folio {{ documento.folio }}{% endif %} "
+        "en su trámite \"{{ workflow.nombre }}\" (folio {{ instancia.folio }}).\n\n"
+        "{% if adjuntos %}Lo encontrará adjunto a este correo. {% endif %}"
+        "También está disponible en su cartera de documentos del portal.\n\n"
+        "{% if url_tramite %}Detalle del trámite: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
     ),
 )
 _ENTIDAD_ES_WA = _whatsapp(
-    "Estimado(a) {{ ciudadano.nombre }}: hay un nuevo documento disponible "
-    "en su trámite {{ instancia.id }}. Consulte el portal del ciudadano."
+    "Estimado(a) {{ ciudadano.nombre }}: se emitió el documento "
+    "\"{{ documento.nombre }}\"{% if documento.folio %} (folio {{ documento.folio }}){% endif %} "
+    "en su trámite \"{{ workflow.nombre }}\".{% if adjuntos %} Se lo enviamos a continuación.{% endif %}"
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 _ENTIDAD_EN_EMAIL = _email(
-    subject="Document available on your request",
+    subject="Document issued: {{ documento.nombre }}",
     body=(
         "Dear {{ ciudadano.nombre }}:\n\n"
-        "A new document has been issued on your request "
-        "{{ instancia.id }}.\n\n"
-        "You can download it from the citizen portal.\n\n"
-        "Sincerely,\nMuniStream"
+        "The document \"{{ documento.nombre }}\""
+        "{% if documento.folio %} with reference {{ documento.folio }}{% endif %} "
+        "was issued on your request \"{{ workflow.nombre }}\" (reference {{ instancia.folio }}).\n\n"
+        "{% if adjuntos %}You will find it attached to this email. {% endif %}"
+        "It is also available in your document wallet on the portal.\n\n"
+        "{% if url_tramite %}Request details: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
     ),
 )
 _ENTIDAD_EN_WA = _whatsapp(
-    "Dear {{ ciudadano.nombre }}: a new document is available on your "
-    "request {{ instancia.id }}. Review it on the citizen portal."
+    "Dear {{ ciudadano.nombre }}: the document \"{{ documento.nombre }}\""
+    "{% if documento.folio %} (reference {{ documento.folio }}){% endif %} was issued on your request "
+    "\"{{ workflow.nombre }}\".{% if adjuntos %} It follows below.{% endif %}"
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
 )
 
 
@@ -239,8 +301,8 @@ SYSTEM_NOTIFICATIONS: List[SystemNotification] = [
             "en": "Step advanced",
         },
         description_i18n={
-            "es": "Aviso cada vez que su trámite pasa al siguiente paso.",
-            "en": "Notice each time your request moves to the next step.",
+            "es": "Aviso cuando su trámite concluye una etapa relevante, como el envío o la revisión.",
+            "en": "Notice when your request completes a relevant stage, such as submission or review.",
         },
         default_channels=_BOTH_CHANNELS,
         templates={
@@ -272,13 +334,14 @@ SYSTEM_NOTIFICATIONS: List[SystemNotification] = [
     SystemNotification(
         key="resolucion_final",
         event_type=EventType.COMPLETED,
+        attach_documents=True,
         title_i18n={
             "es": "Resolución final",
             "en": "Final resolution",
         },
         description_i18n={
-            "es": "Aviso al concluir su trámite, con el resultado de la resolución.",
-            "en": "Notice when your request concludes, with the final outcome.",
+            "es": "Aviso al concluir su trámite, con el resultado y los documentos emitidos.",
+            "en": "Notice when your request concludes, with the outcome and the issued documents.",
         },
         default_channels=_BOTH_CHANNELS,
         templates={
@@ -291,13 +354,14 @@ SYSTEM_NOTIFICATIONS: List[SystemNotification] = [
     SystemNotification(
         key="entidad_emitida",
         event_type=EventType.ENTITY_CREATED,
+        attach_documents=True,
         title_i18n={
             "es": "Emisión de documentos",
             "en": "Document issued",
         },
         description_i18n={
-            "es": "Aviso cuando se emite un nuevo documento o entidad en su trámite.",
-            "en": "Notice when a new document or entity is issued on your request.",
+            "es": "Aviso con el documento en PDF cada vez que se emite uno en su trámite.",
+            "en": "Notice with the PDF document each time one is issued on your request.",
         },
         default_channels=_BOTH_CHANNELS,
         templates={

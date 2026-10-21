@@ -66,6 +66,7 @@ class Settings(BaseSettings):
 
     # Tenant Configuration
     TENANT_ID: Optional[str] = None  # Multi-tenant identifier
+    TENANT_NAME: Optional[str] = None  # Display name, e.g. signs citizen notifications
 
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: Optional[str] = None
@@ -99,6 +100,9 @@ class Settings(BaseSettings):
     BAILEYS_API_KEY: Optional[str] = None
     NOTIFICATION_RATE_LIMIT_PER_HOUR: int = 10
     NOTIFICATION_MAX_ATTEMPTS: int = 5
+    # Run the notification worker inside the backend process (one per tenant
+    # backend). Disable when running `python -m app.notifier.worker` separately.
+    NOTIFIER_WORKER_ENABLED: bool = True
 
     # Executor scheduling
     EXECUTOR_SAFETY_NET_SECONDS: int = 300

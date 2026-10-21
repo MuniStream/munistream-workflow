@@ -110,6 +110,9 @@ class ConfirmationOperator(BaseOperator):
         )
     """
 
+    # Accepting the terms submits the request: notify.
+    default_notify = True
+
     def __init__(
         self,
         task_id: str,

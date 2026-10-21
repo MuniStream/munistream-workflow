@@ -661,19 +661,8 @@ class DAGExecutor:
         if dag_instance.is_completed():
             dag_instance.status = InstanceStatus.COMPLETED
             dag_instance.completed_at = datetime.utcnow()
-
-            # Publish workflow completed event
-            if old_instance_status != InstanceStatus.COMPLETED:
-                try:
-                    await self.event_manager.publish_workflow_completed(
-                        workflow_id=dag_instance.dag.dag_id,
-                        instance_id=instance_id,
-                        user_id=dag_instance.user_id,
-                        final_context=dag_instance.context
-                    )
-                except Exception as e:
-                    # Log error but don't fail workflow completion due to event publishing issues
-                    logger.warning(f"Failed to publish workflow completed event for {instance_id}: {str(e)}")
+            # COMPLETED is published after saving, so consumers see the
+            # instance already closed (status and terminal outcome).
 
         elif dag_instance.has_failed():
             dag_instance.status = InstanceStatus.FAILED
@@ -732,7 +721,27 @@ class DAGExecutor:
         new_status = self._map_status(dag_instance.status)
 
         await self._save_instance_state(dag_instance, db_instance, instance_id, new_status)
-        
+
+        if (
+            old_instance_status != InstanceStatus.COMPLETED
+            and dag_instance.status == InstanceStatus.COMPLETED
+        ):
+            try:
+                from ..services.instance_tree import issued_entity_ids
+
+                await self.event_manager.publish_workflow_completed(
+                    workflow_id=dag_instance.dag.dag_id,
+                    instance_id=instance_id,
+                    user_id=dag_instance.user_id,
+                    final_context=dag_instance.context,
+                    entities_created=await issued_entity_ids(instance_id),
+                    terminal_status=getattr(db_instance, "terminal_status", None),
+                    parent_instance_id=getattr(db_instance, "parent_instance_id", None),
+                )
+            except Exception as e:
+                # Log error but don't fail workflow completion due to event publishing issues
+                logger.warning(f"Failed to publish workflow completed event for {instance_id}: {str(e)}")
+
         # Log status change
         if old_status != new_status:
             logger.info(
@@ -987,6 +996,11 @@ class DAGExecutor:
         await db_instance.save()
 
         if new_step and new_step != previous_step:
+            # Whether the citizen is notified depends on the step that just
+            # finished: submitting a form does not warrant a notice, accepting
+            # the terms does.
+            finished = dag_instance.dag.tasks.get(previous_step) if previous_step else None
+            notify = bool(getattr(finished, "notify", False))
             try:
                 await self.event_manager.publish_event(
                     event_type=EventType.STEP_ADVANCED,
@@ -996,6 +1010,7 @@ class DAGExecutor:
                     event_data={
                         "previous_step": previous_step,
                         "current_step": new_step,
+                        "notify": notify,
                     },
                 )
             except Exception:

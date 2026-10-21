@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 class ImageCaptureOperator(BaseOperator):
     """Base class for all image capture operators with shared functionality"""
 
+    # Captures (ID, selfie) upload to S3 and do not warrant a notice.
+    default_notify = False
+
     # Suficiente para frente y reverso de un documento, con holgura.
     S3_CACHE_SIZE = 4
 

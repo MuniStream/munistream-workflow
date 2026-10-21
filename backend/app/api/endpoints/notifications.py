@@ -11,7 +11,7 @@ from ...auth.provider import require_admin
 from ...core.config import settings
 from ...core.logging_config import get_workflow_logger
 from ...notifier.encryption import decrypt_credentials, encrypt_credentials, mask_credentials
-from ...notifier.handlers import get_handler
+from ...notifier.handlers import get_handler, with_infra_credentials
 from ...notifier.handlers.base import (
     OutboundMessage,
     PermanentDeliveryError,
@@ -49,6 +49,7 @@ class ChannelConfigIn(BaseModel):
     credentials: Dict[str, Any] = Field(default_factory=dict)
     from_address: Optional[str] = None
     test_recipient: Optional[str] = None
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ChannelConfigOut(BaseModel):
@@ -57,6 +58,7 @@ class ChannelConfigOut(BaseModel):
     credentials: Dict[str, Any]
     from_address: Optional[str]
     test_recipient: Optional[str]
+    options: Dict[str, Any] = Field(default_factory=dict)
     updated_at: Optional[datetime]
     updated_by: Optional[str]
 
@@ -95,16 +97,18 @@ class TemplatePreviewOut(BaseModel):
 
 
 class TriggerIn(BaseModel):
-    workflow_id: str
+    workflow_id: Optional[str] = None
     step_id: Optional[str] = None
     event_type: str
     template_key: str
     channels: List[NotificationChannel]
     active: bool = True
+    attach_documents: bool = False
 
 
 class TriggerOut(TriggerIn):
     id: str
+    is_system: bool = False
     updated_at: datetime
 
 
@@ -120,6 +124,7 @@ class DeliveryOut(BaseModel):
     instance_id: Optional[str]
     rendered_preview: Optional[str]
     last_error: Optional[str]
+    attachments_sent: List[str] = Field(default_factory=list)
     created_at: datetime
     sent_at: Optional[datetime]
 
@@ -135,6 +140,7 @@ def _serialize_channel(cfg: NotificationChannelConfig) -> ChannelConfigOut:
         credentials=mask_credentials(raw_creds),
         from_address=cfg.from_address,
         test_recipient=cfg.test_recipient,
+        options=cfg.options or {},
         updated_at=cfg.updated_at,
         updated_by=cfg.updated_by,
     )
@@ -188,6 +194,7 @@ async def put_channel(
         cfg.credentials_encrypted = encrypted
         cfg.from_address = payload.from_address
         cfg.test_recipient = payload.test_recipient
+        cfg.options = payload.options
         cfg.updated_at = datetime.utcnow()
         cfg.updated_by = current_user.get("sub")
         await cfg.save()
@@ -199,6 +206,7 @@ async def put_channel(
             credentials_encrypted=encrypted,
             from_address=payload.from_address,
             test_recipient=payload.test_recipient,
+            options=payload.options,
             updated_by=current_user.get("sub"),
         )
         await cfg.insert()
@@ -225,10 +233,7 @@ async def test_channel(
     # WhatsApp usa Baileys como infraestructura del backend; base_url/api_key
     # vienen de env vars del tenant backend, no del config per-tenant.
     if channel == NotificationChannel.WHATSAPP:
-        if settings.BAILEYS_BASE_URL:
-            creds.setdefault("base_url", settings.BAILEYS_BASE_URL)
-        if settings.BAILEYS_API_KEY:
-            creds.setdefault("api_key", settings.BAILEYS_API_KEY)
+        creds = with_infra_credentials(channel.value, creds)
         if not creds.get("base_url"):
             raise HTTPException(status_code=503, detail="BAILEYS_BASE_URL no configurado en el backend")
     elif not cfg:
@@ -391,6 +396,8 @@ def _serialize_trigger(trg: NotificationTrigger) -> TriggerOut:
         template_key=trg.template_key,
         channels=trg.channels,
         active=trg.active,
+        attach_documents=trg.attach_documents,
+        is_system=trg.is_system,
         updated_at=trg.updated_at,
     )
 
@@ -399,10 +406,15 @@ def _serialize_trigger(trg: NotificationTrigger) -> TriggerOut:
 async def list_triggers(
     current_user: dict = Depends(require_admin),
     workflow_id: Optional[str] = None,
+    include_system: bool = False,
 ):
+    """With `include_system`, system triggers (workflow_id=None), which apply
+    to every workflow, are listed along with the workflow's own."""
     tenant_id = _tenant_id()
     filters: Dict[str, Any] = {"tenant_id": tenant_id}
-    if workflow_id:
+    if workflow_id and include_system:
+        filters["$or"] = [{"workflow_id": workflow_id}, {"workflow_id": None}]
+    elif workflow_id:
         filters["workflow_id"] = workflow_id
     triggers = await NotificationTrigger.find(filters).to_list()
     return [_serialize_trigger(t) for t in triggers]
@@ -419,6 +431,7 @@ async def create_trigger(payload: TriggerIn, current_user: dict = Depends(requir
         template_key=payload.template_key,
         channels=payload.channels,
         active=payload.active,
+        attach_documents=payload.attach_documents,
         created_by=current_user.get("sub"),
     )
     await trg.insert()
@@ -439,12 +452,16 @@ async def update_trigger(
     trg = await NotificationTrigger.get(obj_id)
     if not trg or trg.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Trigger no encontrado")
-    trg.workflow_id = payload.workflow_id
-    trg.step_id = payload.step_id
-    trg.event_type = payload.event_type
-    trg.template_key = payload.template_key
+    # A system trigger applies to every workflow and its key doubles as the
+    # citizen preference key: only channels, active and attachments change.
+    if not trg.is_system:
+        trg.workflow_id = payload.workflow_id
+        trg.step_id = payload.step_id
+        trg.event_type = payload.event_type
+        trg.template_key = payload.template_key
     trg.channels = payload.channels
     trg.active = payload.active
+    trg.attach_documents = payload.attach_documents
     trg.updated_at = datetime.utcnow()
     await trg.save()
     return _serialize_trigger(trg)
@@ -460,6 +477,11 @@ async def delete_trigger(trigger_id: str, current_user: dict = Depends(require_a
     trg = await NotificationTrigger.get(obj_id)
     if not trg or trg.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Trigger no encontrado")
+    if trg.is_system:
+        raise HTTPException(
+            status_code=409,
+            detail="Los avisos del sistema no se borran; desactívelos",
+        )
     await trg.delete()
     return None
 
@@ -480,6 +502,7 @@ def _serialize_delivery(d: NotificationDelivery) -> DeliveryOut:
         instance_id=d.instance_id,
         rendered_preview=d.rendered_preview,
         last_error=d.last_error,
+        attachments_sent=d.attachments_sent or [],
         created_at=d.created_at,
         sent_at=d.sent_at,
     )

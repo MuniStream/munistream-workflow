@@ -103,3 +103,32 @@ async def get_my_notification_catalog(
         )
         for entry in SYSTEM_NOTIFICATIONS
     ]
+
+
+class NotificationContactsResponse(BaseModel):
+    email: List[str]
+    whatsapp: List[str]
+    channels_enabled: List[str]
+
+
+@router.get("/notification-contacts", response_model=NotificationContactsResponse)
+async def get_my_notification_contacts(
+    current_customer: Customer = Depends(get_current_customer),
+):
+    """Where this citizen's notifications are delivered: account contacts plus
+    the phone/email Profile Fields, and which channels the tenant has on."""
+    from ...core.config import settings
+    from ...notifier.contacts import DEFAULT_COUNTRY_CODE, contact_points
+    from ...notifier.models import NotificationChannel, NotificationChannelConfig
+
+    configs = await NotificationChannelConfig.find(
+        {"tenant_id": settings.TENANT_ID, "enabled": True}
+    ).to_list()
+    whatsapp = next((c for c in configs if c.channel == NotificationChannel.WHATSAPP), None)
+    country_code = ((whatsapp.options or {}).get("default_country_code") if whatsapp else None) or DEFAULT_COUNTRY_CODE
+    contacts = await contact_points(current_customer, country_code)
+    return NotificationContactsResponse(
+        email=contacts["email"],
+        whatsapp=contacts["whatsapp"],
+        channels_enabled=[c.channel.value for c in configs],
+    )

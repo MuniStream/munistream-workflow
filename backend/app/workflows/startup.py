@@ -57,6 +57,16 @@ async def initialize_workflow_system():
         await seed_system_notifications(settings.TENANT_ID)
         print(f"✅ System notifications seeded for tenant: {settings.TENANT_ID}")
 
+        if settings.NOTIFIER_WORKER_ENABLED:
+            from ..notifier.worker import start_in_process_worker
+
+            try:
+                await start_in_process_worker()
+            except Exception as e:
+                # Deliveries stay queued until a worker runs; the backend
+                # itself must still start.
+                logger.error(f"Notification worker failed to start: {e}")
+
         print("✅ Workflow system initialization completed")
         logger.info("Workflow system initialization completed")
         
@@ -70,6 +80,9 @@ async def shutdown_workflow_system():
     try:
         logger.info("Shutting down workflow system...")
         await workflow_service.stop_executor()
+        from ..notifier.worker import stop_in_process_worker
+
+        await stop_in_process_worker()
         logger.info("Workflow system shutdown completed")
     except Exception as e:
         logger.error(f"Error during workflow system shutdown: {str(e)}")
