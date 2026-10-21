@@ -90,6 +90,43 @@ class WorkflowService:
 
         return workflow_def
     
+    @staticmethod
+    def describe_operator(operator: BaseOperator) -> Dict[str, Any]:
+        """
+        Lo que un diagrama necesita saber del paso y que solo vive en la
+        instancia del operador: qué sub-trámite lanza y cómo lo espera, qué
+        entidad emite, con qué desenlace cierra. Solo valores JSON simples.
+        """
+        def plain(value: Any) -> Any:
+            return getattr(value, "value", value)
+
+        name = operator.__class__.__name__
+        if name == "WorkflowStartOperator":
+            return {
+                "child_workflow_id": operator.workflow_id,
+                "child_workflow_type": plain(operator.workflow_type),
+                "wait_for_completion": operator.wait_for_completion,
+                "required_status": operator.required_status,
+                "propagate_terminal": list(operator.propagate_terminal),
+                "on_child_failure": operator.on_child_failure,
+                "retry_target_task": operator.retry_target_task,
+                "timeout_minutes": operator.timeout_minutes,
+            }
+        if name == "EntityCreationOperator":
+            return {
+                "emits_entity": {
+                    "entity_type": operator.entity_type,
+                    "entity_subtype": operator.entity_subtype,
+                    "visualizer": operator.visualizer,
+                    "folio_prefix": (operator.folio_config or {}).get("prefix"),
+                }
+            }
+        if name == "EntityUpdateOperator":
+            return {"updates_entity": {"entity_id_source": operator.entity_id_source}}
+        if name == "TerminateIfOperator":
+            return {"terminal_status": plain(operator.terminal_status)}
+        return {}
+
     def get_step_type_from_operator(self, operator: BaseOperator) -> str:
         """
         Dynamically determine step type from operator class.

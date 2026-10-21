@@ -28,6 +28,9 @@ class StepSchema(BaseModel):
     optional_inputs: List[str] = Field(default_factory=list)
     next_steps: List[str] = Field(default_factory=list)
     operator_class: Optional[str] = None  # Actual operator class name for extensibility
+    # Parámetros del operador que importan para dibujar el trámite
+    # (WorkflowService.describe_operator), leídos de la definición en código.
+    operator_config: Dict[str, Any] = Field(default_factory=dict)
     
     class Config:
         use_enum_values = True
