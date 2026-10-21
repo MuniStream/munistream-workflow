@@ -59,6 +59,7 @@ class WorkflowResponse(WorkflowBase):
     version: str
     status: WorkflowStatus
     steps: List[StepSchema]
+    step_count: int = 0
     start_step_id: Optional[str]
     created_at: datetime
     updated_at: datetime
