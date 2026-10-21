@@ -1,4 +1,5 @@
 """WhatsApp delivery via the munistream-baileys microservice."""
+import base64
 import logging
 from typing import Any, Dict
 
@@ -31,27 +32,43 @@ class WhatsAppHandler(NotificationHandler):
 
         url = f"{base_url.rstrip('/')}/send"
         headers = {"X-API-Key": api_key} if api_key else {}
-        payload = {
-            "tenant_id": tenant_id,
-            "to": message.recipient,
-            "body": message.body,
-        }
+        payloads = [{"tenant_id": tenant_id, "to": message.recipient, "body": message.body}]
+        # Each document travels as its own message, after the text.
+        for attachment in message.attachments:
+            payloads.append({
+                "tenant_id": tenant_id,
+                "to": message.recipient,
+                "document": {
+                    "data_base64": base64.b64encode(attachment.data).decode(),
+                    "filename": attachment.filename,
+                    "mimetype": attachment.content_type,
+                },
+            })
 
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
-            raise TransientDeliveryError(f"baileys no accesible: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise TransientDeliveryError(f"baileys HTTP error: {exc}") from exc
+        message_ids = []
+        async with httpx.AsyncClient(timeout=60) as client:
+            for index, payload in enumerate(payloads):
+                try:
+                    response = await client.post(url, json=payload, headers=headers)
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+                    raise TransientDeliveryError(f"baileys no accesible: {exc}") from exc
+                except httpx.HTTPError as exc:
+                    raise TransientDeliveryError(f"baileys HTTP error: {exc}") from exc
+                if response.status_code == 200:
+                    data = self._safe_json(response)
+                    if isinstance(data, dict) and data.get("messageId"):
+                        message_ids.append(data["messageId"])
+                    continue
+                # Once the text went out, retrying would duplicate the notice: a
+                # document failing after the text is a permanent failure.
+                self._raise_for(response, permanent=index > 0)
 
-        if response.status_code == 200:
-            data = self._safe_json(response)
-            return HandlerResult(
-                success=True,
-                provider_reference=data.get("messageId") if isinstance(data, dict) else None,
-            )
+        return HandlerResult(
+            success=True,
+            provider_reference=",".join(message_ids) or None,
+        )
 
+    def _raise_for(self, response: httpx.Response, permanent: bool = False) -> None:
         data = self._safe_json(response)
         detail = data.get("error") if isinstance(data, dict) else response.text
 
@@ -61,10 +78,12 @@ class WhatsAppHandler(NotificationHandler):
             raise PermanentDeliveryError(f"baileys auth rechazada: {detail}")
         if response.status_code == 404:
             raise PermanentDeliveryError(f"baileys recurso no encontrado: {detail}")
+        error = TransientDeliveryError
+        if permanent:
+            error = PermanentDeliveryError
         if response.status_code == 503:
-            raise TransientDeliveryError(f"baileys sesión no disponible: {detail}")
-
-        raise TransientDeliveryError(f"baileys {response.status_code}: {detail}")
+            raise error(f"baileys sesión no disponible: {detail}")
+        raise error(f"baileys {response.status_code}: {detail}")
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> Any:

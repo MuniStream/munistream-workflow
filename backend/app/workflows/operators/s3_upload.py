@@ -48,6 +48,9 @@ class S3UploadOperator(BaseOperator):
     - Error handling with retry logic
     """
 
+    # Uploading to S3 is internal: no notice.
+    default_notify = False
+
     def __init__(
         self,
         task_id: str,

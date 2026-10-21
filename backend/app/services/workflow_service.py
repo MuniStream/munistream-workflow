@@ -101,8 +101,10 @@ class WorkflowService:
             return getattr(value, "value", value)
 
         name = operator.__class__.__name__
+        # Whether finishing the step notifies the citizen (STEP_ADVANCED).
+        base = {"notify": bool(getattr(operator, "notify", True))}
         if name == "WorkflowStartOperator":
-            return {
+            return base | {
                 "child_workflow_id": operator.workflow_id,
                 "child_workflow_type": plain(operator.workflow_type),
                 "wait_for_completion": operator.wait_for_completion,
@@ -113,7 +115,7 @@ class WorkflowService:
                 "timeout_minutes": operator.timeout_minutes,
             }
         if name == "EntityCreationOperator":
-            return {
+            return base | {
                 "emits_entity": {
                     "entity_type": operator.entity_type,
                     "entity_subtype": operator.entity_subtype,
@@ -122,10 +124,10 @@ class WorkflowService:
                 }
             }
         if name == "EntityUpdateOperator":
-            return {"updates_entity": {"entity_id_source": operator.entity_id_source}}
+            return base | {"updates_entity": {"entity_id_source": operator.entity_id_source}}
         if name == "TerminateIfOperator":
-            return {"terminal_status": plain(operator.terminal_status)}
-        return {}
+            return base | {"terminal_status": plain(operator.terminal_status)}
+        return base
 
     def get_step_type_from_operator(self, operator: BaseOperator) -> str:
         """

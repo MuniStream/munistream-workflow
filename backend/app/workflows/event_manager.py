@@ -189,7 +189,9 @@ class WorkflowEventManager:
         instance_id: str,
         user_id: str,
         final_context: Optional[Dict[str, Any]] = None,
-        entities_created: Optional[List[str]] = None
+        entities_created: Optional[List[str]] = None,
+        terminal_status: Optional[str] = None,
+        parent_instance_id: Optional[str] = None,
     ) -> str:
         """
         Publish workflow completed event.
@@ -212,6 +214,8 @@ class WorkflowEventManager:
             event_data={
                 "final_context": final_context or {},
                 "entities_created": entities_created or [],
+                "terminal_status": terminal_status,
+                "parent_instance_id": parent_instance_id,
                 "completed_at": datetime.utcnow().isoformat()
             }
         )
@@ -259,7 +263,10 @@ class WorkflowEventManager:
         user_id: str,
         entity_id: str,
         entity_type: str,
-        entity_data: Optional[Dict[str, Any]] = None
+        entity_data: Optional[Dict[str, Any]] = None,
+        entity_name: Optional[str] = None,
+        folio: Optional[str] = None,
+        source_instance_id: Optional[str] = None,
     ) -> str:
         """
         Publish entity created event.
@@ -283,6 +290,9 @@ class WorkflowEventManager:
             event_data={
                 "entity_id": entity_id,
                 "entity_type": entity_type,
+                "entity_name": entity_name,
+                "folio": folio,
+                "source_instance_id": source_instance_id,
                 "entity_data": entity_data or {},
                 "created_at": datetime.utcnow().isoformat()
             }

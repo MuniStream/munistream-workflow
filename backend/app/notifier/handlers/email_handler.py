@@ -36,6 +36,14 @@ class EmailHandler(NotificationHandler):
         email["To"] = message.recipient
         email["Subject"] = message.subject or ""
         email.set_content(message.body)
+        for attachment in message.attachments:
+            maintype, _, subtype = attachment.content_type.partition("/")
+            email.add_attachment(
+                attachment.data,
+                maintype=maintype or "application",
+                subtype=subtype or "octet-stream",
+                filename=attachment.filename,
+            )
 
         try:
             response = await aiosmtplib.send(

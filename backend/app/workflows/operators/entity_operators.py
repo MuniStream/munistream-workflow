@@ -432,6 +432,37 @@ class EntityCreationOperator(BaseOperator):
                 error=f"Failed to create entity: {str(e)}"
             )
     
+    async def _publish_entity_issued(self, entity, context: Dict[str, Any]) -> None:
+        """
+        Publish ENTITY_CREATED so the owner is notified with the document
+        attached. The notice refers to the request the citizen started: an
+        entity issued inside a sub-workflow (admin validation) is re-pointed
+        to the root instance.
+        """
+        try:
+            from ...services.instance_tree import root_instance
+            from ...services.workflow_service import workflow_service
+
+            instance_id = context.get("instance_id")
+            root = await root_instance(instance_id) if instance_id else None
+            folio_field = (self.folio_config or {}).get("field")
+            await workflow_service.executor.event_manager.publish_entity_created(
+                workflow_id=root.workflow_id if root else context.get("workflow_id", ""),
+                instance_id=root.instance_id if root else instance_id,
+                user_id=entity.owner_user_id,
+                entity_id=entity.entity_id,
+                entity_type=entity.entity_type,
+                entity_name=entity.name,
+                folio=(entity.data or {}).get(folio_field) if folio_field else None,
+                source_instance_id=instance_id,
+            )
+        except Exception as e:
+            # A notification failure never blocks issuing the document.
+            await self.log_warning(
+                f"Could not publish ENTITY_CREATED for {entity.entity_id}: {e}",
+                details={"entity_id": entity.entity_id},
+            )
+
     async def execute_async(self, context: Dict[str, Any]) -> str:
         """Async execution method for entity creation"""
         # First run the regular execute to prepare parameters
@@ -526,6 +557,9 @@ class EntityCreationOperator(BaseOperator):
                         )
                         print(f"   ⚠️ PDF generation failed: {e}")
 
+                if self.notify:
+                    await self._publish_entity_issued(entity, context)
+
                 # Update the output data
                 output_data = {
                     f"{self.task_id}_entity_id": entity.entity_id,
@@ -583,6 +617,10 @@ class EntityCreationOperator(BaseOperator):
         field = cfg.get("field")
         if not field:
             return
+        # Lets readers (notifications, listings) find the folio without
+        # knowing the operator's configuration.
+        display = entity_params.get("entity_display_config") or {}
+        entity_params["entity_display_config"] = {**display, "folio_field": field}
         data = entity_params.setdefault("data", {})
         # No reasignar si ya trae folio (idempotencia ante re-capturas).
         if data.get(field):

@@ -33,6 +33,7 @@ def test_workflow_start_describe_hijo_y_espera():
     )
     d = describe(op)
     assert d == {
+        "notify": True,
         "child_workflow_id": "admin_validacion",
         "child_workflow_type": "admin",
         "wait_for_completion": True,
@@ -54,6 +55,7 @@ def test_entity_creation_describe_la_entidad_emitida():
         folio_config={"field": "folio", "prefix": "PP"},
     )
     assert describe(op) == {
+        "notify": True,
         "emits_entity": {
             "entity_type": "permiso_pesca",
             "entity_subtype": "comercial",
@@ -65,11 +67,24 @@ def test_entity_creation_describe_la_entidad_emitida():
 
 def test_entity_update_y_terminate_if():
     assert describe(EntityUpdateOperator(task_id="act", entity_id_source="entidad_id")) == {
+        "notify": True,
         "updates_entity": {"entity_id_source": "entidad_id"}
     }
     term = TerminateIfOperator(task_id="desenlace", conditions=[], terminal_status="rejected")
-    assert describe(term) == {"terminal_status": "rejected"}
+    assert describe(term) == {"notify": True, "terminal_status": "rejected"}
 
 
 def test_otros_operadores_no_describen_nada():
-    assert describe(PythonOperator(task_id="p", python_callable=lambda **c: {})) == {}
+    assert describe(PythonOperator(task_id="p", python_callable=lambda **c: {})) == {"notify": True}
+
+
+def test_notify_por_defecto_y_sobreescrito():
+    from app.workflows.operators.user_input import UserInputOperator
+    from app.workflows.operators.s3_upload import S3UploadOperator
+    from app.workflows.operators.confirmation_operator import ConfirmationOperator
+
+    assert describe(UserInputOperator(task_id="f", form_config={}))["notify"] is False
+    assert describe(UserInputOperator(task_id="g", form_config={}, notify=True))["notify"] is True
+    assert S3UploadOperator(task_id="s").notify is False
+    assert ConfirmationOperator(task_id="c", summary_sections=[], declarations=[]).notify is True
+    assert PythonOperator(task_id="p2", python_callable=lambda **c: {}, notify=False).notify is False

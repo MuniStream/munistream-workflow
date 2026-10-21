@@ -36,6 +36,9 @@ class UserInputOperator(BaseOperator):
     Stateless operator that waits for user input.
     Input is provided through context, making it simple and predictable.
     """
+
+    # Submitting a form does not notify citizens about their own input.
+    default_notify = False
     
     def __init__(
         self,
