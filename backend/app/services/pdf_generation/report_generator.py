@@ -212,6 +212,11 @@ class EntityReportGenerator:
                     sig_data["qr_code"] = self._to_data_url(sig_qr)
                 data["signatures"].append(sig_data)
 
+        # Map images (pin or perimeter) for geo fields, embedded as data URLs.
+        if entity.data:
+            from .static_map import build_field_maps
+            data["field_maps"] = await build_field_maps(entity.data)
+
         # Process entity files for preview/embedding
         if entity.data:
             file_previews = await self._process_entity_files(entity)

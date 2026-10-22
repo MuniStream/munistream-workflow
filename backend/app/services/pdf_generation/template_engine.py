@@ -67,6 +67,9 @@ class TemplateEngine:
         from ..signature_extraction import extract_signatures, format_signature_chain
         self.env.filters['firmas'] = extract_signatures
         self.env.filters['cadena_firma'] = format_signature_chain
+        # Structured values (geometries, addresses, species lists).
+        from .structured_fields import register_filters
+        register_filters(self.env)
 
     def _format_field_name(self, field_name: str) -> str:
         """Format field name for display"""
@@ -78,10 +81,26 @@ class TemplateEngine:
             return "-"
         if isinstance(value, bool):
             return "Yes" if value else "No"
+        from .structured_fields import address_parts, parse_structured, species_items
+        value = parse_structured(value)
         if isinstance(value, (list, tuple)):
-            return ", ".join(str(v) for v in value)
+            species = species_items(value)
+            if species:
+                return ", ".join(
+                    f"{it['common']} ({it['scientific']})" if it["common"] and it["scientific"]
+                    else it["common"] or it["scientific"]
+                    for it in species
+                )
+            return ", ".join(self._format_value(v) for v in value)
         if isinstance(value, dict):
-            return str(value)  # Could be enhanced with better formatting
+            parts = address_parts(value)
+            if parts:
+                return ", ".join(v for _, v in parts)
+            # Never a raw repr: `Key: value` pairs of the non-empty entries.
+            return "; ".join(
+                f"{self._format_field_name(str(k))}: {self._format_value(v)}"
+                for k, v in value.items() if v not in (None, "", [], {})
+            )
         return str(value)
 
     def _format_date(self, date_value) -> str:
