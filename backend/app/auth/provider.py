@@ -66,8 +66,6 @@ class KeycloakProvider:
         try:
             # Debug: Log token info
             logger.info(f"Token length: {len(token)}")
-            logger.info(f"Token first 50 chars: {token[:50]}...")
-            logger.info(f"Token last 10 chars: ...{token[-10:]}")
 
             # Get JWKS for verification
             jwks = await self.get_jwks()
@@ -243,7 +241,6 @@ async def get_current_user(
 
     logger.info(f"Token from credentials: length={len(credentials.credentials)}")
     logger.info(f"Token scheme: {credentials.scheme}")
-    logger.info(f"Token first 50: {credentials.credentials[:50]}...")
 
     try:
         user_info = await keycloak.get_user_info(credentials.credentials)

@@ -154,6 +154,35 @@ def get_workflow_context() -> Dict[str, Optional[str]]:
     }
 
 
+# Keyword arguments that belong to Logger.log() itself, not to the record's
+# extra fields.
+_LOGGING_KWARGS = ("exc_info", "stack_info", "stacklevel")
+
+# Attributes every LogRecord already has; Logger.makeRecord() raises KeyError
+# if an extra field tries to overwrite one of them.
+_RESERVED_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", (), None).__dict__
+) | {"message", "asctime"}
+
+
+def _log(logger: logging.Logger, level: int, message, fields: Dict[str, Any]) -> None:
+    """Log with context fields as extra, passing logging keywords through.
+
+    Context fields that collide with LogRecord attributes are kept under an
+    ``extra_`` prefix: a log call must never raise, least of all from an
+    ``except`` block, where the error would replace the one being reported.
+    """
+    log_kwargs = {key: fields.pop(key) for key in _LOGGING_KWARGS if key in fields}
+    extra = {
+        (f"extra_{key}" if key in _RESERVED_RECORD_ATTRS else key): value
+        for key, value in fields.items()
+    }
+    # One frame for this helper and one for the wrapper method, so the record
+    # points at the caller.
+    log_kwargs["stacklevel"] = log_kwargs.get("stacklevel", 1) + 2
+    logger.log(level, message, extra=extra, **log_kwargs)
+
+
 class WorkflowContextLogger:
     """Wrapper around standard logger that automatically sets context."""
 
@@ -166,20 +195,24 @@ class WorkflowContextLogger:
         set_workflow_context(**context)
         return ContextualLogger(self.logger, old_context)
 
-    def info(self, message, **extra):
-        self.logger.info(message, extra=extra)
+    def info(self, message, /, **extra):
+        _log(self.logger, logging.INFO, message, extra)
 
-    def debug(self, message, **extra):
-        self.logger.debug(message, extra=extra)
+    def debug(self, message, /, **extra):
+        _log(self.logger, logging.DEBUG, message, extra)
 
-    def warning(self, message, **extra):
-        self.logger.warning(message, extra=extra)
+    def warning(self, message, /, **extra):
+        _log(self.logger, logging.WARNING, message, extra)
 
-    def error(self, message, **extra):
-        self.logger.error(message, extra=extra)
+    def error(self, message, /, **extra):
+        _log(self.logger, logging.ERROR, message, extra)
 
-    def critical(self, message, **extra):
-        self.logger.critical(message, extra=extra)
+    def critical(self, message, /, **extra):
+        _log(self.logger, logging.CRITICAL, message, extra)
+
+    def exception(self, message, /, **extra):
+        extra.setdefault("exc_info", True)
+        _log(self.logger, logging.ERROR, message, extra)
 
 
 class ContextualLogger:
@@ -196,17 +229,24 @@ class ContextualLogger:
         # Restore old context
         set_workflow_context(**self.old_context)
 
-    def info(self, message, **extra):
-        self.logger.info(message, extra=extra)
+    def info(self, message, /, **extra):
+        _log(self.logger, logging.INFO, message, extra)
 
-    def debug(self, message, **extra):
-        self.logger.debug(message, extra=extra)
+    def debug(self, message, /, **extra):
+        _log(self.logger, logging.DEBUG, message, extra)
 
-    def warning(self, message, **extra):
-        self.logger.warning(message, extra=extra)
+    def warning(self, message, /, **extra):
+        _log(self.logger, logging.WARNING, message, extra)
 
-    def error(self, message, **extra):
-        self.logger.error(message, extra=extra)
+    def error(self, message, /, **extra):
+        _log(self.logger, logging.ERROR, message, extra)
+
+    def critical(self, message, /, **extra):
+        _log(self.logger, logging.CRITICAL, message, extra)
+
+    def exception(self, message, /, **extra):
+        extra.setdefault("exc_info", True)
+        _log(self.logger, logging.ERROR, message, extra)
 
 
 def setup_gelf_logging(graylog_host: str = "graylog", graylog_port: int = 12201, container_name: str = None):
