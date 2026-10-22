@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # backend). Disable when running `python -m app.notifier.worker` separately.
     NOTIFIER_WORKER_ENABLED: bool = True
 
+    # Document maps: geo fields are drawn over raster tiles in entity
+    # documents. The tile server must allow this use (OSM requires an
+    # identifying User-Agent and attribution, which the renderer adds).
+    MAP_TILES_ENABLED: bool = True
+    MAP_TILE_URL: str = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    MAP_TILE_ATTRIBUTION: str = "© OpenStreetMap contributors"
+    MAP_TILE_USER_AGENT: str = "MuniStream-document-renderer/1.0 (+https://munistream.com)"
+    MAP_TILE_TIMEOUT_SECONDS: float = 5.0
+
     # Executor scheduling
     EXECUTOR_SAFETY_NET_SECONDS: int = 300
     EXECUTOR_RUNNING_THROTTLE_SECONDS: float = 0.5
