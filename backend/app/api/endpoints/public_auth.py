@@ -151,6 +151,10 @@ def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
         "tipo_persona": tipo_persona,
         "llavemx_user_id": str(llavemx_user_id) if llavemx_user_id is not None else None,
         "razon_social": payload.get("razon_social"),
+        # Nombre y apellidos por separado, como los da Llave MX (datosUsuario).
+        "nombre": payload.get("given_name"),
+        "primer_apellido": payload.get("primer_apellido"),
+        "segundo_apellido": payload.get("segundo_apellido"),
         "personas_morales": personas_morales,
         "synced_at": datetime.utcnow().isoformat(),
     }
