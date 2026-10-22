@@ -6,7 +6,7 @@ from datetime import datetime
 import uuid
 import logging
 
-from ..models.legal_entity import EntityType, LegalEntity, EntityRelationship
+from ..models.legal_entity import ENTITY_STATUS_INACTIVE, EntityType, LegalEntity, EntityRelationship
 from ..core.logging_config import set_workflow_context, get_workflow_context
 
 
@@ -101,16 +101,24 @@ class EntityService:
         entity_type: Optional[str] = None,
         filters: Dict[str, Any] = None,
         skip: int = 0,
-        limit: int = 20
+        limit: int = 20,
+        excluir_inactivas: bool = False,
     ) -> List[LegalEntity]:
         """
         Find entities with flexible filtering.
         Filters can query any field in the data dict using MongoDB syntax.
+
+        `excluir_inactivas` deja fuera las entidades con `status` inactivo: las
+        que un hook de sincronización marcó porque su fuente ya no las reporta.
+        Los pickers lo piden; los listados del ciudadano y del admin no.
         """
         query = {}
         
         if owner_user_id:
             query["owner_user_id"] = owner_user_id
+
+        if excluir_inactivas:
+            query["status"] = {"$ne": ENTITY_STATUS_INACTIVE}
         
         if entity_type:
             # entity_type puede ser un tipo (str) o varios (list -> $in), para

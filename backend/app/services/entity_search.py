@@ -22,6 +22,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
+from ..models.legal_entity import ENTITY_STATUS_INACTIVE
+
 # Campos de `data` donde vive lo que alguien teclearía para buscar: los
 # identificadores oficiales de cada tipo de entidad. No se busca en todo `data`
 # a propósito — ahí hay imágenes en base64 y estructuras anidadas que no son
@@ -46,8 +48,13 @@ def construir_consulta(
     owner_user_id: Optional[str] = None,
     filtros: Optional[Dict[str, Any]] = None,
     validity: Optional[str] = None,
+    excluir_inactivas: bool = False,
 ) -> Dict[str, Any]:
-    """Consulta de Mongo para el listado de entidades del admin."""
+    """Consulta de Mongo para el listado de entidades del admin.
+
+    Con `excluir_inactivas` (la usan los pickers) se dejan fuera las entidades
+    con `status` inactivo, salvo que se pida un `status` explícito.
+    """
     consulta: Dict[str, Any] = {}
 
     if owner_user_id:
@@ -60,6 +67,8 @@ def construir_consulta(
 
     if status:
         consulta["status"] = status
+    elif excluir_inactivas:
+        consulta["status"] = {"$ne": ENTITY_STATUS_INACTIVE}
 
     # Validity derived from `valid_until` (datetime at root). It is a COMPUTED
     # facet: there is no stored field, it translates to a condition on the date.

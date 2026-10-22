@@ -49,6 +49,11 @@ class EntityRelationship(BaseModel):
     created_by: Optional[str] = None
 
 
+# `status` de una entidad que su fuente (p. ej. un hook de sincronización con un
+# registro externo) dejó de reportar. No se borra, pero los pickers no la ofrecen.
+ENTITY_STATUS_INACTIVE = "inactivo"
+
+
 class LegalEntity(Document):
     """
     Completely agnostic legal entity.
