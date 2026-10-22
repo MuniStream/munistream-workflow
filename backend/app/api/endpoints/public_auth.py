@@ -16,7 +16,11 @@ from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
 from ...core.i18n import t as translate
 from ...services.instance_progress import avance, pasos_recorridos
-from ...auth.auth_callbacks import run_post_auth_callbacks
+from ...auth.auth_callbacks import (
+    claim_post_auth_session,
+    has_post_auth_callbacks,
+    run_post_auth_callbacks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +118,12 @@ def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
     llavemx_user_id = payload.get("llavemx_user_id")
     phone = payload.get("phone") or payload.get("phone_number")
     personas_morales = _parse_personas_morales(payload.get("personas_morales"))
+    previous = customer.metadata.get("llavemx") if isinstance(customer.metadata, dict) else None
+    if "personas_morales" not in payload and isinstance(previous, dict):
+        # Un token sin el claim no dice que el ciudadano ya no tenga personas
+        # morales: dice que este token no las trae (p. ej. un mapper ausente en
+        # ese client). Vaciarlas aquí hacía que el hook del tenant las inactivara.
+        personas_morales = previous.get("personas_morales") or []
 
     changed = False
     if curp and customer.curp != curp:
@@ -241,9 +251,12 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     customer.update_last_login()
     await customer.save()
 
-    # Run plugin-registered post-auth callbacks (e.g. tenant-specific entity sync).
-    # Runs after save so customer.id is assigned; callbacks persist their own changes.
-    await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
+    # Run plugin-registered post-auth callbacks (e.g. tenant-specific entity sync)
+    # once per Keycloak session, not on every request: only the request that
+    # claims the session runs them. Runs after save so customer.id is assigned;
+    # callbacks persist their own changes.
+    if has_post_auth_callbacks() and await claim_post_auth_session(customer, payload):
+        await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
 
     return customer
 

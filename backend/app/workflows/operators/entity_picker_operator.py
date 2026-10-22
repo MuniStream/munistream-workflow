@@ -182,7 +182,8 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 owner_user_id=user_id,
                 entity_type=entity_types or entity_type,
                 filters=filters,
-                limit=100
+                limit=100,
+                excluir_inactivas=True,
             )
 
             # Check if requirement is fulfilled
@@ -490,7 +491,8 @@ class EntityPickerOperator(MultiEntityRequirementOperator):
                 owner_user_id=user_id,
                 entity_type=req.get("entity_types") or entity_type,
                 filters=filters,
-                limit=100
+                limit=100,
+                excluir_inactivas=True,
             )
 
             logger.debug("Entity discovery result",

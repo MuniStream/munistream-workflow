@@ -1273,6 +1273,7 @@ async def picker_candidatas(
         entity_type=requisito.get("entity_types") or requisito.get("entity_type"),
         owner_user_id=db_instance.user_id,
         filtros=requisito.get("filters"),
+        excluir_inactivas=True,
     )
 
     total = await LegalEntity.find(consulta).count()
