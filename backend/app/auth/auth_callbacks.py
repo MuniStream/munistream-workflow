@@ -110,8 +110,11 @@ async def run_post_auth_callbacks(
 ) -> None:
     """Run all registered post-auth callbacks, isolating failures."""
     for callback in _post_auth_callbacks:
+        nombre = getattr(callback, "__qualname__", repr(callback))
+        logger.info("post-auth callback %s: inicia", nombre)
         try:
             await callback(customer, payload, tenant_id)
+            logger.info("post-auth callback %s: termina", nombre)
         except Exception:
             logger.exception(
                 "post-auth callback failed: %s",
