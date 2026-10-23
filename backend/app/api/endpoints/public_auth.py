@@ -106,13 +106,16 @@ def _parse_personas_morales(raw: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
+def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> Dict[str, List[str]]:
     """
     Sync Llave MX identity data from the Keycloak token claims into the Customer.
 
     Called on every authenticated request so the MuniStream profile mirrors the
     FORCE-synced Keycloak attributes (persona física + all associated personas
     morales). Only overwrites fields when the corresponding claim is present.
+
+    Returns which typed fields were updated and which kept their stored value
+    because the token did not carry the claim, for the login log.
     """
     curp = payload.get("curp")
     rfc = payload.get("rfc")
@@ -128,21 +131,25 @@ def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
         personas_morales = previous.get("personas_morales") or []
 
     changed = False
-    if curp and customer.curp != curp:
-        customer.curp = curp
-        changed = True
-    if rfc and customer.rfc != rfc:
-        customer.rfc = rfc
-        changed = True
-    if tipo_persona and customer.tipo_persona != tipo_persona:
-        customer.tipo_persona = tipo_persona
-        changed = True
-    if llavemx_user_id is not None and customer.llavemx_user_id != str(llavemx_user_id):
-        customer.llavemx_user_id = str(llavemx_user_id)
-        changed = True
-    if phone and customer.phone != phone:
-        customer.phone = phone
-        changed = True
+    updated: List[str] = []
+    kept: List[str] = []
+    for field, value in (
+        ("curp", curp),
+        ("rfc", rfc),
+        ("tipo_persona", tipo_persona),
+        ("llavemx_user_id", str(llavemx_user_id) if llavemx_user_id is not None else None),
+        ("phone", phone),
+    ):
+        if not value:
+            if getattr(customer, field, None):
+                kept.append(field)
+            continue
+        if getattr(customer, field, None) != value:
+            setattr(customer, field, value)
+            updated.append(field)
+            changed = True
+    if "personas_morales" not in payload and personas_morales:
+        kept.append("personas_morales")
 
     # Store the full structured Llave MX profile in metadata.
     if not isinstance(customer.metadata, dict):
@@ -166,6 +173,7 @@ def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
 
     if changed:
         customer.updated_at = datetime.utcnow()
+    return {"updated": updated, "kept": kept}
 
 
 # Claims de Llave MX que se registran en la bitácora del inicio de sesión.
@@ -175,28 +183,54 @@ LLAVEMX_CLAIMS = (
 )
 
 
-def _log_inicio_de_sesion(customer: Customer, payload: Dict[str, Any]) -> None:
+def _describe_claim(payload: Dict[str, Any], claim: str) -> Any:
+    """Claim value for the login log, telling a missing claim from an empty one."""
+    if claim not in payload:
+        return "(ausente)"
+    value = payload[claim]
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "(vacío)"
+    return value
+
+
+def _log_inicio_de_sesion(
+    customer: Customer,
+    payload: Dict[str, Any],
+    resolved_by: Optional[str] = None,
+    profile_sync: Optional[Dict[str, List[str]]] = None,
+) -> None:
     """Lo que trajo el token y lo que quedó guardado, para la bitácora del ciudadano."""
     logger.info(
         "Inicio de sesión: customer %s, keycloak %s, correo %s, tenant %s, sesión %s, idp %s",
         customer.id, payload.get("sub"), payload.get("email"), settings.TENANT_ID,
         post_auth_session_key(payload), payload.get("identity_provider"),
     )
+    if resolved_by:
+        logger.info("  customer resolved by: %s", resolved_by)
     for claim in LLAVEMX_CLAIMS:
-        logger.info("  claim %s: %s", claim, payload[claim] if claim in payload else "(ausente)")
+        logger.info("  claim %s: %s", claim, _describe_claim(payload, claim))
+    logger.info("  claim email: %s, phone: %s, phone_number: %s",
+                _describe_claim(payload, "email"), _describe_claim(payload, "phone"),
+                _describe_claim(payload, "phone_number"))
     if "personas_morales" not in payload:
         logger.info("  claim personas_morales: (ausente)")
     else:
         morales = _parse_personas_morales(payload.get("personas_morales"))
         logger.info("  claim personas_morales: %s persona(s) moral(es)", len(morales))
         for pm in morales:
-            logger.info("    rfc %s, razón social %s", pm.get("rfc"), pm.get("razonSocial") or pm.get("razon_social"))
+            logger.info("    rfc %s, razón social %s", pm.get("rfc") or "(sin rfc)",
+                        pm.get("razonSocial") or pm.get("razon_social"))
     llavemx = customer.metadata.get("llavemx") if isinstance(customer.metadata, dict) else None
     guardadas = (llavemx or {}).get("personas_morales") or []
     logger.info(
         "  perfil guardado: curp %s, rfc %s, tipo_persona %s, %s persona(s) moral(es)",
         customer.curp, customer.rfc, customer.tipo_persona, len(guardadas),
     )
+    if profile_sync:
+        logger.info(
+            "  profile fields updated from the token: %s; kept from a previous login (claim missing): %s",
+            profile_sync.get("updated") or "none", profile_sync.get("kept") or "none",
+        )
 
 
 async def get_current_customer(authorization: Optional[str] = Header(None)) -> Customer:
@@ -252,10 +286,13 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     email = payload.get("email", "")
     curp = payload.get("curp")
 
+    resolved_by = "keycloak_id"
     customer = await Customer.find_one(Customer.keycloak_id == customer_id)
     if customer is None and curp:
+        resolved_by = "curp"
         customer = await Customer.find_one(Customer.curp == curp)
     if customer is None and email:
+        resolved_by = "email"
         customer = await Customer.find_one(Customer.email == email)
 
     if customer is None:
@@ -264,6 +301,11 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
         # but fall back to a CURP-derived address if absent.
         if not email:
             if not curp:
+                logger.warning(
+                    "Login rejected: token for keycloak %s carries neither email nor curp "
+                    "(idp %s); cannot create the customer",
+                    customer_id, payload.get("identity_provider"),
+                )
                 raise credentials_exception
             email = f"{curp}@llavemx.local"
         username = payload.get("preferred_username", email)
@@ -280,11 +322,12 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
             email_verified=payload.get("email_verified", False),
             keycloak_id=customer_id  # Store Keycloak ID separately
         )
+        resolved_by = "created"
 
     # Keep the Keycloak link fresh and sync Llave MX data on every login.
     if customer.keycloak_id != customer_id:
         customer.keycloak_id = customer_id
-    _sync_llavemx_profile(customer, payload)
+    profile_sync = _sync_llavemx_profile(customer, payload)
     customer.update_last_login()
     await customer.save()
 
@@ -295,7 +338,7 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     # incluidas las tareas que dejan los callbacks, va también a <user_id>.log.
     if has_post_auth_callbacks() and await claim_post_auth_session(customer, payload):
         with login_session(str(customer.id)):
-            _log_inicio_de_sesion(customer, payload)
+            _log_inicio_de_sesion(customer, payload, resolved_by, profile_sync)
             await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
 
     return customer
