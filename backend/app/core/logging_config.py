@@ -5,6 +5,7 @@ Extends existing Python logging to automatically include workflow context.
 
 import logging
 import json
+import re
 import socket
 import time
 from typing import Optional, Dict, Any
@@ -16,6 +17,34 @@ current_workflow_id: ContextVar[Optional[str]] = ContextVar('current_workflow_id
 current_instance_id: ContextVar[Optional[str]] = ContextVar('current_instance_id', default=None)
 current_tenant: ContextVar[Optional[str]] = ContextVar('current_tenant', default=None)
 current_step: ContextVar[Optional[str]] = ContextVar('current_step', default=None)
+
+# Mexican personal identifiers. The citizen's own login file keeps them in full
+# (it is their record); the shared outputs (console, Graylog) show only the
+# first four characters, enough to tell records apart without exposing them.
+_CURP_RE = re.compile(r"\b[A-Z][AEIOUX][A-Z]{2}\d{6}[HMX][A-Z]{5}[A-Z0-9]\d\b")
+_RFC_RE = re.compile(r"\b[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}\b")
+
+
+def mask_personal_ids(text: str) -> str:
+    """Mask CURPs and RFCs in ``text`` to their first four characters."""
+    if not text:
+        return text
+    masked = _CURP_RE.sub(lambda m: m.group(0)[:4] + "…", text)
+    return _RFC_RE.sub(lambda m: m.group(0)[:4] + "…", masked)
+
+
+def _login_run() -> Optional[str]:
+    # Imported lazily: login_log has no dependency on this module and must stay so.
+    from .login_log import current_login_run
+    return current_login_run.get()
+
+
+class MaskingConsoleFormatter(logging.Formatter):
+    """Console formatter: tags login records with their run id, masks personal ids."""
+
+    def format(self, record):
+        record.login_tag = f" [login {_login_run()}]" if _login_run() else ""
+        return mask_personal_ids(super().format(record))
 
 
 class GELFFormatter(logging.Formatter):
@@ -33,7 +62,7 @@ class GELFFormatter(logging.Formatter):
         gelf_message = {
             "version": "1.1",
             "host": self.hostname,
-            "short_message": record.getMessage(),
+            "short_message": mask_personal_ids(record.getMessage()),
             "timestamp": record.created,
             "level": self._level_to_gelf(record.levelno),
             "facility": "munistream-workflow",
@@ -58,6 +87,8 @@ class GELFFormatter(logging.Formatter):
             gelf_message["_tenant"] = current_tenant.get()
         if current_step.get():
             gelf_message["_step"] = current_step.get()
+        if _login_run():
+            gelf_message["_login_run"] = _login_run()
 
         # Add any extra fields from record
         for key, value in record.__dict__.items():
@@ -73,7 +104,7 @@ class GELFFormatter(logging.Formatter):
 
         # Add exception info if present
         if record.exc_info:
-            gelf_message["_exception"] = self.formatException(record.exc_info)
+            gelf_message["_exception"] = mask_personal_ids(self.formatException(record.exc_info))
 
         return json.dumps(gelf_message)
 
@@ -263,8 +294,8 @@ def setup_gelf_logging(graylog_host: str = "graylog", graylog_port: int = 12201,
     # Ensure we don't lose console output
     if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
         console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        console_handler.setFormatter(MaskingConsoleFormatter(
+            '%(asctime)s - %(name)s - %(levelname)s -%(login_tag)s %(message)s'
         ))
         root_logger.addHandler(console_handler)
 

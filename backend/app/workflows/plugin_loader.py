@@ -9,6 +9,7 @@ import os
 import sys
 import importlib
 import importlib.util
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse, quote
@@ -16,6 +17,8 @@ from urllib.parse import urlparse, urlunparse, quote
 from git import Repo
 from git.exc import GitCommandError
 import yaml
+
+logger = logging.getLogger(__name__)
 import json
 
 from ..services.workflow_service import workflow_service
@@ -261,7 +264,7 @@ class WorkflowPlugin:
             sys.path.insert(0, self.local_path)
 
         try:
-            print(f"🔌 DEBUG: Processing {len(self.extensions)} extensions for plugin {self.name}")
+            logger.info("Processing %s extension(s) for plugin %s", len(self.extensions), self.name)
 
             for extension_info in self.extensions:
                 module_path = extension_info.get("module")
@@ -269,7 +272,7 @@ class WorkflowPlugin:
 
                 if not module_path:
                     error_msg = f"Skipping extension with missing module: {extension_info}"
-                    print(f"⚠️ {error_msg}")
+                    logger.error(error_msg)
                     errors.append(error_msg)
                     continue
 
@@ -280,19 +283,19 @@ class WorkflowPlugin:
                     if callable(register_func):
                         register_func()
                         loaded_count += 1
-                        print(f"✅ Loaded extension: {module_path}.{function_name} from {self.name}")
+                        logger.info("Loaded extension %s.%s from %s", module_path, function_name, self.name)
                     else:
                         error_msg = f"Module {module_path} has no callable {function_name}"
-                        print(f"❌ {error_msg}")
+                        logger.error(error_msg)
                         errors.append(error_msg)
 
                 except ImportError as e:
                     error_msg = f"Failed to import {module_path}: {str(e)}"
-                    print(f"❌ {error_msg}")
+                    logger.exception(error_msg)
                     errors.append(error_msg)
                 except Exception as e:
                     error_msg = f"Error loading extension {module_path}.{function_name}: {str(e)}"
-                    print(f"❌ {error_msg}")
+                    logger.exception(error_msg)
                     errors.append(error_msg)
 
         finally:
@@ -301,9 +304,7 @@ class WorkflowPlugin:
                 sys.path.remove(self.local_path)
 
         if errors:
-            print(f"⚠️ Plugin {self.name} had {len(errors)} errors during extension loading")
-            for error in errors:
-                print(f"   - {error}")
+            logger.error("Plugin %s had %s error(s) during extension loading: %s", self.name, len(errors), errors)
 
         return loaded_count
 
@@ -567,9 +568,9 @@ class WorkflowPluginManager:
                     extension_count = plugin.load_extensions()
                     total_extension_count += extension_count
                     if extension_count > 0:
-                        print(f"   ✅ Loaded {extension_count} extension(s) from {plugin.name}")
-                except Exception as e:
-                    print(f"   ⚠️ Error loading extensions from {plugin.name}: {e}")
+                        logger.info("Loaded %s extension(s) from %s", extension_count, plugin.name)
+                except Exception:
+                    logger.exception("Error loading extensions from %s", plugin.name)
 
         if total_extension_count > 0:
             print(f"   ✅ Total extensions loaded: {total_extension_count}")

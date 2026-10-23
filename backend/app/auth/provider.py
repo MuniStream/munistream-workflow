@@ -64,8 +64,7 @@ class KeycloakProvider:
     async def verify_token(self, token: str) -> Dict[str, Any]:
         """Verify and decode a JWT token"""
         try:
-            # Debug: Log token info
-            logger.info(f"Token length: {len(token)}")
+            logger.debug("Token length: %s", len(token))
 
             # Get JWKS for verification
             jwks = await self.get_jwks()

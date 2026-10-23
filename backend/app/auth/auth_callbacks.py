@@ -25,6 +25,7 @@ extension never breaks authentication.
 """
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,21 @@ _post_auth_callbacks: List[PostAuthCallback] = []
 
 # Clave de Customer.metadata con la sesión que ya ejecutó los callbacks.
 POST_AUTH_SESSION_KEY = "post_auth_session"
+
+# Sessions whose "already ran" skip was logged, so each one is logged once per
+# process instead of on every portal request. Bounded: it is only a log guard.
+_logged_skips: set = set()
+_LOGGED_SKIPS_MAX = 10000
+
+
+def _log_skip_once(customer: Any, key: str, reason: str) -> None:
+    marker = f"{customer.id}:{key}"
+    if marker in _logged_skips:
+        return
+    if len(_logged_skips) >= _LOGGED_SKIPS_MAX:
+        _logged_skips.clear()
+    _logged_skips.add(marker)
+    logger.info("post-auth callbacks skipped for customer %s, session %s: %s", customer.id, key, reason)
 
 
 def register_post_auth_callback(callback: PostAuthCallback) -> None:
@@ -93,6 +109,7 @@ async def claim_post_auth_session(customer: Any, payload: Dict[str, Any]) -> boo
     if not isinstance(customer.metadata, dict):
         customer.metadata = {}
     if customer.metadata.get(POST_AUTH_SESSION_KEY) == key:
+        _log_skip_once(customer, key, "already ran for this session")
         return False
 
     result = await type(customer).get_motor_collection().update_one(
@@ -100,7 +117,10 @@ async def claim_post_auth_session(customer: Any, payload: Dict[str, Any]) -> boo
         {"$set": {f"metadata.{POST_AUTH_SESSION_KEY}": key}},
     )
     customer.metadata[POST_AUTH_SESSION_KEY] = key
-    return result.modified_count == 1
+    if result.modified_count != 1:
+        _log_skip_once(customer, key, "a concurrent request of the same session claimed it")
+        return False
+    return True
 
 
 async def run_post_auth_callbacks(
@@ -112,11 +132,12 @@ async def run_post_auth_callbacks(
     for callback in _post_auth_callbacks:
         nombre = getattr(callback, "__qualname__", repr(callback))
         logger.info("post-auth callback %s: inicia", nombre)
+        started = time.monotonic()
         try:
             await callback(customer, payload, tenant_id)
-            logger.info("post-auth callback %s: termina", nombre)
-        except Exception:
+            logger.info("post-auth callback %s: termina (%.2f s)", nombre, time.monotonic() - started)
+        except Exception as exc:
             logger.exception(
-                "post-auth callback failed: %s",
-                getattr(callback, "__qualname__", repr(callback)),
+                "post-auth callback failed after %.2f s: %s (%s: %s)",
+                time.monotonic() - started, nombre, type(exc).__name__, exc,
             )

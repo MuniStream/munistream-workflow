@@ -11,6 +11,11 @@ entidades.
 él, por cualquier logger, llega al archivo de ese ciudadano. Las tareas de
 asyncio creadas dentro copian el contexto, así que también quedan en el archivo.
 Fuera de un inicio de sesión el handler no escribe nada.
+
+Each login also gets a short run id (``login_run``) that is stamped on every
+record emitted inside it, in the citizen's file and in the general logs alike,
+so the lines of one login (and of the background work it started) can be told
+apart from the previous ones.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -19,8 +24,10 @@ import logging
 import os
 import re
 import threading
+import uuid
 
 current_login_user: ContextVar[Optional[str]] = ContextVar("current_login_user", default=None)
+current_login_run: ContextVar[Optional[str]] = ContextVar("current_login_run", default=None)
 
 _NOMBRE_SEGURO = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -32,7 +39,7 @@ class LoginLogHandler(logging.Handler):
         super().__init__(level=logging.DEBUG)
         self.directorio = directorio
         self._lock_archivos = threading.Lock()
-        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [run %(login_run)s] %(name)s: %(message)s"))
 
     def ruta(self, user_id: str) -> str:
         return os.path.join(self.directorio, f"{_NOMBRE_SEGURO.sub('_', user_id)}.log")
@@ -42,6 +49,8 @@ class LoginLogHandler(logging.Handler):
         if not user_id:
             return
         try:
+            if not hasattr(record, "login_run"):
+                record.login_run = current_login_run.get() or "-"
             linea = self.format(record)
             with self._lock_archivos:
                 os.makedirs(self.directorio, exist_ok=True)
@@ -64,10 +73,19 @@ def install_login_log(directorio: Optional[str]) -> Optional[LoginLogHandler]:
     return handler
 
 
+def login_run_id() -> Optional[str]:
+    """Run id of the login in progress, or None outside a login."""
+    return current_login_run.get()
+
+
 @contextmanager
-def login_session(user_id: str) -> Iterator[None]:
+def login_session(user_id: str) -> Iterator[str]:
+    """Mark the login of ``user_id``; yields the run id stamped on its records."""
+    run_id = uuid.uuid4().hex[:8]
     token = current_login_user.set(user_id)
+    run_token = current_login_run.set(run_id)
     try:
-        yield
+        yield run_id
     finally:
+        current_login_run.reset(run_token)
         current_login_user.reset(token)

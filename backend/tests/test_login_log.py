@@ -11,6 +11,7 @@ del ciudadano; lo de fuera no.
 import asyncio
 import logging
 import os
+import re
 import sys
 import tempfile
 
@@ -78,7 +79,7 @@ def test_solo_lo_del_inicio_de_sesion_va_al_archivo_del_ciudadano():
         assert sorted(os.listdir(directorio)) == ["u1.log", "u2.log"]
         assert "durante u1" in _leer(directorio, "u1")
         assert "antes" not in _leer(directorio, "u1") and "después" not in _leer(directorio, "u1")
-        assert "WARNING otro.modulo: durante u2" in _leer(directorio, "u2")
+        assert re.search(r"WARNING \[run [0-9a-f]{8}\] otro\.modulo: durante u2", _leer(directorio, "u2"))
         assert "durante u1" not in _leer(directorio, "u2")
 
     _con_handler(prueba)
@@ -160,3 +161,53 @@ def test_inicio_de_sesion_con_claims_y_callbacks():
         assert "test_inicio_de_sesion_con_claims_y_callbacks.<locals>.callback: termina" in contenido
 
     _con_handler(prueba)
+
+
+def test_each_login_stamps_its_run_id_also_on_background_tasks():
+    def prueba(directorio, _):
+        async def principal():
+            with login_session("u1") as primera:
+                logger.info("primer login")
+            with login_session("u1") as segunda:
+                tarea = asyncio.create_task(asyncio.sleep(0))
+                await tarea
+                async def en_segundo_plano():
+                    logger.info("tarea del segundo login")
+                await asyncio.create_task(en_segundo_plano())
+            return primera, segunda
+
+        primera, segunda = asyncio.run(principal())
+        assert primera != segunda
+        contenido = _leer(directorio, "u1")
+        assert f"[run {primera}] prueba.login_log: primer login" in contenido
+        assert f"[run {segunda}] prueba.login_log: tarea del segundo login" in contenido
+
+    _con_handler(prueba)
+
+
+def test_console_masks_personal_ids_and_tags_the_run():
+    from app.core.logging_config import MaskingConsoleFormatter, mask_personal_ids
+
+    assert mask_personal_ids("curp VIRP841005MDFLDL02, rfc PAI241215MB0") == "curp VIRP…, rfc PAI2…"
+    assert mask_personal_ids("rfc VIRP841005AB1 y folio 123456") == "rfc VIRP… y folio 123456"
+
+    formatter = MaskingConsoleFormatter("%(levelname)s -%(login_tag)s %(message)s")
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "curp %s", ("VIRP841005MDFLDL02",), None)
+    assert formatter.format(record) == "INFO - curp VIRP…"
+    with login_session("u1") as run_id:
+        record = logging.LogRecord("x", logging.INFO, __file__, 1, "curp %s", ("VIRP841005MDFLDL02",), None)
+        assert formatter.format(record) == f"INFO - [login {run_id}] curp VIRP…"
+
+
+def test_profile_sync_reports_updated_and_kept_fields():
+    from app.api.endpoints.public_auth import _sync_llavemx_profile
+
+    customer = Customer(
+        email="prueba-sync@example.com", full_name="Prueba", phone="", document_number="",
+        password_hash="", status=CustomerStatus.ACTIVE, keycloak_id="kc",
+        curp="VIRP841005MDFLDL02", rfc="PAI241215MB0",
+        metadata={"llavemx": {"personas_morales": [{"rfc": "PAI241215MB0"}]}},
+    )
+    resultado = _sync_llavemx_profile(customer, {"curp": "VIRP841005MDFLDL02", "tipo_persona": "fisica"})
+    assert resultado["updated"] == ["tipo_persona"]
+    assert resultado["kept"] == ["rfc", "personas_morales"]
