@@ -40,8 +40,11 @@ RUN pip install --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Create non-root user for security
+# Create non-root user for security. /app/login-logs is the default
+# LOGIN_LOG_DIR: it exists in the image so a named volume mounted there starts
+# owned by the app user instead of root.
 RUN useradd --create-home --shell /bin/bash civicstream && \
+    mkdir -p /app/login-logs && \
     chown -R civicstream:civicstream /app
 USER civicstream
 
