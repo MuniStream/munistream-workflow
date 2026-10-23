@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     # Tenant Configuration
     TENANT_ID: Optional[str] = None  # Multi-tenant identifier
     TENANT_NAME: Optional[str] = None  # Display name, e.g. signs citizen notifications
+    # Directorio de las bitácoras de inicio de sesión (<user_id>.log); sin valor no se escriben
+    LOGIN_LOG_DIR: Optional[str] = None
 
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: Optional[str] = None

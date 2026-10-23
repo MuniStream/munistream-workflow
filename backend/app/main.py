@@ -172,6 +172,8 @@ async def startup_event():
     graylog_host = os.getenv("GRAYLOG_HOST", "graylog")
     graylog_port = int(os.getenv("GRAYLOG_PORT", "12201"))
     setup_gelf_logging(graylog_host=graylog_host, graylog_port=graylog_port, container_name=container_name)
+    from .core.login_log import install_login_log
+    install_login_log(settings.LOGIN_LOG_DIR)
 
     import logging
     logger = logging.getLogger(__name__)

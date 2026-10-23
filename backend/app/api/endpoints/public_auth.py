@@ -19,8 +19,10 @@ from ...services.instance_progress import avance, pasos_recorridos
 from ...auth.auth_callbacks import (
     claim_post_auth_session,
     has_post_auth_callbacks,
+    post_auth_session_key,
     run_post_auth_callbacks,
 )
+from ...core.login_log import login_session
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,37 @@ def _sync_llavemx_profile(customer: Customer, payload: Dict[str, Any]) -> None:
         customer.updated_at = datetime.utcnow()
 
 
+# Claims de Llave MX que se registran en la bitácora del inicio de sesión.
+LLAVEMX_CLAIMS = (
+    "curp", "rfc", "tipo_persona", "llavemx_user_id", "given_name",
+    "primer_apellido", "segundo_apellido", "razon_social",
+)
+
+
+def _log_inicio_de_sesion(customer: Customer, payload: Dict[str, Any]) -> None:
+    """Lo que trajo el token y lo que quedó guardado, para la bitácora del ciudadano."""
+    logger.info(
+        "Inicio de sesión: customer %s, keycloak %s, correo %s, tenant %s, sesión %s, idp %s",
+        customer.id, payload.get("sub"), payload.get("email"), settings.TENANT_ID,
+        post_auth_session_key(payload), payload.get("identity_provider"),
+    )
+    for claim in LLAVEMX_CLAIMS:
+        logger.info("  claim %s: %s", claim, payload[claim] if claim in payload else "(ausente)")
+    if "personas_morales" not in payload:
+        logger.info("  claim personas_morales: (ausente)")
+    else:
+        morales = _parse_personas_morales(payload.get("personas_morales"))
+        logger.info("  claim personas_morales: %s persona(s) moral(es)", len(morales))
+        for pm in morales:
+            logger.info("    rfc %s, razón social %s", pm.get("rfc"), pm.get("razonSocial") or pm.get("razon_social"))
+    llavemx = customer.metadata.get("llavemx") if isinstance(customer.metadata, dict) else None
+    guardadas = (llavemx or {}).get("personas_morales") or []
+    logger.info(
+        "  perfil guardado: curp %s, rfc %s, tipo_persona %s, %s persona(s) moral(es)",
+        customer.curp, customer.rfc, customer.tipo_persona, len(guardadas),
+    )
+
+
 async def get_current_customer(authorization: Optional[str] = Header(None)) -> Customer:
     """
     Get current authenticated customer from Keycloak token.
@@ -258,9 +291,12 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     # Run plugin-registered post-auth callbacks (e.g. tenant-specific entity sync)
     # once per Keycloak session, not on every request: only the request that
     # claims the session runs them. Runs after save so customer.id is assigned;
-    # callbacks persist their own changes.
+    # callbacks persist their own changes. Lo que pasa en ese inicio de sesión,
+    # incluidas las tareas que dejan los callbacks, va también a <user_id>.log.
     if has_post_auth_callbacks() and await claim_post_auth_session(customer, payload):
-        await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
+        with login_session(str(customer.id)):
+            _log_inicio_de_sesion(customer, payload)
+            await run_post_auth_callbacks(customer, payload, settings.TENANT_ID)
 
     return customer
 
