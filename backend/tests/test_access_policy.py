@@ -183,3 +183,23 @@ def test_no_groups_means_no_teams():
     from app.services import user_teams
 
     assert asyncio.run(user_teams.teams_from_groups(None)) == []
+
+
+def test_only_members_who_can_work_instances_are_assignable(monkeypatch):
+    from app.services import keycloak_sync, user_teams
+
+    roles_by_user = {"m": ["manager"], "r": ["reviewer"], "v": ["viewer"], "n": ["default-roles-x"]}
+
+    async def fake_group_id(team_id):
+        return "g1"
+
+    async def fake_request(method, endpoint, data=None):
+        if endpoint.startswith("/groups/g1/members"):
+            return 200, [{"id": uid, "username": uid, "enabled": True} for uid in roles_by_user]
+        uid = endpoint.split("/")[2]
+        return 200, [{"name": r} for r in roles_by_user[uid]]
+
+    monkeypatch.setattr(user_teams, "_team_group_id", fake_group_id)
+    monkeypatch.setattr(keycloak_sync.keycloak_sync_service, "_make_admin_request", fake_request)
+    members = asyncio.run(user_teams.team_members("team"))
+    assert {m["id"]: m["roles"] for m in members} == {"m": ["manager"], "r": ["reviewer"]}
