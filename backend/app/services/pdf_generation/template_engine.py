@@ -3,6 +3,7 @@ Jinja2 Template Engine for PDF Generation
 """
 
 import os
+import re
 from typing import Any, Dict, Optional
 from pathlib import Path
 import jinja2
@@ -81,7 +82,7 @@ class TemplateEngine:
             return "-"
         if isinstance(value, bool):
             return "Yes" if value else "No"
-        from .structured_fields import address_parts, parse_structured, species_items
+        from .structured_fields import address_parts, is_address, parse_structured, species_items
         value = parse_structured(value)
         if isinstance(value, (list, tuple)):
             species = species_items(value)
@@ -93,12 +94,17 @@ class TemplateEngine:
                 )
             return ", ".join(self._format_value(v) for v in value)
         if isinstance(value, dict):
-            parts = address_parts(value)
-            if parts:
-                return ", ".join(v for _, v in parts)
+            # Only an address reads as a comma-joined line. Any other mapping
+            # (an invoice, a summary) joined that way loses its labels and
+            # prints as "4.0, 56919B72-…, 2026-09-14…".
+            if is_address(value):
+                return ", ".join(v for _, v in address_parts(value))
             # Never a raw repr: `Key: value` pairs of the non-empty entries.
+            # Identifier keys become labels; keys that already are text (a
+            # species name used as key) stay as written, or "Thunnus albacares"
+            # would print as "Thunnus Albacares".
             return "; ".join(
-                f"{self._format_field_name(str(k))}: {self._format_value(v)}"
+                f"{self._format_field_name(str(k)) if re.fullmatch(r'[a-z0-9_]+', str(k)) else k}: {self._format_value(v)}"
                 for k, v in value.items() if v not in (None, "", [], {})
             )
         return str(value)

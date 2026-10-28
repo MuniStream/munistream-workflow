@@ -21,7 +21,7 @@ ADDRESS_KEYS = (
 # Keys that identify a species item; everything else is an extra attribute.
 SPECIES_IDENTITY_KEYS = ("especie", "nombre_comun", "nombre_cientifico")
 # Bookkeeping keys of species items that are not meaningful in a document.
-SPECIES_HIDDEN_KEYS = ("grupo", "acuacultura", "clave", "aprobada", "paso")
+SPECIES_HIDDEN_KEYS = ("grupo", "acuacultura", "clave", "aprobada", "paso", "fuente")
 
 
 def parse_structured(value: Any) -> Any:
