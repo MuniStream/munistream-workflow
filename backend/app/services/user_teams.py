@@ -17,7 +17,7 @@ endpoints edit, is honoured too.
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ..auth.access_policy import SYSTEM_ROLES
+from ..auth.access_policy import START, SYSTEM_ROLES, can
 
 _CACHE_SECONDS = 60
 _cache: Tuple[float, Dict[str, str]] = (0.0, {})
@@ -128,7 +128,11 @@ async def _team_group_id(team_id: str) -> Optional[str]:
 
 async def team_members(team_id: str) -> List[Dict[str, Any]]:
     """
-    Members of a team's Keycloak group, as assignable users.
+    Members of a team's Keycloak group that an instance can be assigned to.
+
+    Only members whose roles allow working on an instance (the `start`
+    capability: reviewer and above) are returned; a viewer, or someone in the
+    group without a staff role, could not act on it.
 
     `id` is the Keycloak user id, i.e. the `sub` of their token, which is what
     `assigned_user_id` must hold for the assignee to see the instance.
@@ -152,12 +156,15 @@ async def team_members(team_id: str) -> List[Dict[str, Any]]:
             "GET", f"/users/{member['id']}/role-mappings/realm"
         )
         role_names = [r.get("name") for r in roles] if status == 200 and isinstance(roles, list) else []
+        system_roles = [r for r in role_names if r in SYSTEM_ROLES]
+        if not can({"roles": system_roles}, START):
+            continue
         full_name = " ".join(p for p in [member.get("firstName"), member.get("lastName")] if p)
         result.append({
             "id": member["id"],
             "username": member.get("username"),
             "email": member.get("email"),
             "name": full_name or member.get("email") or member.get("username"),
-            "roles": [r for r in role_names if r in SYSTEM_ROLES],
+            "roles": system_roles,
         })
     return result
