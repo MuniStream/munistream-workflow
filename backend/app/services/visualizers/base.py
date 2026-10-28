@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Union
 import logging
 
 from ...models.legal_entity import LegalEntity
+from ..entity_type_catalog import effective_display_config
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,7 @@ class EntityVisualizer(ABC):
                 "updated_at": entity.updated_at.isoformat() if entity.updated_at else None
             },
             "visualization_config": entity.visualization_config or {},
-            "display_config": entity.entity_display_config or {},
+            "display_config": effective_display_config(entity),
             "generated_at": self._get_current_timestamp()
         }
 
