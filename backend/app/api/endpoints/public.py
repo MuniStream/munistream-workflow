@@ -17,6 +17,8 @@ from .public_auth import get_current_customer_optional
 from ...models.legal_entity import LegalEntity, EntityType
 from ...services.entity_service import EntityService
 from ...services.entity_serialization import slim_entity_data
+from ...services import entity_type_catalog
+from ...services.entity_type_catalog import effective_display_config
 from ...workflows.dag import DAG
 from .public_auth import router as auth_router, get_current_customer, require_instance_owner
 from ...core.logging_config import set_workflow_context
@@ -743,7 +745,7 @@ async def get_entity_details(
     if include_visualization:
         entity_dict.update({
             "visualization_config": entity.visualization_config or {},
-            "entity_display_config": entity.entity_display_config or {},
+            "entity_display_config": effective_display_config(entity),
         })
 
     return {
@@ -981,21 +983,22 @@ async def get_entity_types():
     """
     Get all available entity types in the system.
     """
-    entity_types = await EntityService.list_entity_types()
-    
-    return {
-        "entity_types": [
-            {
-                "type_id": et.type_id,
-                "name": et.name,
-                "alias": et.alias,
-                "description": et.description,
-                "icon": et.icon,
-                "color": et.color
-            }
-            for et in entity_types
-        ]
+    stored = {
+        et.type_id: {
+            "type_id": et.type_id,
+            "name": et.name,
+            "alias": et.alias,
+            "description": et.description,
+            "icon": et.icon,
+            "color": et.color,
+        }
+        for et in await EntityService.list_entity_types()
     }
+    # The tenant's catalog (entity_types.yaml) wins over stored types.
+    for type_id, spec in entity_type_catalog.all_types().items():
+        stored[type_id] = {k: spec.get(k) for k in ("type_id", "name", "alias", "description", "icon", "color")}
+
+    return {"entity_types": list(stored.values())}
 
 
 def _extract_entity_requirements(dag: DAG) -> List[Dict[str, Any]]:

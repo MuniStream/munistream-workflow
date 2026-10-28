@@ -245,6 +245,13 @@ class WorkflowPlugin:
 
         return loaded_count
     
+    def load_entity_types(self) -> int:
+        """Register the plugin's entity type catalog (``entity_types.yaml`` at its root)."""
+        if not self.local_path:
+            raise ValueError("Plugin not cloned yet. Call clone_or_update first.")
+        from ..services.entity_type_catalog import CATALOG_FILE, load_catalog_file
+        return load_catalog_file(Path(self.local_path) / CATALOG_FILE, self.name)
+
     def load_extensions(self) -> int:
         """Load runtime extensions from the plugin.
 
@@ -488,6 +495,10 @@ class WorkflowPluginManager:
         print(f"\n🎨 Loading visualizers...")
         self._load_visualizers()
 
+        # Entity type catalog: names and how each type is displayed
+        print(f"\n🗂️ Loading entity types...")
+        self._load_entity_types()
+
         # Load runtime extensions (e.g. tenant-specific post-auth hooks)
         print(f"\n🔌 Loading extensions...")
         self._load_extensions()
@@ -556,6 +567,18 @@ class WorkflowPluginManager:
 
         if total_visualizer_count > 0:
             print(f"   ✅ Total visualizers loaded: {total_visualizer_count}")
+
+    def _load_entity_types(self):
+        """Load the entity type catalog of every plugin that has one"""
+        for plugin in self.plugins:
+            if not plugin.local_path:
+                continue
+            try:
+                count = plugin.load_entity_types()
+                if count:
+                    print(f"   ✅ Loaded {count} entity type(s) from {plugin.name}")
+            except Exception:
+                logger.exception("Error loading entity types from %s", plugin.name)
 
     def _load_extensions(self):
         """Load runtime extensions from all plugins"""

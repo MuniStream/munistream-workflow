@@ -8,14 +8,16 @@ the same configuration, so the attachment matches the download.
 from typing import Any, Optional, Tuple
 
 from ...core.config import settings
+from ..entity_type_catalog import effective_display_config
 from .visualizer_factory import VisualizerFactory
 
 
 def select_entity_visualizer(entity) -> str:
     """The entity's configured visualizer; ``signed_pdf`` only as a fallback
     for signed entities that declare none."""
-    if entity.entity_display_config and entity.entity_display_config.get("visualizer"):
-        return entity.entity_display_config["visualizer"]
+    visualizer = effective_display_config(entity).get("visualizer")
+    if visualizer:
+        return visualizer
     if entity.data and "signature" in entity.data:
         return "signed_pdf"
     return "pdf_report"
@@ -24,7 +26,7 @@ def select_entity_visualizer(entity) -> str:
 def entity_visualizer(entity, **extra: Any):
     """The entity's visualizer instance, or None if it does not exist."""
     config = {
-        **(entity.entity_display_config or {}),
+        **effective_display_config(entity),
         "base_url": settings.FRONTEND_BASE_URL,
         **extra,
     }
