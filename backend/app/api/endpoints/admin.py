@@ -25,6 +25,7 @@ from ...schemas.admin import (
     PerformanceMetrics,
     TimeSeriesMetric
 )
+from ...auth.access_policy import APPROVE, REVIEW, require_capability
 
 router = APIRouter()
 
@@ -298,6 +299,7 @@ async def process_approval(
     admin: dict = Depends(get_current_admin)
 ):
     """Process a workflow approval decision."""
+    require_capability(admin, APPROVE)
     try:
         # Mock approval processing for now
         print(f"Processing approval for instance {instance_id}: {decision} - {comments}")
@@ -315,6 +317,7 @@ async def process_document_verification(
     admin: dict = Depends(get_current_admin)
 ):
     """Process document verification decision."""
+    require_capability(admin, REVIEW)
     try:
         # Find document by document_id field (not MongoDB _id)
         document = await DocumentModel.find_one(DocumentModel.document_id == document_id)
@@ -355,6 +358,7 @@ async def resolve_manual_review(
     admin: dict = Depends(get_current_admin)
 ):
     """Resolve a manual review item."""
+    require_capability(admin, REVIEW)
     try:
         # Mock resolution for now
         print(f"Resolving review {review_id}: {resolution} - {resolution_notes}")
@@ -618,6 +622,7 @@ async def sign_document(
     admin: dict = Depends(get_current_admin)
 ):
     """Add administrative signature to a document."""
+    require_capability(admin, APPROVE)
     try:
         document = await DocumentModel.get(document_id)
         if not document:

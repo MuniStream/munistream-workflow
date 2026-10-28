@@ -373,8 +373,13 @@ class WorkflowInstance(Document):
         ]
     
     # Assignment management methods
-    def assign_to_user(self, user_id: str, assigned_by: str, assignment_type: AssignmentType = AssignmentType.MANUAL, notes: Optional[str] = None):
-        """Assign instance to a user"""
+    def assign_to_user(self, user_id: str, assigned_by: str, assignment_type: AssignmentType = AssignmentType.MANUAL, notes: Optional[str] = None, keep_team: bool = False):
+        """Assign instance to a user.
+
+        With `keep_team`, the team assignment is kept: the user becomes the person
+        responsible while the instance stays in the team's queue (a manager
+        delegating within their team must not lose sight of it).
+        """
         # Save previous assignment to history
         if self.assigned_user_id or self.assigned_team_id:
             self.previous_assignments.append({
@@ -388,7 +393,8 @@ class WorkflowInstance(Document):
             })
         
         self.assigned_user_id = user_id
-        self.assigned_team_id = None  # Clear team assignment when assigning to user
+        if not keep_team:
+            self.assigned_team_id = None
         self.assignment_status = AssignmentStatus.PENDING_REVIEW
         self.assignment_type = assignment_type
         self.assigned_at = datetime.utcnow()

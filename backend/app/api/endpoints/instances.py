@@ -59,76 +59,13 @@ MAX_ADJUNTO_BYTES = 25 * 1024 * 1024
 
 
 
-# Roles del sistema que, perteneciendo al equipo asignado, dan acceso al trámite.
-# Se incluye a `reviewer` y `viewer` y no solo a `manager`: un equipo al que solo
-# pueden entrar los jefes no es una bandeja, y quien de verdad dictamina es el
-# revisor del área.
-ROLES_CON_ACCESO_POR_EQUIPO = ("admin", "manager", "reviewer", "approver", "viewer")
-
-
-def puede_ver_instancia(instance, user_roles, user_id, user_teams) -> bool:
-    """
-    La decisión de acceso, separada de dónde salen los datos para poder probarla.
-
-    - admin: todo.
-    - asignación directa: al titular de la asignación.
-    - asignación por equipo: a quien pertenece a ese equipo y tiene rol del sistema.
-    """
-    if "admin" in (user_roles or []):
-        return True
-
-    if user_id and getattr(instance, "assigned_user_id", None) == user_id:
-        return True
-
-    equipo = getattr(instance, "assigned_team_id", None)
-    if equipo and equipo in (user_teams or []):
-        if any(r in ROLES_CON_ACCESO_POR_EQUIPO for r in (user_roles or [])):
-            return True
-
-    return False
-
-
-async def equipos_del_usuario(current_user: Dict[str, Any]) -> List[str]:
-    """
-    Equipos activos a los que pertenece quien pregunta.
-
-    Se resuelven desde la base y no desde el token: meterlos como claim exigiría
-    mapear grupos en Keycloak y mantener esa correspondencia en los tres entornos,
-    y el equipo ya vive en Mongo con su lista de miembros — que es la fuente de
-    verdad y la que editan los endpoints de administración.
-
-    El cruce va por **correo** porque es como el resto del sistema une la cuenta de
-    Keycloak con el usuario interno (`keycloak_sync` hace lo mismo): los miembros
-    de un equipo se guardan con el id interno de Mongo, no con el `sub` del token.
-    Se acepta también el `sub` por si algún equipo se pobló con él.
-    """
-    from ...models.team import TeamModel
-    from ...models.user import UserModel
-
-    identidades = set()
-    sub = current_user.get("sub")
-    if sub:
-        identidades.add(sub)
-
-    correo = current_user.get("email")
-    if correo:
-        interno = await UserModel.find_one(UserModel.email == correo)
-        if interno:
-            identidades.add(str(interno.id))
-            if getattr(interno, "user_id", None):
-                identidades.add(str(interno.user_id))
-
-    if not identidades:
-        return []
-
-    equipos = await TeamModel.find(
-        {"is_active": True, "members.user_id": {"$in": list(identidades)}}
-    ).to_list()
-    return [
-        t.team_id
-        for t in equipos
-        if any(m.user_id in identidades and m.is_active for m in (t.members or []))
-    ]
+# The access policy lives in `auth.access_policy` and team resolution in
+# `services.user_teams`.
+from ...auth.access_policy import (  # noqa: E402
+    can_view_instance, require_capability, require_instance_filter, merge_filters,
+    START, REVIEW, APPROVE, ASSIGN, ADMINISTER,
+)
+from ...services.user_teams import get_user_teams  # noqa: E402
 
 
 async def check_instance_access(instance: WorkflowInstance, current_user: dict) -> bool:
@@ -148,8 +85,10 @@ async def check_instance_access(instance: WorkflowInstance, current_user: dict) 
     if "admin" in user_roles or getattr(instance, "assigned_user_id", None) == user_id:
         return True
 
-    user_teams = current_user.get("teams") or await equipos_del_usuario(current_user)
-    return puede_ver_instancia(instance, user_roles, user_id, user_teams)
+    teams = current_user.get("teams")
+    if teams is None:
+        teams = await get_user_teams(current_user)
+    return can_view_instance(instance, user_roles, user_id, teams)
 
 
 async def require_instance_access(instance_id: str, current_user: dict = Depends(require_permission("VIEW_INSTANCES"))) -> WorkflowInstance:
@@ -170,6 +109,22 @@ async def require_instance_access(instance_id: str, current_user: dict = Depends
         )
 
     return instance
+
+
+# Operators whose input is the final decision on the procedure (signing the
+# resolution). Submitting data to them requires the `approve` capability; any
+# other waiting step only requires `review`.
+APPROVAL_OPERATORS = ("SignerOperator",)
+
+
+def capability_for_task(dag_instance, task_id: str) -> str:
+    """Capability needed to submit input to the waiting task `task_id`."""
+    task = (getattr(getattr(dag_instance, "dag", None), "tasks", None) or {}).get(task_id)
+    if task is not None and any(
+        cls.__name__ in APPROVAL_OPERATORS for cls in type(task).__mro__
+    ):
+        return APPROVE
+    return REVIEW
 
 
 async def _find_missing_entity_prerequisites(workflow_id: str, user_id: str) -> List[Dict[str, Any]]:
@@ -224,11 +179,10 @@ async def create_workflow_instance(
     try:
         user_id = str(current_user.get("sub"))
 
-        # Allow admin/manager to create on behalf of another user
+        # Starting a procedure on behalf of a citizen is an admin tool
+        # (Workflows page, "run as...").
         if request.on_behalf_of_user_id:
-            user_roles = current_user.get("roles", [])
-            if "admin" not in user_roles and "manager" not in user_roles:
-                raise HTTPException(status_code=403, detail="Only admin/manager can create instances on behalf of another user")
+            require_capability(current_user, ADMINISTER)
             user_id = request.on_behalf_of_user_id
 
         # Block creation when the citizen lacks a required prerequisite entity
@@ -292,34 +246,23 @@ async def get_my_assigned_instances(
 ):
     """Get instances assigned to the current user or their teams"""
     
-    # Build query based on user role and permissions
-    query = {}
-    
-    # Admin and managers can see all assignments or filter by specific team
-    if "admin" in current_user.get("roles", []):
+    policy = require_instance_filter(current_user)
+    if not policy:
+        # Admin: every assigned instance, optionally narrowed to one team.
         if team_id:
-            # Filter by specific team if requested
-            query["assigned_team_id"] = team_id
+            query = {"assigned_team_id": team_id}
         else:
-            # Show all assignments if no specific filter
-            query["$or"] = [
+            query = {"$or": [
                 {"assigned_user_id": {"$exists": True}},
-                {"assigned_team_id": {"$exists": True}}
-            ]
+                {"assigned_team_id": {"$exists": True}},
+            ]}
+    elif team_id:
+        if team_id not in (current_user.get("teams") or []):
+            raise HTTPException(status_code=403, detail="You do not belong to that team.")
+        query = merge_filters(policy, {"assigned_team_id": team_id})
     else:
-        # Reviewers and other roles see only their assignments and team assignments
-        user_teams = [str(team_id) for team_id in current_user.get("team_ids", [])] if current_user.get("team_ids", []) else []
-        
-        or_conditions = [
-            {"assigned_user_id": str(current_user.get("sub"))}
-        ]
-        
-        # Add team assignments if user belongs to teams
-        if user_teams:
-            or_conditions.append({"assigned_team_id": {"$in": user_teams}})
-        
-        query["$or"] = or_conditions
-    
+        query = dict(policy)
+
     # Apply additional filters
     if assignment_status:
         query["assignment_status"] = assignment_status
@@ -541,7 +484,11 @@ async def cancel_instance(
     current_user: dict = Depends(get_current_user)
 ):
     """Cancel a running instance"""
-    # Cancel through workflow service
+    instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    # Cancelling ends the procedure: same level as assigning it.
+    require_capability(current_user, ASSIGN, instance)
     workflow_service.executor.cancel_instance(instance_id)
     return {"success": True, "message": "Instance cancelled"}
 
@@ -630,7 +577,10 @@ async def list_instances(
         query["user_id"] = {"$regex": user_id, "$options": "i"}
     if instance_id:
         query["instance_id"] = {"$regex": instance_id, "$options": "i"}
-    
+
+    # Staff only see what is assigned to them or to their teams (admin: everything).
+    query = merge_filters(require_instance_filter(current_user), query)
+
     # Get total count
     total = await WorkflowInstance.find(query).count()
     
@@ -705,7 +655,9 @@ async def get_active_instances(
     
     if instance_id:
         query_filters["instance_id"] = {"$regex": instance_id, "$options": "i"}
-    
+
+    query_filters = merge_filters(require_instance_filter(current_user), query_filters)
+
     # Get all instances (not just active ones) with filters
     active_instances = await WorkflowInstance.find(
         query_filters
@@ -814,6 +766,8 @@ async def update_instance(
     current_user: dict = Depends(get_current_user),
 ):
     """Update instance status or context"""
+    # Rewriting status or context by hand bypasses the workflow: admin only.
+    require_capability(current_user, ADMINISTER, instance)
     if update_data.status is not None:
         instance.status = update_data.status
     
@@ -832,6 +786,7 @@ async def pause_instance(
     current_user: dict = Depends(get_current_user),
 ):
     """Pause a running workflow instance"""
+    require_capability(current_user, ASSIGN, instance)
     if instance.status != "running":
         raise HTTPException(
             status_code=400,
@@ -852,6 +807,7 @@ async def resume_instance(
     current_user: dict = Depends(get_current_user),
 ):
     """Resume a paused workflow instance"""
+    require_capability(current_user, ASSIGN, instance)
     instance_id = instance.instance_id
     if instance.status != "paused":
         raise HTTPException(
@@ -877,6 +833,7 @@ async def approve_step(
     current_user: dict = Depends(get_current_user),
 ):
     """Submit approval decision for a workflow step"""
+    require_capability(current_user, APPROVE, instance)
     # La instancia es la de la ruta (la que autorizo `require_instance_access`),
     # no la que venga en el cuerpo: si no, el permiso se comprueba sobre una y
     # se actua sobre otra. Y el aprobador sale del token, nunca del JSON.
@@ -931,7 +888,9 @@ async def approve_step_dag(
     instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == approval.instance_id)
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
-    
+    # This endpoint had no access control: any token could decide on any instance.
+    require_capability(current_user, APPROVE, instance)
+
     try:
         # Validate decision
         valid_decisions = ['approved', 'rejected', 'request_changes', 'escalate']
@@ -1303,6 +1262,7 @@ async def start_workflow_instance(
     - Reviewer/Approver: can start instances directly assigned to them
     - Viewer: can start instances directly assigned to them
     """
+    require_capability(current_user, START, db_instance)
     instance_id = db_instance.instance_id
 
     # Check if instance can be started
@@ -1383,6 +1343,8 @@ async def submit_workflow_data(
     if not waiting_task:
         raise HTTPException(status_code=400, detail="Instance is not waiting for input")
 
+    require_capability(current_user, capability_for_task(dag_instance, waiting_task), db_instance)
+
     # Get submitted data - handle both JSON and FormData
     content_type = request.headers.get("content-type", "")
 
@@ -1438,22 +1400,18 @@ async def assign_instance_to_user(
     instance: WorkflowInstance = Depends(require_instance_access),
     current_user: dict = Depends(get_current_user)
 ):
-    """Assign instance to a specific user with role-based access control"""
+    """Assign instance to a member of its team (manager) or to anyone (admin)."""
+    from .assignments import _resolve_assignee
 
+    require_capability(current_user, ASSIGN, instance)
     instance_id = instance.instance_id
-    
+
     # Get assignment data
-    user_id = request.get("user_id")
     notes = request.get("notes")
-    
-    if not user_id:
+    if not request.get("user_id"):
         raise HTTPException(status_code=400, detail="user_id is required")
-    
-    # Verify target user exists
-    target_user = None
-    if not target_user:
-        raise HTTPException(status_code=404, detail="Target user not found")
-    
+    user_id = await _resolve_assignee(current_user, instance, request["user_id"])
+
     # Check if instance can be assigned
     if not instance.can_be_assigned():
         raise HTTPException(
@@ -1466,7 +1424,8 @@ async def assign_instance_to_user(
         user_id=user_id,
         assigned_by=str(current_user.get("sub")),
         assignment_type=AssignmentType.MANUAL,
-        notes=notes
+        notes=notes,
+        keep_team=True,
     )
     
     await instance.save()
@@ -1492,15 +1451,18 @@ async def assign_instance_to_team(
     current_user: dict = Depends(get_current_user)
 ):
     """Assign instance to a team with role-based access control"""
+    from .assignments import _require_target_team
 
+    require_capability(current_user, ASSIGN, instance)
     instance_id = instance.instance_id
-    
+
     # Get assignment data
     team_id = request.get("team_id")
     notes = request.get("notes")
-    
+
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id is required")
+    _require_target_team(current_user, team_id)
     
     # Verify target team exists
     target_team = await TeamModel.find_one(TeamModel.team_id == team_id)
@@ -1551,22 +1513,7 @@ async def start_review_on_instance(
         raise HTTPException(status_code=404, detail="Instance not found")
     
     user_id = str(current_user.get("sub"))
-    
-    # Check if user can review this instance (directly assigned, team member, or admin/manager)
-    can_review = False
-    
-    if instance.assigned_user_id == user_id:
-        can_review = True
-    elif instance.assigned_team_id and current_user.get("team_ids", []) and instance.assigned_team_id in [str(t) for t in current_user.get("team_ids", [])]:
-        can_review = True
-    elif "admin" in current_user.get("roles", []):
-        can_review = True
-    
-    if not can_review:
-        raise HTTPException(
-            status_code=403, 
-            detail="You are not authorized to review this instance"
-        )
+    require_capability(current_user, REVIEW, instance)
     
     # Start review
     if not instance.start_review(user_id):
@@ -1602,19 +1549,7 @@ async def approve_instance_by_reviewer(
     
     user_id = str(current_user.get("sub"))
     
-    # Check if user can approve (must be the reviewer or admin/manager)
-    can_approve = False
-    
-    if instance.reviewed_by == user_id:
-        can_approve = True
-    elif "admin" in current_user.get("roles", []):
-        can_approve = True
-    
-    if not can_approve:
-        raise HTTPException(
-            status_code=403, 
-            detail="You are not authorized to approve this instance"
-        )
+    require_capability(current_user, REVIEW, instance)
     
     # Get approval comments
     comments = None
@@ -1680,19 +1615,7 @@ async def reject_instance_by_reviewer(
     
     user_id = str(current_user.get("sub"))
     
-    # Check if user can reject (must be the reviewer or admin/manager)
-    can_reject = False
-    
-    if instance.reviewed_by == user_id:
-        can_reject = True
-    elif "admin" in current_user.get("roles", []):
-        can_reject = True
-    
-    if not can_reject:
-        raise HTTPException(
-            status_code=403, 
-            detail="You are not authorized to reject this instance"
-        )
+    require_capability(current_user, REVIEW, instance)
     
     # Get rejection reason and comments
     reason = request.get("reason")
@@ -1737,19 +1660,7 @@ async def request_modifications_by_reviewer(
     
     user_id = str(current_user.get("sub"))
     
-    # Check if user can request modifications (must be the reviewer or admin/manager)
-    can_request = False
-    
-    if instance.reviewed_by == user_id:
-        can_request = True
-    elif "admin" in current_user.get("roles", []):
-        can_request = True
-    
-    if not can_request:
-        raise HTTPException(
-            status_code=403, 
-            detail="You are not authorized to request modifications for this instance"
-        )
+    require_capability(current_user, REVIEW, instance)
     
     # Get modification requests and comments
     modifications = request.get("modifications", [])
@@ -1810,14 +1721,8 @@ async def give_final_approval(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    # Check if user can give final approval (managers and approvers)
-    can_approve = "admin" in current_user.get("roles", [])
-    
-    if not can_approve:
-        raise HTTPException(
-            status_code=403, 
-            detail="You are not authorized to give final approval"
-        )
+    # Approvers and managers of the team (and admins) give the final approval.
+    require_capability(current_user, APPROVE, instance)
     
     user_id = str(current_user.get("sub"))
     
@@ -1853,7 +1758,7 @@ async def unassign_instance(
     current_user: dict = Depends(get_current_user)
 ):
     """Remove assignment from instance with role-based access control"""
-
+    require_capability(current_user, ASSIGN, instance)
     instance_id = instance.instance_id
     
     # Get reason
@@ -2049,7 +1954,7 @@ async def upload_instance_attachment(
     file: UploadFile = File(..., description="Documento a archivar en el expediente"),
     description: Optional[str] = Form(None, description="Para qué es este documento"),
     db_instance: WorkflowInstance = Depends(require_instance_access),
-    current_user: dict = Depends(require_permission("MANAGE_INSTANCES")),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Archiva un documento en el expediente.
@@ -2066,9 +1971,10 @@ async def upload_instance_attachment(
     snapshot—, y un oficio que archiva la dependencia no es una respuesta del
     ciudadano. Va a `staff_attachments`, y se lee junto con los demás.
 
-    Pide `MANAGE_INSTANCES` y no solo `VIEW_INSTANCES`: leer un expediente y
-    añadirle documentos no son el mismo permiso.
+    Requires the `review` capability, not just view access: reading a dossier
+    and adding documents to it are different permissions.
     """
+    require_capability(current_user, REVIEW, db_instance)
     contenido = await file.read()
     if not contenido:
         raise HTTPException(status_code=400, detail="El archivo llegó vacío")
@@ -2229,22 +2135,7 @@ async def validate_instance_data(
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
     
-    # Verify user has permission to validate this instance
-    # Must be assigned to the user or user's team, or user must be admin/manager
-    can_validate = False
-    
-    if "admin" in current_user.get("roles", []):
-        can_validate = True
-    elif instance.assigned_user_id == str(current_user.get("sub")):
-        can_validate = True
-    elif instance.assigned_team_id and current_user.get("team_ids", []) and instance.assigned_team_id in [str(tid) for tid in current_user.get("team_ids", [])]:
-        can_validate = True
-    
-    if not can_validate:
-        raise HTTPException(
-            status_code=403, 
-            detail="You do not have permission to validate this instance"
-        )
+    require_capability(current_user, REVIEW, instance)
     
     try:
         field_validations = request.get("field_validations", {})

@@ -18,8 +18,18 @@ from ...schemas.workflow import (
 from ...models.workflow import WorkflowDefinition, WorkflowStep
 from ...models.team import TeamModel
 from ...auth.provider import get_current_user, require_roles
+from ...auth.access_policy import ADMINISTER, require_capability
 
-router = APIRouter()
+
+async def require_workflow_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Workflow definitions expose every step of each procedure: admin only."""
+    require_capability(current_user, ADMINISTER)
+    return current_user
+
+
+# Several of these routes had no authentication at all (create, update, delete,
+# step CRUD). The dependency applies to every route of the router.
+router = APIRouter(dependencies=[Depends(require_workflow_admin)])
 
 
 async def get_user_accessible_workflows(user: dict) -> List[str]:
