@@ -622,45 +622,62 @@ def _slim_entity_data(data: Dict[str, Any], max_bytes: int = 1024) -> Dict[str, 
     return slim_entity_data(data, max_bytes)
 
 
+# Largest page the wallet can ask for. A citizen can hold hundreds of entities
+# (the RNPA sync creates every vessel, engine, gear and permit of each economic
+# unit), so the list is paged instead of returned whole.
+MAX_ENTITIES_PAGE = 100
+
+
 @router.get("/entities")
 async def list_user_entities(
     current_customer: Customer = Depends(get_current_customer),
     entity_type: Optional[str] = Query(None, description="Filter by entity type"),
-    skip: int = Query(0, description="Number of items to skip"),
-    limit: int = Query(20, description="Maximum number of items to return")
+    q: Optional[str] = Query(None, description="Text search on name and official identifiers"),
+    skip: int = Query(0, ge=0, description="Number of items to skip"),
+    limit: int = Query(20, ge=1, le=MAX_ENTITIES_PAGE, description="Maximum number of items to return"),
 ):
     """
-    List all entities owned by the current user.
-    Returns entities with their basic information and available workflows.
+    List the entities owned by the current user, one page at a time.
+
+    Sorted by entity type and then newest first, so the entities of a type
+    arrive together across pages. `total` counts what matches the filters;
+    `type_counts` counts, per type, what matches the search (ignoring the type
+    filter), which is what the wallet's type navigation shows.
     """
-    # Get user's entities from database
-    entities = await EntityService.find_entities(
-        owner_user_id=str(current_customer.id),
-        entity_type=entity_type,
-        skip=skip,
-        limit=limit
+    from ...services.entity_search import construir_consulta
+
+    owner = str(current_customer.id)
+    consulta = construir_consulta(q=q, entity_type=entity_type, owner_user_id=owner)
+    por_tipo = construir_consulta(q=q, owner_user_id=owner)
+
+    total_count = await LegalEntity.find(consulta).count()
+    entities = (
+        await LegalEntity.find(consulta)
+        .sort([("entity_type", 1), ("created_at", -1)])
+        .skip(skip)
+        .limit(limit)
+        .to_list()
     )
-    
-    # Transform entities for response
-    result = []
-    for entity in entities:
-        # Get available workflows for this entity type
-        all_workflows = await workflow_service.list_workflow_definitions(status="active")
-        
-        # Filter workflows that can work with this entity type
-        # Look for workflows that have this entity type in their metadata
-        available_workflows = []
-        for w in all_workflows:
-            if w.metadata and "entity_types" in w.metadata:
-                if entity.entity_type in w.metadata["entity_types"]:
-                    available_workflows.append({
-                        "workflow_id": w.workflow_id,
-                        "name": w.name,
-                        "description": w.description,
-                        "category": w.category
-                    })
-        
-        entity_data = {
+    type_counts = await LegalEntity.get_motor_collection().aggregate([
+        {"$match": por_tipo},
+        {"$group": {"_id": "$entity_type", "count": {"$sum": 1}}},
+        # Same order as the list, so the index reads like the list below it.
+        {"$sort": {"_id": 1}},
+    ]).to_list(None)
+
+    # Workflows that accept each entity type, read once for the whole page.
+    workflows_por_tipo: Dict[str, List[Dict[str, Any]]] = {}
+    for w in await workflow_service.list_workflow_definitions(status="active"):
+        for tipo in (w.metadata or {}).get("entity_types") or []:
+            workflows_por_tipo.setdefault(tipo, []).append({
+                "workflow_id": w.workflow_id,
+                "name": w.name,
+                "description": w.description,
+                "category": w.category,
+            })
+
+    result = [
+        {
             "entity_id": entity.entity_id,
             "entity_type": entity.entity_type,
             "name": entity.name,
@@ -669,21 +686,19 @@ async def list_user_entities(
             "data": _slim_entity_data(entity.data),
             "created_at": entity.created_at.isoformat() if entity.created_at else None,
             "updated_at": entity.updated_at.isoformat() if entity.updated_at else None,
-            "available_workflows": available_workflows,
-            "relationships_count": len([r for r in entity.relationships if r.is_active])
+            "valid_until": entity.valid_until.isoformat() if entity.valid_until else None,
+            "available_workflows": workflows_por_tipo.get(entity.entity_type, []),
+            "relationships_count": len([r for r in entity.relationships if r.is_active]),
         }
-        result.append(entity_data)
-    
-    # Get total count for pagination
-    total_count = await LegalEntity.find(
-        LegalEntity.owner_user_id == str(current_customer.id)
-    ).count()
-    
+        for entity in entities
+    ]
+
     return {
         "entities": result,
         "total": total_count,
         "skip": skip,
-        "limit": limit
+        "limit": limit,
+        "type_counts": [{"entity_type": t["_id"], "count": t["count"]} for t in type_counts],
     }
 
 
