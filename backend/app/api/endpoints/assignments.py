@@ -18,6 +18,10 @@ from ...models.workflow import (
 from ...models.user import UserModel, UserRole
 from ...models.team import TeamModel
 from ...auth.provider import get_current_user, require_permission
+from ...auth.access_policy import (
+    is_admin, is_staff, require_capability, require_instance_filter, merge_filters,
+    START, ASSIGN,
+)
 from ...schemas.assignment import (
     AssignmentRequest, ReassignmentRequest, AssignmentResponse,
     AssignmentListResponse, AssignmentStatsResponse, TeamInfo,
@@ -33,18 +37,11 @@ logger = get_workflow_logger(__name__)
 router = APIRouter(tags=["assignments"])
 
 
-# Admin dependency
+# Staff dependency: any system role (viewers included, for read access).
 async def get_current_admin(current_user: dict = Depends(get_current_user)):
-    """Get current admin user with permission validation"""
-    user_roles = current_user.get("roles", [])
-
-    # Check if user has admin/management roles
-    if not any(role in user_roles for role in ["admin", "manager", "reviewer", "approver"]):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Insufficient permissions for admin operations. Required: admin/manager/reviewer/approver. Found roles: {user_roles}"
-        )
-
+    """Get the current staff user; citizens get 403."""
+    if not is_staff(current_user):
+        raise HTTPException(status_code=403, detail="Staff access only.")
     return current_user
 
 
@@ -63,16 +60,11 @@ async def list_assignments(
     """
     List workflow assignments with filtering and role-based access control.
 
-    Access control:
-    - Admin: can see all assignments
-    - Manager: can see assignments for their teams + directly assigned to them
-    - Reviewer/Approver: can see ONLY assignments directly assigned to them
-    - Viewer: can see ONLY assignments directly assigned to them
+    Access control (see `auth.access_policy`):
+    - Admin: every assignment.
+    - Other staff: assignments made to them or to any of their teams.
     """
-    # Roles are flattened to the top level by the auth provider
-    user_role = admin.get("roles", [])
-    user_id_from_token = admin.get("sub")
-    user_teams = admin.get("teams", [])
+    user_teams = admin.get("teams") or []
 
     # Build query based on user role
     query = {}
@@ -87,43 +79,16 @@ async def list_assignments(
     if status:
         query["assignment_status"] = status
 
-    # Role-based filtering based on access control rules:
-    # - admin: can see all instances
-    # - manager: can see instances assigned to their teams + directly assigned to them
-    # - reviewer/approver: can see ONLY instances directly assigned to them
-    # - viewer: can see ONLY instances directly assigned to them
+    # Explicit team/user filters narrow the listing; non-admins can only narrow
+    # within their own scope.
+    if team_id:
+        if not is_admin(admin) and team_id not in user_teams:
+            raise HTTPException(status_code=403, detail="You do not belong to that team.")
+        query["assigned_team_id"] = team_id
+    elif user_id:
+        query["assigned_user_id"] = user_id
 
-    if "admin" in user_role:
-        # Admin sees everything - apply any explicit filters if provided
-        if team_id:
-            query["assigned_team_id"] = team_id
-        elif user_id:
-            query["assigned_user_id"] = user_id
-        # Otherwise no filtering - show all instances
-
-    elif "manager" in user_role:
-        # Manager sees team assignments + direct assignments
-        conditions = []
-
-        # Always include direct assignments
-        conditions.append({"assigned_user_id": user_id_from_token})
-
-        # Include team assignments if user has teams
-        if user_teams:
-            conditions.append({"assigned_team_id": {"$in": user_teams}})
-
-        # Apply explicit filters if provided
-        if team_id:
-            query["assigned_team_id"] = team_id
-        elif user_id:
-            query["assigned_user_id"] = user_id
-        else:
-            # Use OR condition for team + direct assignments
-            query["$or"] = conditions
-
-    else:
-        # Reviewer, approver, viewer: only see direct assignments
-        query["assigned_user_id"] = user_id_from_token
+    query = merge_filters(require_instance_filter(admin), query)
 
     # Only show ADMIN workflows by default
     if not workflow_type:
@@ -157,11 +122,8 @@ async def list_assignments(
                 })
 
         except Exception as e:
-            # Fallback: if aggregation fails, just search in the context object as text
-            logger.warning(f"Failed to get dynamic context keys, using fallback: {e}")
-            search_conditions.append({
-                "$where": f"JSON.stringify(this.context).toLowerCase().includes('{search.lower()}')"
-            })
+            # Searching by context is best effort; ids still match.
+            logger.warning(f"Failed to get dynamic context keys, searching ids only: {e}")
 
         # If there are existing conditions, combine with AND
         if query:
@@ -182,14 +144,6 @@ async def list_assignments(
         # Get total count
         total = await WorkflowInstance.find(query).count()
         print(f"[ASSIGNMENTS DEBUG] Total count: {total}")
-
-        # Debug: Check if specific child workflow exists
-        child_id = "4060a9a0-7ebb-4b9f-8922-3599f586514b"
-        child_instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == child_id)
-        if child_instance:
-            print(f"[ASSIGNMENTS DEBUG] Child workflow found: status={child_instance.status}, assignment_status={child_instance.assignment_status}, workflow_type={child_instance.workflow_type}")
-        else:
-            print(f"[ASSIGNMENTS DEBUG] Child workflow {child_id} not found in database")
 
         # Get paginated results ordered by most recent first
         instances = await WorkflowInstance.find(query).sort([("created_at", -1)]).skip(skip).limit(limit).to_list()
@@ -304,6 +258,66 @@ async def list_assignments(
         raise HTTPException(status_code=500, detail=f"Failed to list assignments: {str(e)}")
 
 
+async def _resolve_assignee(admin: dict, instance: WorkflowInstance, target: str) -> str:
+    """
+    Keycloak user id (token `sub`) of the person an instance is assigned to.
+
+    `target` may be "current_user", a Keycloak user id or an email. The assignee
+    must belong to the instance's team; only admins may assign outside of it.
+    Storing the `sub` (not the internal Mongo id) is what lets the assignee see
+    the instance afterwards.
+    """
+    from ...services.user_teams import team_members
+
+    if target == "current_user":
+        return admin.get("sub")
+
+    team_id = instance.assigned_team_id
+    if team_id:
+        for member in await team_members(team_id):
+            if target in (member["id"], member.get("email"), member.get("username")):
+                return member["id"]
+        if not is_admin(admin):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{target} is not a member of team {team_id}",
+            )
+    elif not is_admin(admin):
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can assign instances that have no team",
+        )
+
+    # Admin assigning outside the team: resolve the Keycloak account.
+    from ...services.keycloak_sync import keycloak_sync_service
+    from urllib.parse import quote
+
+    query = f"email={quote(target)}&exact=true" if "@" in target else f"username={quote(target)}&exact=true"
+    status, users = await keycloak_sync_service._make_admin_request("GET", f"/users?{query}")
+    if status == 200 and isinstance(users, list) and users:
+        return users[0]["id"]
+    status, user = await keycloak_sync_service._make_admin_request("GET", f"/users/{quote(target)}")
+    if status == 200 and isinstance(user, dict) and user.get("id"):
+        return user["id"]
+    raise HTTPException(status_code=400, detail=f"User {target} not found")
+
+
+def _require_target_team(admin: dict, team_id: str) -> None:
+    """Managers can only route instances to teams they belong to."""
+    if not is_admin(admin) and team_id not in (admin.get("teams") or []):
+        raise HTTPException(status_code=403, detail="You can only assign to your own teams.")
+
+
+@router.get("/teams/{team_id}/members")
+async def list_team_members(team_id: str, admin: dict = Depends(get_current_admin)):
+    """Members of a team that an instance can be assigned to (Keycloak group)."""
+    from ...services.user_teams import team_members
+
+    require_capability(admin, ASSIGN)
+    _require_target_team(admin, team_id)
+    return await team_members(team_id)
+
+
 @router.post("/{instance_id}/assign")
 async def assign_workflow(
     instance_id: str,
@@ -313,17 +327,9 @@ async def assign_workflow(
     """
     Assign or reassign a workflow to a user or team.
 
-    Requires Manager or Admin role.
+    Requires the `assign` capability (manager or admin) over the instance.
     """
-    user_role = admin.get("roles", [])
     user_id = admin.get("sub")
-
-    # Check permissions
-    if "admin" not in user_role and "manager" not in user_role:
-        raise HTTPException(
-            status_code=403,
-            detail="Only managers and admins can assign workflows"
-        )
 
     # Get instance
     instance = await WorkflowInstance.find_one(
@@ -331,9 +337,11 @@ async def assign_workflow(
     )
     if not instance:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
+    require_capability(admin, ASSIGN, instance)
 
     # Validate assignment target
     if "team" in request.assign_to:
+        _require_target_team(admin, request.assign_to["team"])
         # Verify team exists
         team = await TeamModel.find_one(TeamModel.team_id == request.assign_to["team"])
         if not team:
@@ -355,32 +363,13 @@ async def assign_workflow(
                    assigned_by=user_id)
 
     elif "admin" in request.assign_to:
-        # Log the assignment target for debugging
-        logger.info(f"[ASSIGNMENT DEBUG] assign_to data: {request.assign_to}")
-        logger.info(f"[ASSIGNMENT DEBUG] admin value: {request.assign_to['admin']}")
-        logger.info(f"[ASSIGNMENT DEBUG] Current user email: {admin.get('email')}")
-
-        # Handle special case where frontend sends "current_user"
-        if request.assign_to["admin"] == "current_user":
-            # Assign to current authenticated user using their JWT sub (Keycloak ID)
-            assigned_user_id = admin.get("sub")  # Keycloak user ID
-            logger.info(f"[ASSIGNMENT DEBUG] Assigning to current user: {admin.get('email')} (ID: {assigned_user_id})")
-        else:
-            # For specific email assignments, verify user exists in UserModel
-            target_email = request.assign_to["admin"]
-            user = await UserModel.find_one(UserModel.email == target_email)
-            if not user:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"User {target_email} not found"
-                )
-            assigned_user_id = user.id
-
+        assigned_user_id = await _resolve_assignee(admin, instance, request.assign_to["admin"])
         instance.assign_to_user(
             user_id=assigned_user_id,
             assigned_by=user_id,
             assignment_type=AssignmentType.MANUAL,
-            notes=request.notes
+            notes=request.notes,
+            keep_team=True,
         )
 
         logger.info("Workflow assigned to user",
@@ -421,17 +410,9 @@ async def reassign_workflow(
     """
     Reassign a workflow from current assignee to new assignee.
 
-    Requires Manager or Admin role.
+    Requires the `assign` capability (manager or admin) over the instance.
     """
-    user_role = admin.get("roles", [])
     user_id = admin.get("sub")
-
-    # Check permissions
-    if "admin" not in user_role and "manager" not in user_role:
-        raise HTTPException(
-            status_code=403,
-            detail="Only managers and admins can reassign workflows"
-        )
 
     # Get instance
     instance = await WorkflowInstance.find_one(
@@ -439,6 +420,7 @@ async def reassign_workflow(
     )
     if not instance:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
+    require_capability(admin, ASSIGN, instance)
 
     # Store previous assignment for audit
     previous_assignment = {
@@ -449,6 +431,9 @@ async def reassign_workflow(
 
     # Perform reassignment
     if "team" in request.assign_to:
+        _require_target_team(admin, request.assign_to["team"])
+        if not await TeamModel.find_one(TeamModel.team_id == request.assign_to["team"]):
+            raise HTTPException(status_code=400, detail=f"Team {request.assign_to['team']} not found")
         instance.assign_to_team(
             team_id=request.assign_to["team"],
             assigned_by=user_id,
@@ -456,18 +441,13 @@ async def reassign_workflow(
             notes=f"Reassigned: {request.reason}. {request.notes or ''}"
         )
     elif "admin" in request.assign_to:
-        user = await UserModel.find_one(UserModel.email == request.assign_to["admin"])
-        if not user:
-            raise HTTPException(
-                status_code=400,
-                detail=f"User {request.assign_to['admin']} not found"
-            )
-
+        assignee = await _resolve_assignee(admin, instance, request.assign_to["admin"])
         instance.assign_to_user(
-            user_id=user.id,
+            user_id=assignee,
             assigned_by=user_id,
             assignment_type=AssignmentType.REASSIGNED,
-            notes=f"Reassigned: {request.reason}. {request.notes or ''}"
+            notes=f"Reassigned: {request.reason}. {request.notes or ''}",
+            keep_team=True,
         )
 
     await instance.save()
@@ -499,7 +479,6 @@ async def start_assigned_workflow(
     Only the assigned user or a member of the assigned team can start the workflow.
     """
     user_id = admin.get("sub")
-    user_teams = admin.get("teams", [])
 
     # Get instance
     instance = await WorkflowInstance.find_one(
@@ -508,23 +487,8 @@ async def start_assigned_workflow(
     if not instance:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
 
-    # Check assignment
-    is_assigned = False
-    if instance.assigned_user_id == user_id:
-        is_assigned = True
-    elif instance.assigned_team_id and instance.assigned_team_id in user_teams:
-        is_assigned = True
-
-    # Admins and managers can override
-    user_role = admin.get("roles", [])
-    if "admin" in user_role or "manager" in user_role:
-        is_assigned = True
-
-    if not is_assigned:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not assigned to this workflow"
-        )
+    # Assignee or team member with the `start` capability (viewers cannot).
+    require_capability(admin, START, instance)
 
     # Check status
     if instance.status not in ["waiting_for_start", "pending_assignment"]:
@@ -588,10 +552,6 @@ async def get_assignment_stats(
 
     Useful for dashboards and workload monitoring.
     """
-    user_role = admin.get("roles", [])
-    user_id = admin.get("sub")
-    user_teams = admin.get("teams", [])
-
     # Build base query
     query = {}
 
@@ -603,16 +563,12 @@ async def get_assignment_stats(
         query["workflow_type"] = {"$ne": WorkflowType.PROCESS}
 
     if team_id:
+        if not is_admin(admin) and team_id not in (admin.get("teams") or []):
+            raise HTTPException(status_code=403, detail="You do not belong to that team.")
         query["assigned_team_id"] = team_id
-    elif "admin" not in user_role and "manager" not in user_role:
-        # Non-managers only see their team's stats
-        if user_teams:
-            query["$or"] = [
-                {"assigned_user_id": user_id},
-                {"assigned_team_id": {"$in": user_teams}}
-            ]
-        else:
-            query["assigned_user_id"] = user_id
+
+    # Same scope as the listings: admin everything, staff their own and their teams'.
+    query = merge_filters(require_instance_filter(admin), query)
 
     try:
         # Get counts by status
@@ -715,6 +671,9 @@ async def list_available_teams(
     """
     try:
         teams = await TeamModel.find_all().to_list()
+        if not is_admin(admin):
+            mine = set(admin.get("teams") or [])
+            teams = [t for t in teams if t.team_id in mine]
 
         team_info = []
         for team in teams:
@@ -740,7 +699,7 @@ async def list_available_teams(
         # endpoint devolvia una lista vacia y no se podia asignar nada. Cuando
         # no hay documentos, se ofrecen los equipos que las propias instancias
         # ya usan, que es la unica fuente fiable que hay.
-        if not team_info:
+        if not team_info and is_admin(admin):
             en_uso = await WorkflowInstance.get_motor_collection().distinct("assigned_team_id")
             for team_id in sorted(t for t in en_uso if t):
                 carga = await WorkflowInstance.find({
@@ -776,53 +735,52 @@ async def list_assignable_users(
 
     Returns user information including current workload.
     """
-    # Only managers and admins can see all users
-    # Roles are flattened to the top level by the auth provider
-    user_roles = admin.get("roles", [])
+    from ...services.user_teams import team_members
 
-    if "admin" not in user_roles and "manager" not in user_roles:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Only managers and admins can list assignable users. Found roles: {user_roles}"
-        )
+    require_capability(admin, ASSIGN)
+    if team_id:
+        _require_target_team(admin, team_id)
+        team_ids = [team_id]
+    elif is_admin(admin):
+        team_ids = [t.team_id for t in await TeamModel.find({"is_active": True}).to_list()]
+    else:
+        team_ids = list(admin.get("teams") or [])
+
+    # Highest system role first, to report a single role per user.
+    role_order = [UserRole.ADMIN, UserRole.MANAGER, UserRole.APPROVER, UserRole.REVIEWER, UserRole.VIEWER]
 
     try:
-        query = {}
-        if role:
-            query["role"] = role
-
-        users = await UserModel.find(query).to_list()
+        by_user: Dict[str, Dict[str, Any]] = {}
+        for tid in team_ids:
+            for member in await team_members(tid):
+                entry = by_user.setdefault(member["id"], {**member, "teams": []})
+                entry["teams"].append(tid)
 
         user_info = []
-        for user in users:
-            # Filter by team if specified
-            if team_id and team_id not in user.teams:
+        for member in by_user.values():
+            member_role = next((r for r in role_order if r.value in member["roles"]), None)
+            if member_role is None or (role and member_role != role):
                 continue
 
-            # Get current assignment count
             current_assignments = await WorkflowInstance.find({
-                "assigned_user_id": str(user.id),
+                "assigned_user_id": member["id"],
                 "assignment_status": {"$in": [
                     AssignmentStatus.PENDING_REVIEW,
                     AssignmentStatus.UNDER_REVIEW
                 ]}
             }).count()
 
-            max_assignments = 10  # Default max
-            if user.role == UserRole.MANAGER:
-                max_assignments = 15
-            elif user.role == UserRole.ADMIN:
-                max_assignments = 20
+            max_assignments = {UserRole.ADMIN: 20, UserRole.MANAGER: 15}.get(member_role, 10)
 
             user_info.append(UserAssignmentInfo(
-                user_id=str(user.id),
-                user_email=user.email,
-                user_name=user.full_name,
-                role=user.role,
-                teams=user.teams,
+                user_id=member["id"],
+                user_email=member.get("email") or "",
+                user_name=member.get("name") or member.get("username") or "",
+                role=member_role,
+                teams=member["teams"],
                 current_assignments=current_assignments,
                 max_assignments=max_assignments,
-                available=user.is_active and current_assignments < max_assignments
+                available=current_assignments < max_assignments
             ))
 
         return user_info

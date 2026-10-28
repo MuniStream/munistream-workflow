@@ -37,7 +37,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from app.api.endpoints.instances import puede_ver_instancia
+from app.auth.access_policy import can_view_instance
 
 
 def _instancia(team=None, usuario=None):
@@ -49,15 +49,15 @@ def _instancia(team=None, usuario=None):
 # ---------------------------------------------------------------------------
 
 def test_el_admin_lo_ve_todo():
-    assert puede_ver_instancia(_instancia(team="imipas"), ["admin"], "u1", []) is True
+    assert can_view_instance(_instancia(team="imipas"), ["admin"], "u1", []) is True
 
 
 def test_una_asignacion_directa_basta():
-    assert puede_ver_instancia(_instancia(usuario="u1"), ["reviewer"], "u1", []) is True
+    assert can_view_instance(_instancia(usuario="u1"), ["reviewer"], "u1", []) is True
 
 
 def test_un_revisor_ajeno_no_entra():
-    assert puede_ver_instancia(_instancia(usuario="otro"), ["reviewer"], "u1", []) is False
+    assert can_view_instance(_instancia(usuario="otro"), ["reviewer"], "u1", []) is False
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +66,11 @@ def test_un_revisor_ajeno_no_entra():
 
 def test_el_miembro_del_equipo_asignado_entra():
     """Es el caso que nunca podía darse: `user_teams` llegaba siempre vacía."""
-    assert puede_ver_instancia(_instancia(team="imipas"), ["manager"], "u1", ["imipas"]) is True
+    assert can_view_instance(_instancia(team="imipas"), ["manager"], "u1", ["imipas"]) is True
 
 
 def test_quien_no_es_del_equipo_no_entra():
-    assert puede_ver_instancia(_instancia(team="imipas"), ["manager"], "u1", ["fomento_pesquero"]) is False
+    assert can_view_instance(_instancia(team="imipas"), ["manager"], "u1", ["fomento_pesquero"]) is False
 
 
 def test_un_revisor_del_equipo_tambien_entra():
@@ -78,18 +78,18 @@ def test_un_revisor_del_equipo_tambien_entra():
     Restringirlo a `manager` dejaba fuera a quien de verdad dictamina: un revisor
     del área. Un equipo al que solo pueden entrar los jefes no es una bandeja.
     """
-    assert puede_ver_instancia(_instancia(team="imipas"), ["reviewer"], "u1", ["imipas"]) is True
+    assert can_view_instance(_instancia(team="imipas"), ["reviewer"], "u1", ["imipas"]) is True
 
 
 def test_sin_equipo_asignado_la_pertenencia_no_abre_nada():
     """Pertenecer a un equipo no da acceso a lo que no está asignado a ninguno."""
-    assert puede_ver_instancia(_instancia(), ["manager"], "u1", ["imipas"]) is False
+    assert can_view_instance(_instancia(), ["manager"], "u1", ["imipas"]) is False
 
 
 def test_un_viewer_del_equipo_no_decide_pero_ve():
-    assert puede_ver_instancia(_instancia(team="imipas"), ["viewer"], "u1", ["imipas"]) is True
+    assert can_view_instance(_instancia(team="imipas"), ["viewer"], "u1", ["imipas"]) is True
 
 
 def test_sin_rol_ninguno_no_entra():
     """Pertenecer al equipo sin ningún rol del sistema no alcanza."""
-    assert puede_ver_instancia(_instancia(team="imipas"), [], "u1", ["imipas"]) is False
+    assert can_view_instance(_instancia(team="imipas"), [], "u1", ["imipas"]) is False

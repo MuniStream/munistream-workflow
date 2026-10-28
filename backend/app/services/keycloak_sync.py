@@ -5,6 +5,7 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import asyncio
+import time
 import httpx
 from ..models.user import UserModel, UserRole
 from ..models.team import TeamModel
@@ -65,7 +66,13 @@ class KeycloakSyncService:
 
     def __init__(self):
         """Initialize Keycloak sync service"""
-        self.keycloak_url = os.getenv("KEYCLOAK_URL", "http://localhost:8180").rstrip('/')
+        # Server-to-server calls (admin API) go to KEYCLOAK_INTERNAL_URL when set,
+        # e.g. http://keycloak:8080 inside the Docker network. The public URL sits
+        # behind the reverse proxy and its request-rate limit, which answers 503
+        # to bursts such as listing team members or syncing many groups.
+        self.keycloak_url = (
+            os.getenv("KEYCLOAK_INTERNAL_URL") or os.getenv("KEYCLOAK_URL", "http://localhost:8180")
+        ).rstrip('/')
         self.realm = os.getenv("KEYCLOAK_REALM", "munistream")
         self.admin_username = os.getenv("KEYCLOAK_ADMIN_USER", "admin")
         self.admin_password = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "admin")
@@ -91,11 +98,12 @@ class KeycloakSyncService:
 
     async def _get_admin_token(self) -> str:
         """Get admin access token for Keycloak management"""
-        now = datetime.utcnow()
+        # Epoch seconds; `datetime.utcnow().timestamp()` would read the naive UTC
+        # time as local time and be off by the container's UTC offset.
+        now = time.time()
 
         # Check if token is still valid
-        if (self._admin_token and self._admin_token_expires and
-            now.timestamp() < self._admin_token_expires):
+        if self._admin_token and self._admin_token_expires and now < self._admin_token_expires:
             return self._admin_token
 
         # Get new admin token
@@ -125,9 +133,11 @@ class KeycloakSyncService:
             token_info = response.json()
             self._admin_token = token_info["access_token"]
 
-            # Set expiration (subtract 60 seconds for safety)
+            # Renew a bit before it expires. The master realm issues 60-second
+            # tokens, so a fixed 60-second margin made every token expire on
+            # arrival and forced a new login on every admin call.
             expires_in = token_info.get("expires_in", 300)
-            self._admin_token_expires = now.timestamp() + expires_in - 60
+            self._admin_token_expires = now + expires_in - min(30, expires_in * 0.2)
 
             logger.info("Admin token obtained successfully")
             return self._admin_token

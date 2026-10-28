@@ -243,7 +243,6 @@ async def get_current_user(
 
     try:
         user_info = await keycloak.get_user_info(credentials.credentials)
-        return user_info
     except Exception as e:
         logger.error(f"Authentication failed: {e}")
         raise HTTPException(
@@ -251,6 +250,21 @@ async def get_current_user(
             detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Staff teams (Keycloak groups + Mongo membership), resolved once per request
+    # and exposed as `teams`/`team_ids`, which is what listings and access checks
+    # read. Citizens are not looked up.
+    from .access_policy import is_staff
+    if is_staff(user_info):
+        from ..services.user_teams import get_user_teams
+        try:
+            teams = await get_user_teams(user_info)
+        except Exception as e:
+            logger.error(f"Could not resolve teams for {user_info.get('email')}: {e}")
+            teams = []
+        user_info["teams"] = teams
+        user_info["team_ids"] = teams
+    return user_info
 
 
 def require_roles(required_roles: List[str]):
