@@ -2,7 +2,7 @@
 DAG Operators for working with Legal Entities.
 These operators allow workflows to create, validate, and require entities.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 from enum import Enum
 
@@ -91,6 +91,26 @@ def _resolve_context_parts(current: Any, parts: List[str]) -> Any:
         return None
 
     return None
+
+
+def collect_uploaded_files(context: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Files uploaded by every S3UploadOperator of the run, without duplicates.
+
+    Each upload summary lives under its own context key and carries an
+    ``uploaded_files`` list. Returns the uploaded entries (in context order,
+    deduplicated by ``s3_key``) and their keys.
+    """
+    uploaded: List[Dict[str, Any]] = []
+    seen: set = set()
+    for value in context.values():
+        if not isinstance(value, dict) or not isinstance(value.get("uploaded_files"), list):
+            continue
+        for item in value["uploaded_files"]:
+            key = item.get("s3_key") if isinstance(item, dict) else None
+            if key and key not in seen:
+                seen.add(key)
+                uploaded.append(item)
+    return uploaded, [item["s3_key"] for item in uploaded]
 
 
 def resolver_vigencia(
@@ -349,6 +369,16 @@ class EntityCreationOperator(BaseOperator):
                                 user_fields.append(k)
                 elif value is not None and not isinstance(value, (list, dict)):
                     entity_data[key] = value
+
+            # Every S3 upload of the trámite stores its summary under its own
+            # `<task_id>_result` key, all with the same inner keys. The
+            # flattening above lets the last one overwrite the rest, so an entity
+            # built after several uploads (invoices XML, invoices PDF, notices)
+            # kept only the files of the last upload. Collect them all.
+            uploaded, s3_keys = collect_uploaded_files(context)
+            if uploaded:
+                entity_data["uploaded_files"] = uploaded
+                entity_data["s3_keys"] = s3_keys
 
             # Apply explicit mapping overrides if provided. Paths support dict keys
             # and numeric list indices, so they can pull fields from a selected

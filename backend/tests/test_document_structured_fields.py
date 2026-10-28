@@ -79,6 +79,14 @@ def test_format_value_never_prints_a_repr():
     assert "{" not in engine._format_value({"tipo": "red", "cantidad": 2})
 
 
+def test_format_value_keeps_the_labels_of_a_non_address_mapping():
+    engine = TemplateEngine()
+    resumen = {"num_facturas": 1, "moneda": "MXN", "total_facturado": 158.01}
+    assert engine._format_value(resumen) == "Num Facturas: 1; Moneda: MXN; Total Facturado: 158.01"
+    por_especie = {"Atún — Thunnus albacares (kg)": 12.5}
+    assert engine._format_value(por_especie) == "Atún — Thunnus albacares (kg): 12.5"
+
+
 def test_fit_view_frames_the_polygon():
     ring = POLYGON["coordinates"][0]
     zoom, cx, cy = static_map.fit_view(ring, static_map.WIDTH, static_map.HEIGHT, single_point=False)

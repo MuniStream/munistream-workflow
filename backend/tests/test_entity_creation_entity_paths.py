@@ -136,3 +136,25 @@ def test_entity_creation_does_not_absorb_selected_entities_data_blob():
     # The IDs from `selected_entities` may still be flattened (pre-existing
     # behavior) — but as IDs, never as the data snapshots.
     assert data.get("embarcacion_ids") == ["embarcacion_registrada_1"]
+
+
+def test_entity_creation_keeps_the_files_of_every_upload():
+    """Three uploads share the summary keys; the entity must keep all of them."""
+    op = EntityCreationOperator(task_id="generate_fishing_guide", entity_type="guia_pesca")
+
+    def summary(*names):
+        files = [{"success": True, "filename": n, "s3_key": f"t/{n}", "bucket": "b"} for n in names]
+        return {"uploaded_files": files, "s3_keys": [f["s3_key"] for f in files], "successful_count": len(files)}
+
+    context = {
+        "user_id": "user-1",
+        "upload_cfdi_xml_s3_result": summary("factura.xml"),
+        "upload_cfdi_pdf_s3_result": summary("factura.pdf"),
+        "upload_avisos_previos_s3_result": summary("aviso.pdf", "factura.pdf"),
+    }
+
+    op.execute(context)
+    data = op._entity_params["data"]
+
+    assert [f["filename"] for f in data["uploaded_files"]] == ["factura.xml", "factura.pdf", "aviso.pdf"]
+    assert data["s3_keys"] == ["t/factura.xml", "t/factura.pdf", "t/aviso.pdf"]
