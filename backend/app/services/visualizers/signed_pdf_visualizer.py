@@ -140,7 +140,8 @@ class SignedPDFVisualizer(PDFVisualizer):
                 include_qr=self.config.get("include_qr", True),
                 include_signatures=True,
                 format="pdf",
-                base_url=base_url
+                base_url=base_url,
+                extra_context=self._catalog_context(entity),
             )
 
             if not pdf_data:

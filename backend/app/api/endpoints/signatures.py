@@ -333,7 +333,7 @@ async def verify_entity_signature(
 # Single source shared with the per-instance download and the notification
 # attachments: same template for view, print, download and email.
 from ...services.visualizers.entity_pdf import select_entity_visualizer as _select_entity_visualizer  # noqa: E402
-from ...services.entity_type_catalog import effective_display_config  # noqa: E402
+from ...services.entity_type_catalog import effective_display_config, related_sections  # noqa: E402
 
 
 @router.get("/entities/{entity_id}/pdf")
@@ -361,7 +361,7 @@ async def get_entity_pdf(
 
         # Merge entity_display_config para que `template` y otros ajustes
         # tenant-specific lleguen al visualizer.
-        pdf_config = {**effective_display_config(entity), "include_signatures": include_signatures, "base_url": base_url}
+        pdf_config = {**effective_display_config(entity), "related_sections": await related_sections(entity), "include_signatures": include_signatures, "base_url": base_url}
 
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
@@ -421,7 +421,7 @@ async def get_entity_preview(
 
         # Merge entity_display_config para que `template` y otros ajustes
         # tenant-specific lleguen al visualizer.
-        preview_config = {**effective_display_config(entity), "base_url": base_url}
+        preview_config = {**effective_display_config(entity), "related_sections": await related_sections(entity), "base_url": base_url}
 
         # Get visualizer
         pdf_visualizer = VisualizerFactory.get_visualizer(
@@ -482,7 +482,7 @@ async def get_entity_html(
 
         # Merge entity_display_config para que `template` y otros ajustes
         # tenant-specific lleguen al visualizer.
-        html_config = {**effective_display_config(entity), "base_url": base_url}
+        html_config = {**effective_display_config(entity), "related_sections": await related_sections(entity), "base_url": base_url}
 
         # Get visualizer
         entity_visualizer = VisualizerFactory.get_visualizer(

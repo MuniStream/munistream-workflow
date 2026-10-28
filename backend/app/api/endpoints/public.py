@@ -740,6 +740,11 @@ async def get_entity_details(
     
     # Prepare entity data
     entity_dict = entity.to_display_dict()
+    # Name and display of the entity's type, from the tenant's entity type catalog.
+    entity_dict["display"] = effective_display_config(entity)
+    tipo = entity_type_catalog.get_type(entity.entity_type)
+    entity_dict["type_name"] = tipo["name"] if tipo else None
+    entity_dict["related"] = await entity_type_catalog.related_sections(entity)
 
     # Add visualization config if requested
     if include_visualization:
