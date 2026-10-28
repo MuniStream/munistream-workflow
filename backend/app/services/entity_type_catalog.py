@@ -25,7 +25,7 @@ by the plugin loader. Nothing is written to the database::
 """
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -47,6 +47,10 @@ def register_types(types: Dict[str, Dict[str, Any]], source: str) -> int:
         if display is not None and not isinstance(display, dict):
             logger.warning("Entity type %s in %s has a non-mapping display; skipped", type_id, source)
             continue
+        related = spec.get("related") or []
+        if not isinstance(related, list) or not all(isinstance(r, dict) and r.get("field") for r in related):
+            logger.warning("Entity type %s in %s has an invalid related list; ignored", type_id, source)
+            related = []
         _catalog[str(type_id)] = {
             "type_id": str(type_id),
             "name": spec.get("name") or str(type_id),
@@ -55,6 +59,7 @@ def register_types(types: Dict[str, Dict[str, Any]], source: str) -> int:
             "icon": spec.get("icon"),
             "color": spec.get("color"),
             "display": dict(display or {}),
+            "related": related,
             "source": source,
         }
         count += 1
@@ -92,3 +97,48 @@ def effective_display_config(entity: Any) -> Dict[str, Any]:
     stored = getattr(entity, "entity_display_config", None) or {}
     spec = get_type(getattr(entity, "entity_type", None))
     return {**stored, **(spec["display"] if spec else {})}
+
+
+def _empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+async def related_sections(entity: Any) -> List[Dict[str, Any]]:
+    """Sections with the data of the entities this one points to.
+
+    A type declares them under ``related``: ``field`` is the data key holding
+    the related entity id (or ids), and ``title``/``fields``/``labels`` say how
+    to show it. Only entities of the same owner are read, and a missing one is
+    skipped. Returns ``[{"title", "entity_id", "rows": [{"key", "label", "value"}]}]``.
+    """
+    spec = get_type(getattr(entity, "entity_type", None))
+    if not spec or not spec["related"]:
+        return []
+    from ..models.legal_entity import LegalEntity
+
+    data = getattr(entity, "data", None) or {}
+    sections: List[Dict[str, Any]] = []
+    for rel in spec["related"]:
+        ids = data.get(rel["field"])
+        for related_id in ids if isinstance(ids, list) else [ids]:
+            if not related_id:
+                continue
+            other = await LegalEntity.find_one(
+                LegalEntity.entity_id == related_id,
+                LegalEntity.owner_user_id == getattr(entity, "owner_user_id", None),
+            )
+            if not other:
+                continue
+            other_data = other.data or {}
+            labels = rel.get("labels") or {}
+            keys = rel.get("fields") or list(other_data.keys())
+            other_type = get_type(other.entity_type)
+            sections.append({
+                "title": rel.get("title") or (other_type["name"] if other_type else other.entity_type),
+                "entity_id": other.entity_id,
+                "rows": [
+                    {"key": k, "label": labels.get(k) or k.replace("_", " ").capitalize(), "value": other_data.get(k)}
+                    for k in keys if not _empty(other_data.get(k))
+                ],
+            })
+    return sections

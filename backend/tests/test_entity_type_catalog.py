@@ -74,3 +74,41 @@ def test_catalog_file_with_yaml_anchors(tmp_path):
     assert catalog.load_catalog_file(path, "t") == 1
     assert catalog.get_type("permit")["display"]["visualizer"] == "tenant_official"
     assert catalog.load_catalog_file(tmp_path / "missing.yaml", "t") == 0
+
+
+def test_related_sections_read_the_linked_entity_of_the_same_owner(monkeypatch):
+    import asyncio
+    from app.models import legal_entity
+
+    catalog.register_types({
+        "permit": {"name": "Permiso", "related": [
+            {"field": "unit_ids", "title": "Unidad", "fields": ["folio", "name", "empty"], "labels": {"folio": "Folio"}},
+        ]},
+    }, "t")
+    unit = SimpleNamespace(entity_id="u1", entity_type="unit", data={"folio": "0203", "name": "SCPP", "empty": ""})
+    asked = []
+
+    class FakeQueryField:
+        def __init__(self, name):
+            self.name = name
+
+        def __eq__(self, other):
+            return (self.name, other)
+
+    async def find_one(*conds):
+        asked.append(conds)
+        values = dict(conds)
+        return unit if values.get("entity_id") == "u1" and values.get("owner_user_id") == "o" else None
+
+    monkeypatch.setattr(legal_entity.LegalEntity, "entity_id", FakeQueryField("entity_id"), raising=False)
+    monkeypatch.setattr(legal_entity.LegalEntity, "owner_user_id", FakeQueryField("owner_user_id"), raising=False)
+    monkeypatch.setattr(legal_entity.LegalEntity, "find_one", find_one, raising=False)
+
+    entity = SimpleNamespace(entity_type="permit", owner_user_id="o", data={"unit_ids": ["u1", "missing"]})
+    sections = asyncio.run(catalog.related_sections(entity))
+    assert sections == [{"title": "Unidad", "entity_id": "u1", "rows": [
+        {"key": "folio", "label": "Folio", "value": "0203"},
+        {"key": "name", "label": "Name", "value": "SCPP"},
+    ]}]
+    assert len(asked) == 2
+    assert asyncio.run(catalog.related_sections(_entity("other"))) == []

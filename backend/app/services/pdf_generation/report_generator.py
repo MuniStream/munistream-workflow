@@ -87,7 +87,8 @@ class EntityReportGenerator:
         include_qr: bool = True,
         include_signatures: bool = True,
         format: str = "pdf",
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        extra_context: Optional[Dict[str, Any]] = None,
     ) -> bytes:
         """
         Generate PDF report using ReportLab with Jinja2 templates
@@ -109,6 +110,9 @@ class EntityReportGenerator:
             include_signatures,
             base_url
         )
+        # What the visualizer adds on top (e.g. the resolved display config and
+        # the related entities declared by the entity type catalog).
+        template_data.update(extra_context or {})
 
         if format == "html":
             # Generate HTML only

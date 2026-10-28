@@ -67,7 +67,8 @@ class PDFVisualizer(EntityVisualizer):
                 include_qr=include_qr,
                 include_signatures=include_signatures,
                 format="pdf",
-                base_url=base_url
+                base_url=base_url,
+                extra_context=self._catalog_context(entity),
             )
 
             if not pdf_data:
@@ -111,7 +112,8 @@ class PDFVisualizer(EntityVisualizer):
                 include_qr=include_qr,
                 include_signatures=include_signatures,
                 format="html",
-                base_url=base_url
+                base_url=base_url,
+                extra_context=self._catalog_context(entity),
             )
 
             if not html_data:

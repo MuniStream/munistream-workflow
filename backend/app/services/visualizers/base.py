@@ -81,7 +81,8 @@ class EntityVisualizer(ABC):
                 include_qr=include_qr,
                 include_signatures=include_signatures,
                 format="html",
-                base_url=base_url
+                base_url=base_url,
+                extra_context=self._catalog_context(entity),
             )
 
             if not html_data:
@@ -199,6 +200,13 @@ class EntityVisualizer(ABC):
 
         return result
 
+    def _catalog_context(self, entity: LegalEntity) -> Dict[str, Any]:
+        """Template context that comes from the entity type catalog."""
+        return {
+            "display_config": effective_display_config(entity),
+            "related_sections": self.config.get("related_sections") or [],
+        }
+
     def _prepare_context_data(self, entity: LegalEntity) -> Dict[str, Any]:
         """
         Prepare context data for visualization templates.
@@ -222,6 +230,7 @@ class EntityVisualizer(ABC):
             },
             "visualization_config": entity.visualization_config or {},
             "display_config": effective_display_config(entity),
+            "related_sections": self.config.get("related_sections") or [],
             "generated_at": self._get_current_timestamp()
         }
 

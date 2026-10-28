@@ -8,7 +8,7 @@ the same configuration, so the attachment matches the download.
 from typing import Any, Optional, Tuple
 
 from ...core.config import settings
-from ..entity_type_catalog import effective_display_config
+from ..entity_type_catalog import effective_display_config, related_sections
 from .visualizer_factory import VisualizerFactory
 
 
@@ -38,7 +38,7 @@ def entity_visualizer(entity, **extra: Any):
 
 async def render_entity_pdf(entity) -> Optional[Tuple[bytes, str]]:
     """(PDF bytes, filename), or None when the entity has no PDF rendering."""
-    visualizer = entity_visualizer(entity)
+    visualizer = entity_visualizer(entity, related_sections=await related_sections(entity))
     if not visualizer:
         return None
     pdf = await visualizer.generate_pdf(entity)
