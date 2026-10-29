@@ -19,6 +19,7 @@ from ...services.entity_service import EntityService
 from ...services.entity_serialization import slim_entity_data
 from ...services import entity_type_catalog
 from ...services.entity_type_catalog import effective_display_config
+from ...services.entity_workflows import workflows_for_entity_types
 from ...workflows.dag import DAG
 from .public_auth import router as auth_router, get_current_customer, require_instance_owner
 from ...core.logging_config import set_workflow_context
@@ -667,16 +668,8 @@ async def list_user_entities(
         {"$sort": {"_id": 1}},
     ]).to_list(None)
 
-    # Workflows that accept each entity type, read once for the whole page.
-    workflows_por_tipo: Dict[str, List[Dict[str, Any]]] = {}
-    for w in await workflow_service.list_workflow_definitions(status="active"):
-        for tipo in (w.metadata or {}).get("entity_types") or []:
-            workflows_por_tipo.setdefault(tipo, []).append({
-                "workflow_id": w.workflow_id,
-                "name": w.name,
-                "description": w.description,
-                "category": w.category,
-            })
+    # Trámites that accept each entity type, derived once for the whole page.
+    workflows_por_tipo = await workflows_for_entity_types()
 
     result = [
         {
@@ -724,20 +717,11 @@ async def get_entity_details(
         {"context.entity_id": entity_id}
     ).to_list()
     
-    # Get available workflows for this entity type
-    all_workflows = await workflow_service.list_workflow_definitions(status="active")
-    available_workflows = []
-    for w in all_workflows:
-        if w.metadata and "entity_types" in w.metadata:
-            if entity.entity_type in w.metadata["entity_types"]:
-                available_workflows.append({
-                    "workflow_id": w.workflow_id,
-                    "name": w.name,
-                    "description": w.description,
-                    "category": w.category,
-                    "estimatedDuration": w.metadata.get("estimated_duration", "10-20 min")
-                })
-    
+    # Trámites that accept this entity's type, derived from what each one asks
+    # for in its entity picker steps.
+    available_workflows = (await workflows_for_entity_types()).get(entity.entity_type, [])
+
+
     # Prepare entity data
     entity_dict = entity.to_display_dict()
     # Name and display of the entity's type, from the tenant's entity type catalog.
@@ -760,6 +744,8 @@ async def get_entity_details(
             {
                 "instance_id": inst.instance_id,
                 "workflow_id": inst.workflow_id,
+                # The citizen reads the trámite's name, not `tramite_01_070_guia_pesca`.
+                "workflow_name": getattr(workflow_service.dag_bag.get_dag(inst.workflow_id), "name", None),
                 "status": inst.status,
                 "created_at": inst.created_at.isoformat() if inst.created_at else None,
                 "completed_at": inst.completed_at.isoformat() if inst.completed_at else None
@@ -924,63 +910,6 @@ async def delete_entity(
             "action": "delete_entity_error"
         }, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to delete entity")
-
-
-@router.get("/entities/{entity_id}/documents")
-async def get_entity_documents(
-    entity_id: str,
-    current_customer: Customer = Depends(get_current_customer)
-):
-    """
-    Get all documents linked to a specific entity.
-    """
-    # Verify entity ownership
-    entity = await EntityService.get_entity(entity_id, str(current_customer.id))
-    if not entity:
-        raise HTTPException(status_code=404, detail="Entity not found")
-    
-    # Get document relationships
-    document_relationships = entity.get_relationships(
-        relationship_type="has_document",
-        active_only=True
-    )
-    
-    # Fetch actual document entities
-    documents = []
-    for rel in document_relationships:
-        doc = await EntityService.get_entity(rel.to_entity_id)
-        if doc and doc.entity_type == "document":
-            documents.append({
-                "document_id": doc.entity_id,
-                "name": doc.name,
-                "document_type": doc.data.get("document_type"),
-                "document_subtype": doc.data.get("document_subtype"),
-                "document_number": doc.data.get("document_number"),
-                "issued_date": doc.data.get("issued_date"),
-                "expiry_date": doc.data.get("expiry_date"),
-                "issuing_authority": doc.data.get("issuing_authority"),
-                "verification_status": doc.data.get("verification_status"),
-                "is_expired": _is_document_expired(doc.data.get("expiry_date")),
-                "created_at": doc.created_at.isoformat() if doc.created_at else None,
-                "metadata": doc.data
-            })
-    
-    return {
-        "entity_id": entity_id,
-        "documents": documents,
-        "total": len(documents)
-    }
-
-
-def _is_document_expired(expiry_date_str: Optional[str]) -> bool:
-    """Check if a document is expired based on expiry date."""
-    if not expiry_date_str:
-        return False
-    try:
-        expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00'))
-        return expiry_date < datetime.utcnow()
-    except:
-        return False
 
 
 @router.get("/entity-types")

@@ -178,5 +178,9 @@ class LegalEntity(Document):
             "verified": self.verified,
             "data": self.data,
             "relationships_count": len([r for r in self.relationships if r.is_active]),
-            "created_at": self.created_at.isoformat() if self.created_at else None
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            # When the entity stops being valid: the wallet shows it in the list
+            # and the detail needs it for the same reason.
+            "valid_until": self.valid_until.isoformat() if self.valid_until else None,
         }

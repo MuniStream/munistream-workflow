@@ -103,42 +103,86 @@ def _empty(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
+def _related_entity_id(value: Any) -> Optional[str]:
+    """The id inside an ``*_ids`` item.
+
+    The key name promises identifiers, but depending on the operator that wrote
+    it the item is the whole entity.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        related_id = value.get("entity_id") or value.get("id")
+        return str(related_id) if related_id else None
+    return None
+
+
+def _type_name(entity_type: Optional[str]) -> Optional[str]:
+    spec = get_type(entity_type)
+    return spec["name"] if spec else entity_type
+
+
 async def related_sections(entity: Any) -> List[Dict[str, Any]]:
     """Sections with the data of the entities this one points to.
 
     A type declares them under ``related``: ``field`` is the data key holding
     the related entity id (or ids), and ``title``/``fields``/``labels`` say how
-    to show it. Only entities of the same owner are read, and a missing one is
-    skipped. Returns ``[{"title", "entity_id", "rows": [{"key", "label", "value"}]}]``.
+    to show it. When the type declares none — or has no entry in the catalog at
+    all, which is every type of a tenant without ``entity_types.yaml`` — the
+    sections are derived from the entity's ``*_ids`` keys, with no rows: just
+    the related entity, named and linkable.
+
+    Only entities of the same owner are read, and a missing one is skipped.
+    Returns ``[{"title", "entity_id", "name", "rows": [{"key", "label", "value"}]}]``.
     """
-    spec = get_type(getattr(entity, "entity_type", None))
-    if not spec or not spec["related"]:
-        return []
     from ..models.legal_entity import LegalEntity
 
     data = getattr(entity, "data", None) or {}
+    owner = getattr(entity, "owner_user_id", None)
+
+    async def load(related_id: Optional[str]) -> Any:
+        if not related_id:
+            return None
+        return await LegalEntity.find_one(
+            LegalEntity.entity_id == related_id,
+            LegalEntity.owner_user_id == owner,
+        )
+
+    spec = get_type(getattr(entity, "entity_type", None))
     sections: List[Dict[str, Any]] = []
-    for rel in spec["related"]:
-        ids = data.get(rel["field"])
-        for related_id in ids if isinstance(ids, list) else [ids]:
-            if not related_id:
-                continue
-            other = await LegalEntity.find_one(
-                LegalEntity.entity_id == related_id,
-                LegalEntity.owner_user_id == getattr(entity, "owner_user_id", None),
-            )
+
+    if spec and spec["related"]:
+        for rel in spec["related"]:
+            ids = data.get(rel["field"])
+            for item in ids if isinstance(ids, list) else [ids]:
+                other = await load(_related_entity_id(item))
+                if not other:
+                    continue
+                other_data = other.data or {}
+                labels = rel.get("labels") or {}
+                keys = rel.get("fields") or list(other_data.keys())
+                sections.append({
+                    "title": rel.get("title") or _type_name(other.entity_type),
+                    "entity_id": other.entity_id,
+                    "name": other.name,
+                    "rows": [
+                        {"key": k, "label": labels.get(k) or k.replace("_", " ").capitalize(), "value": other_data.get(k)}
+                        for k in keys if not _empty(other_data.get(k))
+                    ],
+                })
+        return sections
+
+    for key, value in data.items():
+        if not key.endswith("_ids"):
+            continue
+        for item in value if isinstance(value, list) else [value]:
+            other = await load(_related_entity_id(item))
             if not other:
                 continue
-            other_data = other.data or {}
-            labels = rel.get("labels") or {}
-            keys = rel.get("fields") or list(other_data.keys())
-            other_type = get_type(other.entity_type)
             sections.append({
-                "title": rel.get("title") or (other_type["name"] if other_type else other.entity_type),
+                "title": _type_name(other.entity_type),
                 "entity_id": other.entity_id,
-                "rows": [
-                    {"key": k, "label": labels.get(k) or k.replace("_", " ").capitalize(), "value": other_data.get(k)}
-                    for k in keys if not _empty(other_data.get(k))
-                ],
+                "name": other.name,
+                "rows": [],
             })
     return sections
