@@ -37,6 +37,7 @@ from ...core.database import get_database
 # fallido todo lo que estaba por empezar.
 from ...workflows.dag import DAGInstance
 from ...services.workflow_service import workflow_service
+from ...services.step_form import context_form_belongs_to, waiting_step_form
 from ...services.estado_instancia import estado_efectivo, filtro_estado
 from ...services.entity_service import EntityService
 from ...models.legal_entity import LegalEntity, EntityType
@@ -1150,8 +1151,9 @@ async def track_instance_for_admin(
         if db_instance.status == "paused" and dag_instance.context.get("waiting_for"):
             requires_input = True
             waiting_for = dag_instance.context.get("waiting_for")
-            if dag_instance.context.get("form_config"):
-                input_form = dag_instance.context["form_config"]
+            if isinstance(dag_instance.context.get("form_config"), dict) and \
+                    context_form_belongs_to(dag_instance.context, current_step):
+                input_form = dict(dag_instance.context["form_config"])
 
         # Also check current step state for waiting status
         if current_step and current_step in dag_instance.task_states:
@@ -1166,12 +1168,10 @@ async def track_instance_for_admin(
                     None
                 )
 
-                # Get form from task output_data or context fallback
-                if state.get("output_data", {}).get("form_config"):
-                    input_form = state["output_data"]["form_config"]
-                elif dag_instance.context.get("form_config"):
-                    # Fallback to context form_config for signature forms
-                    input_form = dag_instance.context["form_config"]
+                task = dag_instance.dag.tasks.get(current_step)
+                input_form = waiting_step_form(dag_instance.context, current_step, task, state)
+                if input_form:
+                    input_form["current_step_id"] = current_step
 
 
     # El avance se cuenta sobre el camino que el tramite recorrio, no sobre todo

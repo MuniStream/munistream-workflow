@@ -16,6 +16,7 @@ from ...models.customer import Customer, CustomerStatus
 from ...core.config import settings
 from ...core.i18n import t as translate
 from ...services.instance_progress import avance, pasos_recorridos
+from ...services.step_form import waiting_step_form
 from ...auth.auth_callbacks import (
     claim_post_auth_session,
     has_post_auth_callbacks,
@@ -549,8 +550,8 @@ async def track_instance(
         if db_instance.status == "paused" and dag_instance.context.get("waiting_for"):
             requires_input = True
             waiting_for = dag_instance.context.get("waiting_for")
-            if dag_instance.context.get("form_config"):
-                input_form.update(dag_instance.context["form_config"])
+            # The step forms below come from `waiting_step_form`; the context form
+            # is only taken here when no step is marked as waiting.
 
         for task_id, state in dag_instance.task_states.items():
             if state.get("status") == "waiting":
@@ -558,19 +559,7 @@ async def track_instance(
                 waiting_tasks.append(task_id)
 
                 task = dag_instance.dag.tasks.get(task_id)
-                task_form = {}
-
-                # Merge from ANY source - output_data first (async operators like EntityPickerOperator)
-                if state.get("output_data", {}).get("form_config"):
-                    task_form.update(state["output_data"]["form_config"])
-                else:
-                    # Try to get form_config from global context as fallback
-                    if dag_instance.context.get("form_config"):
-                        task_form.update(dag_instance.context["form_config"])
-
-                # Then merge from task.form_config (sync operators like UserInputOperator)
-                if task and hasattr(task, 'form_config'):
-                    task_form.update(task.form_config)
+                task_form = waiting_step_form(dag_instance.context, task_id, task, state)
 
                 # Add task-specific metadata
                 if task_form:  # Only add metadata if we found a form
@@ -582,6 +571,9 @@ async def track_instance(
 
                     # Merge into global input_form
                     input_form.update(task_form)
+
+        if not waiting_tasks and waiting_for and isinstance(dag_instance.context.get("form_config"), dict):
+            input_form.update(dag_instance.context["form_config"])
 
         # Handle multiple waiting tasks
         if len(waiting_tasks) > 1:

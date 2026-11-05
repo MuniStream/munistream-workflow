@@ -553,6 +553,8 @@ class DAGExecutor:
                 if output:
                     dag_instance.context.update(output)
                     _registrar_paso(dag_instance, task_id, task, output)
+                from ..services.step_form import record_form_owner
+                record_form_owner(dag_instance.context, task_id, output)
 
                 # Ensure output_data is available in task_states for tracking endpoint
                 if hasattr(task, 'state') and task.state.output_data:
