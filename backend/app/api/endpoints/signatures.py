@@ -14,8 +14,8 @@ from pydantic import BaseModel
 import logging
 import io
 
-from app.services.auth_service import get_current_user_optional
-from app.models.user import UserModel as User
+from app.auth.access_policy import APPROVE, require_capability
+from app.auth.requester import Requester, get_requester, require_entity_access, require_instance_access
 from app.models.workflow import WorkflowInstance
 from app.models.legal_entity import LegalEntity
 from app.services.signature.context_signer import ContextSignerService
@@ -79,7 +79,7 @@ class VerificationResponse(BaseModel):
 async def get_signable_data(
     instance_id: str,
     signature_field: str,
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> SignableDataResponse:
     """
     Get signable data for a workflow instance.
@@ -90,12 +90,7 @@ async def get_signable_data(
     try:
         # Verify instance exists
         instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-        if not instance:
-            raise HTTPException(status_code=404, detail="Workflow instance not found")
-
-        # Verify user has access to this instance
-        if current_user and instance.customer_id != current_user.customer_id:
-            raise HTTPException(status_code=403, detail="Access denied to this workflow instance")
+        require_instance_access(requester, instance)
 
         # Get signable data
         signable_data = await ContextSignerService.get_signable_data(
@@ -135,7 +130,7 @@ async def submit_signature(
     instance_id: str,
     signature_field: str,
     signature_data: SignatureSubmissionRequest,
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> SignatureSubmissionResponse:
     """
     Submit a digital signature for a workflow instance.
@@ -145,12 +140,9 @@ async def submit_signature(
     try:
         # Verify instance exists
         instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-        if not instance:
-            raise HTTPException(status_code=404, detail="Workflow instance not found")
-
-        # Verify user has access
-        if current_user and instance.customer_id != current_user.customer_id:
-            raise HTTPException(status_code=403, detail="Access denied to this workflow instance")
+        require_instance_access(requester, instance)
+        if requester.is_staff:
+            require_capability(requester.user, APPROVE, instance)
 
         # Validate certificate
         cert_validation = await CertificateManager.validate_certificate_for_signing(
@@ -232,7 +224,7 @@ async def submit_signature(
 async def get_signature_status(
     instance_id: str,
     signature_field: str,
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> SignatureStatusResponse:
     """
     Get the status of a signature for a workflow instance.
@@ -240,12 +232,7 @@ async def get_signature_status(
     try:
         # Verify instance exists
         instance = await WorkflowInstance.find_one(WorkflowInstance.instance_id == instance_id)
-        if not instance:
-            raise HTTPException(status_code=404, detail="Workflow instance not found")
-
-        # Verify user has access
-        if current_user and instance.customer_id != current_user.customer_id:
-            raise HTTPException(status_code=403, detail="Access denied to this workflow instance")
+        require_instance_access(requester, instance)
 
         # Get signature status
         status = await ContextSignerService.get_signature_status(
@@ -268,14 +255,15 @@ async def get_signature_status(
 @router.post("/entities/{entity_id}/verify-signature")
 async def verify_entity_signature(
     entity_id: str,
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> VerificationResponse:
     """
     Verify the digital signature of an entity.
     """
     try:
         # Get entity
-        entity = await EntityService.get_entity(entity_id, current_user.customer_id if current_user else None)
+        entity = await EntityService.get_entity(entity_id)
+        await require_entity_access(requester, entity)
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -340,14 +328,15 @@ from ...services.entity_type_catalog import effective_display_config, related_se
 async def get_entity_pdf(
     entity_id: str,
     include_signatures: bool = True,
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ):
     """
     Generate and download PDF for an entity using its configured visualizer.
     """
     try:
         # Get entity
-        entity = await EntityService.get_entity(entity_id, current_user.customer_id if current_user else None)
+        entity = await EntityService.get_entity(entity_id)
+        await require_entity_access(requester, entity)
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -401,14 +390,15 @@ async def get_entity_pdf(
 async def get_entity_preview(
     entity_id: str,
     visualizer: str = "pdf_report",
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> Dict[str, Any]:
     """
     Get base64-encoded preview of entity PDF for display in browser.
     """
     try:
         # Get entity
-        entity = await EntityService.get_entity(entity_id, current_user.customer_id if current_user else None)
+        entity = await EntityService.get_entity(entity_id)
+        await require_entity_access(requester, entity)
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -461,14 +451,15 @@ async def get_entity_html(
     request: Request,
     entity_id: str,
     visualizer: str = Query("pdf_report", description="Visualizer type to use"),
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> Response:
     """
     Get HTML representation of entity for display in iframe.
     """
     try:
         # Get entity
-        entity = await EntityService.get_entity(entity_id, current_user.customer_id if current_user else None)
+        entity = await EntityService.get_entity(entity_id)
+        await require_entity_access(requester, entity)
         if not entity:
             raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -519,7 +510,7 @@ async def get_entity_html(
 @router.post("/validate-certificate")
 async def validate_certificate(
     certificate_file: UploadFile = File(...),
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester)
 ) -> Dict[str, Any]:
     """
     Validate an uploaded X.509 certificate for signing.

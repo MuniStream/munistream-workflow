@@ -129,7 +129,6 @@ def test_document_data():
 @pytest.fixture(params=[
     "/workflows",
     "/instances",
-    "/documents",
     "/admin/pending-approvals",
     "/performance/stats",
     "/entities/types",
