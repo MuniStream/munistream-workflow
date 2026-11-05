@@ -19,6 +19,7 @@ import io
 
 from app.services.auth_service import get_current_user_optional
 from app.auth.provider import require_permission
+from app.auth.requester import Requester, get_requester, require_entity_access
 from app.models.user import UserModel as User
 from app.services.entity_service import EntityService
 from app.services.pdf_generation import EntityReportGenerator
@@ -298,7 +299,7 @@ async def fetch_entity_file(
     page: Optional[str] = Query(None, description="PDF page number or 'all'"),
     max_width: Optional[int] = Query(None, description="Maximum width for converted images"),
     thumbnail: Optional[bool] = Query(False, description="Return thumbnail version"),
-    current_user: Optional[User] = Depends(get_current_user_optional)
+    requester: Requester = Depends(get_requester),
 ):
     """
     Fetch a specific file from an entity and optionally convert it for preview.
@@ -326,12 +327,8 @@ async def fetch_entity_file(
         from app.services.entity_service import EntityService
 
         # Fetch the entity from database using the same method as other endpoints
-        entity = await EntityService.get_entity(entity_id, current_user.id if current_user else None)
-        if not entity:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Entity {entity_id} not found"
-            )
+        entity = await EntityService.get_entity(entity_id)
+        await require_entity_access(requester, entity)
 
         # Extract all file URLs from entity data to verify the requested URL is valid
         entity_data = entity.data if hasattr(entity, 'data') else {}

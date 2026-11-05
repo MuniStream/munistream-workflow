@@ -51,7 +51,6 @@ class TestAllPublicEndpoints:
     # Auth-required endpoints
     "/auth/me",
     "/instances",
-    "/documents",
     "/teams",
     "/admin/stats",
     "/admin/pending-approvals",
@@ -78,7 +77,6 @@ class TestAllAuthenticatedEndpoints:
 @pytest.mark.parametrize("endpoint", [
     "/workflows",
     "/instances",
-    "/documents",
     "/admin/stats",
     "/performance/stats",
     "/entities/types",
@@ -139,7 +137,6 @@ class TestRedirectDetection:
             "/workflows/",      # Trailing slash
             "/workflows//",     # Double slash
             "/instances/",      # Trailing slash
-            "/documents/",      # Trailing slash
             "/admin/stats/",    # Trailing slash
         ]
 
@@ -156,7 +153,7 @@ class TestRedirectDetection:
         # The redirect detection is built into the api_client
         # This test will run and the final report will show any detected redirects
         endpoints = [
-            "/workflows", "/instances", "/documents", "/admin/stats",
+            "/workflows", "/instances", "/admin/stats",
             "/performance/stats", "/entities/types", "/categories",
             "/teams", "/themes/current", "/plugins"
         ]
