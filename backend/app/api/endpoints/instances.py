@@ -1372,6 +1372,8 @@ async def submit_workflow_data(
         data = await request.json()
 
     # Update BOTH the DAG instance and database with input
+    from ...services.step_input import normalize_step_input
+    data = normalize_step_input(waiting_task, data)
     dag_instance.context[f"{waiting_task}_input"] = data
     dag_instance.context[f"{waiting_task}_submitted_at"] = datetime.utcnow().isoformat()
 
