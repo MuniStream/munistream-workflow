@@ -175,9 +175,16 @@ async def submit_data(
             else:
                 data[key] = value
     else:
-        # Handle JSON
+        # Handle JSON. Los formularios con un `file` anidado en un item de array
+        # (p. ej. `propietarios[].identificacion_files`) no se pueden expresar en
+        # multipart y llegan como JSON con los archivos serializados en base64.
+        # Se materializan a S3 (`tmp/`) igual que el path multipart: así el
+        # context nunca guarda base64 (que el stripper del executor borraría
+        # antes de que corra el S3UploadOperator) y queda solo la referencia.
+        from app.services import s3_storage
         data = await request.json()
-    
+        data = s3_storage.materialize_base64_files(data, instance_id, waiting_task)
+
     # Update BOTH the DAG instance and database with input
     from ...services.step_input import normalize_step_input
     data = normalize_step_input(waiting_task, data)

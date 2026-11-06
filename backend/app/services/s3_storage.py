@@ -185,3 +185,67 @@ def upload_pending_file(
         "s3_key": key,
         "s3_bucket": bucket,
     }
+
+
+def _is_base64_file_dict(node: Any) -> bool:
+    """¿El nodo es un archivo serializado por el portal (`{filename,
+    content_type, size, base64}`)? Se exige `base64` como string y al menos
+    `filename`, para no confundir un `address`/`daterange` con un archivo."""
+    return (
+        isinstance(node, dict)
+        and isinstance(node.get("base64"), str)
+        and "filename" in node
+    )
+
+
+def materialize_base64_files(
+    data: Any,
+    instance_id: str,
+    task_id: str,
+    _field_name: str = "file",
+) -> Any:
+    """Recorre recursivamente el payload de `submit-data` (rama JSON) y sube a
+    `tmp/` cada archivo serializado en base64, dejando en su lugar la referencia
+    `{filename, content_type, size, s3_key, s3_bucket}` (sin `base64`).
+
+    El multipart no puede expresar un `file` anidado dentro de un item de array
+    (p. ej. `propietarios[].identificacion_files`), por eso esos formularios
+    llegan como JSON+base64. Pero el base64 crudo en el context lo borra el
+    `_strip_oversized_base64_blobs` del executor antes de que corran los
+    operadores S3 downstream. Materializándolo aquí, igual que el path
+    multipart, el context nunca guarda base64 y el S3UploadOperator hace el copy
+    de `tmp/` al destino final.
+
+    Devuelve una estructura nueva; no muta la entrada. Un archivo ya
+    materializado (con `s3_key` y sin `base64`) se deja intacto.
+    """
+    if _is_base64_file_dict(data):
+        import base64 as _b64
+
+        try:
+            content = _b64.b64decode(data["base64"])
+        except Exception:
+            # base64 ilegible: dejar el nodo como está en vez de perder el campo.
+            return data
+        return upload_pending_file(
+            instance_id=instance_id,
+            task_id=task_id,
+            field_name=_field_name,
+            filename=data.get("filename"),
+            content_type=data.get("content_type"),
+            file_content=content,
+        )
+
+    if isinstance(data, dict):
+        return {
+            key: materialize_base64_files(value, instance_id, task_id, key)
+            for key, value in data.items()
+        }
+
+    if isinstance(data, list):
+        return [
+            materialize_base64_files(item, instance_id, task_id, _field_name)
+            for item in data
+        ]
+
+    return data
