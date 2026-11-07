@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from ...services.workflow_service import workflow_service
 from ...models.workflow import WorkflowInstance, WorkflowDefinition
+from ...services.citizen_workflows import CITIZEN_WORKFLOW_TYPES, citizen_workflow_or_404, is_citizen_workflow
 from ...models.customer import Customer
 from .public_auth import get_current_customer_optional
 from ...models.legal_entity import LegalEntity, EntityType
@@ -190,6 +191,9 @@ async def submit_data(
     data = normalize_step_input(waiting_task, data)
     dag_instance.context[f"{waiting_task}_input"] = data
     dag_instance.context[f"{waiting_task}_submitted_at"] = datetime.utcnow().isoformat()
+    from ...auth.channel import request_client
+    if request_client():   # the portal or an agent acting for the person (Keycloak azp)
+        dag_instance.context[f"{waiting_task}_submitted_via"] = request_client()
 
     # Change status from paused to running to avoid delays
     if db_instance.status == "paused":
@@ -226,13 +230,16 @@ async def start_workflow(request: Dict[str, Any]):
 
 @router.get("/workflows")
 async def list_public_workflows(
-    workflow_type: str = Query("process", description="Filter by workflow type (process, document_processing, admin, etc.)")
+    workflow_type: str = Query("process", description="Filter by workflow type (process or document_processing)")
 ):
     """
     List available workflows for public use.
     Defaults to showing only PROCESS type workflows (user-facing processes).
     No authentication required - citizens can browse available services.
+    Administrative workflows (staff work such as technical opinions) are never listed here.
     """
+    if workflow_type not in CITIZEN_WORKFLOW_TYPES:
+        return {"workflows": []}
     workflows = await workflow_service.list_workflow_definitions(
         status="active",
         workflow_type=workflow_type,
@@ -376,7 +383,8 @@ async def search_workflows(
     """
     Search workflows by name or description.
     """
-    all_workflows = await workflow_service.list_workflow_definitions(status="active")
+    all_workflows = [w for w in await workflow_service.list_workflow_definitions(status="active")
+                     if is_citizen_workflow(w)]
     
     # Build a list with DAG data for accurate searching
     workflows_with_dag_data = []
@@ -441,10 +449,7 @@ async def get_workflow_by_id(
     Get a specific workflow by ID with all its details.
     No authentication required - public can view workflow details.
     """
-    # Get workflow definition from database
-    workflow = await workflow_service.get_workflow_definition(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+    workflow = await citizen_workflow_or_404(workflow_id)
     
     # Get the actual DAG to get real data
     dag = workflow_service.dag_bag.get_dag(workflow_id)
@@ -476,10 +481,7 @@ async def pre_check_workflow(
     - What resources are available
     - What actions are needed to fulfill missing requirements
     """
-    # Get workflow definition
-    workflow = await workflow_service.get_workflow_definition(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+    workflow = await citizen_workflow_or_404(workflow_id)
 
     # Get the actual DAG
     dag = workflow_service.dag_bag.get_dag(workflow_id)
@@ -780,10 +782,7 @@ async def start_entity_workflow(
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     
-    # Get workflow definition
-    workflow = await workflow_service.get_workflow_definition(workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
+    workflow = await citizen_workflow_or_404(workflow_id)
     
     # Check if workflow supports this entity type
     if workflow.metadata and "entity_types" in workflow.metadata:

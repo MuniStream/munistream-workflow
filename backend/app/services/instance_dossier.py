@@ -40,7 +40,7 @@ _NO_SON_SECRETO = frozenset({"s3_key", "object_key", "file_key", "bucket_key", "
 # `_selections`, `_signer`, `_assertions_result`, `_discovery_cache`...) y la lista
 # no se acaba nunca. Por eso dejo de ser el mecanismo; aqui solo evita que los
 # expedientes viejos se vean peor que antes.
-_LEGACY_TASK_SUFFIXES = ("_input", "_result", "_submitted_at", "_uploaded_files", "_citizen_data")
+_LEGACY_TASK_SUFFIXES = ("_input", "_result", "_submitted_at", "_submitted_via", "_uploaded_files", "_citizen_data")
 
 _MAX_DEPTH = 8
 

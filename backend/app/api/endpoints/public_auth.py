@@ -272,6 +272,8 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     from ...auth.provider import keycloak
     try:
         payload = await keycloak.verify_token(token)
+        from ...auth.channel import set_request_client
+        set_request_client(payload.get("azp"))
 
         # Get user ID from Keycloak token
         customer_id: str = payload.get("sub")
@@ -477,8 +479,11 @@ async def start_citizen_workflow(
     initial_data: Optional[Dict[str, Any]] = None,
     current_customer: Customer = Depends(get_current_customer)
 ):
-    """Start a workflow as an authenticated citizen"""
+    """Start a workflow as an authenticated citizen. Administrative workflows are staff work: 404."""
     from ...services.workflow_service import workflow_service
+    from ...services.citizen_workflows import citizen_workflow_or_404
+
+    await citizen_workflow_or_404(workflow_id)
     
     initial_context = initial_data or {}
     
@@ -487,6 +492,9 @@ async def start_citizen_workflow(
     initial_context["customer_email"] = current_customer.email
     initial_context["customer_name"] = current_customer.full_name
     initial_context["user_id"] = str(current_customer.id)  # Add user_id for EntityRequirementOperator
+    from ...auth.channel import request_client
+    if request_client():
+        initial_context["_started_via"] = request_client()
     
     try:
         # Create DAG instance with customer as user

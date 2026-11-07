@@ -56,3 +56,22 @@ def test_static_form_alone_when_there_is_no_dynamic_one():
     record_form_owner(context, "recibo", None)
     assert waiting_step_form(context, "recibo", receipt_task, None) == STATIC
     assert waiting_step_form(context, "recibo", None, None) == {}
+
+
+def test_errors_of_the_last_attempt_reach_the_form():
+    """user_input and catalog selection return their errors next to the form, not inside it."""
+    output = {"form_config": {"title": "Datos"}, "validation_errors": ["El campo 'rnpa' es requerido"]}
+    form = waiting_step_form({}, "datos", SimpleNamespace(), {"output_data": output})
+    assert form == {"title": "Datos", "validation_errors": ["El campo 'rnpa' es requerido"]}
+
+
+def test_a_live_capture_error_becomes_a_list():
+    output = {"form_config": {"title": "Selfie"}, "validation_error": "No se detectó un rostro"}
+    form = waiting_step_form({}, "selfie", SimpleNamespace(), {"output_data": output})
+    assert form["validation_errors"] == ["No se detectó un rostro"]
+
+
+def test_errors_inside_the_form_are_kept():
+    output = {"form_config": {"validation_errors": {"seleccion": "No es suya"}}, "validation_errors": ["otra"]}
+    form = waiting_step_form({}, "picker", SimpleNamespace(), {"output_data": output})
+    assert form["validation_errors"] == {"seleccion": "No es suya"}
