@@ -234,7 +234,8 @@ def _log_inicio_de_sesion(
         )
 
 
-async def get_current_customer(authorization: Optional[str] = Header(None)) -> Customer:
+async def get_current_customer(authorization: Optional[str] = Header(None),
+                               x_munistream_agent: Optional[str] = Header(None)) -> Customer:
     """
     Get current authenticated customer from Keycloak token.
     Uses manual header extraction to avoid conflicts with admin OAuth2.
@@ -272,8 +273,8 @@ async def get_current_customer(authorization: Optional[str] = Header(None)) -> C
     from ...auth.provider import keycloak
     try:
         payload = await keycloak.verify_token(token)
-        from ...auth.channel import set_request_client
-        set_request_client(payload.get("azp"))
+        from ...auth.channel import channel_of, set_request_client
+        set_request_client(channel_of(payload.get("azp"), x_munistream_agent))
 
         # Get user ID from Keycloak token
         customer_id: str = payload.get("sub")
