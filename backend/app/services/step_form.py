@@ -18,6 +18,11 @@ The executor now records the owner of the context form (`FORM_OWNER_KEY`).
 The form of a step is its static form with the dynamic one on top, and the
 context form only counts when it belongs to that step. Instances paused before
 the owner was recorded keep the previous merge order.
+
+Operators that reject a submission (user input, catalog selection, entity
+count, live capture) return their errors next to the form, not inside it, so
+neither the portal nor an agent saw why the step was asked again. The errors
+of the step's last attempt are copied into the form as `validation_errors`.
 """
 from typing import Any, Dict, Optional
 
@@ -37,6 +42,23 @@ def context_form_belongs_to(context: Dict[str, Any], task_id: str) -> bool:
 
 def waiting_step_form(context: Dict[str, Any], task_id: str, task: Any,
                       task_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    form = _step_form(context, task_id, task, task_state)
+    errors = _attempt_errors((task_state or {}).get("output_data") or {})
+    if errors and not form.get("validation_errors"):
+        form["validation_errors"] = errors
+    return form
+
+
+def _attempt_errors(output: Dict[str, Any]) -> Any:
+    errors = output.get("validation_errors")
+    if errors:
+        return errors
+    single = output.get("validation_error")
+    return [single] if single else None
+
+
+def _step_form(context: Dict[str, Any], task_id: str, task: Any,
+               task_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     static = getattr(task, "form_config", None) if task is not None else None
     static = static if isinstance(static, dict) else {}
     output_form = ((task_state or {}).get("output_data") or {}).get("form_config")
