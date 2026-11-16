@@ -82,14 +82,17 @@ class Settings(BaseSettings):
     OPENPROJECT_DEFAULT_PROJECT_ID: Optional[str] = None
     OPENPROJECT_PROJECT_KEY: Optional[str] = None
 
-    # AI/LLM Configuration
-    OPENAI_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None
-    AI_MODEL_PROVIDER: str = "openai"  # "openai" or "anthropic"
-    AI_MODEL_NAME: str = "gpt-4"  # Default model
-    AI_MAX_TOKENS: int = 4000
-    AI_TEMPERATURE: float = 0.3
-    AI_REQUEST_TIMEOUT: int = 60  # seconds
+    # DocumentIA: reads documents (IDs, proof of address, deeds, permits...) and
+    # returns their data as JSON. Server-to-server with a Keycloak client of the
+    # DocumentIA realm (client credentials). Without a URL, document reading is
+    # skipped and the person types the data in.
+    DOCUMENTIA_URL: Optional[str] = None
+    DOCUMENTIA_TOKEN_URL: Optional[str] = None
+    DOCUMENTIA_CLIENT_ID: Optional[str] = None
+    DOCUMENTIA_CLIENT_SECRET: Optional[str] = None
+    DOCUMENTIA_POLL_SECONDS: int = 10
+    DOCUMENTIA_MAX_WAIT_SECONDS: int = 900
+    DOCUMENTIA_HTTP_TIMEOUT: int = 60
 
     # OCR Configuration
     TESSERACT_CMD: Optional[str] = None  # Path to tesseract executable

@@ -790,7 +790,8 @@ class DAGExecutor:
             task = dag_instance.dag.tasks.get(task_id)
             if task is None:
                 continue
-            cfg = task.get_polling_config()
+            for_context = getattr(task, "polling_config_for", None)
+            cfg = for_context(dag_instance.context) if for_context else task.get_polling_config()
             if cfg.strategy == OperatorPollingStrategy.POLLING:
                 waiting_intervals.append(cfg.polling_interval_seconds)
         if not waiting_intervals:

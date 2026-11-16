@@ -29,8 +29,10 @@ from .catalog_selector_operator import CatalogSelectorOperator
 from .assertion_operator import AssertionOperator
 from .confirmation_operator import ConfirmationOperator
 from .terminate_if import TerminateIfOperator
+from .document_interrogation import DocumentInterrogationOperator
 
 __all__ = [
+    "DocumentInterrogationOperator",
     # Base classes
     "BaseOperator",
     "TaskResult",

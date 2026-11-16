@@ -213,6 +213,14 @@ class BaseOperator(ABC):
         """
         return self.polling_config
 
+    def polling_config_for(self, context: Dict[str, Any]) -> PollingConfig:
+        """
+        The scheduling of this operator for one instance, given its context.
+        Operators that poll only in some of their waits (e.g. while an external
+        job runs, but not while a form waits for the person) override this.
+        """
+        return self.get_polling_config()
+
     async def check_requirement(self,
                                requirement: OperatorRequirement,
                                context: Dict[str, Any]) -> RequirementStatus:
