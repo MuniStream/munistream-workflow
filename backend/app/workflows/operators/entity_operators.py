@@ -424,6 +424,7 @@ class EntityCreationOperator(BaseOperator):
                 edc["oficio_fields"] = [
                     f for f in user_fields
                     if f not in _INTERNAL
+                    and not f.startswith("_")
                     and not f.endswith(("_url", "_ids", "_result", "_file"))
                 ]
 
