@@ -135,7 +135,7 @@ def test_reads_then_review_then_confirm(docia):
     r = inst.submit({**form["initial_values"], "titular": "ANA PÉREZ LÓPEZ", "total": "350.50",
                      "especies": "CAMARÓN\nPULPO\nJAIBA"})
     assert r.status == TaskStatus.CONTINUE
-    extraction = r.data["extract_extraction"]
+    extraction = r.data["_extract_extraction"]
     assert extraction["status"] == "read" and extraction["type"] == "comprobante_domicilio"
     assert extraction["confirmed"]["domicilio"] == {"calle": "REFORMA 1", "codigo_postal": "06700"}
     assert extraction["confirmed"]["total"] == 350.5
@@ -143,6 +143,7 @@ def test_reads_then_review_then_confirm(docia):
     assert extraction["corrections"] == ["especies", "titular"]
     assert extraction["extracted"]["titular"] == "ANA PÉREZ" and extraction["job_id"] == "job-1"
     assert "files" not in r.data                                     # the file was not replaced
+    assert r.data["extract_data"] == extraction["confirmed"]         # an entity created later carries it
 
 
 def test_required_field_left_empty(docia):
@@ -175,7 +176,7 @@ def test_wrong_document_asks_for_another_and_publishes_it(docia):
     r = inst.submit(form["initial_values"])
     assert r.status == TaskStatus.CONTINUE
     assert r.data["files"] == NEW_FILE                               # the upload step stores the new file
-    assert r.data["extract_extraction"]["attempts"] == 2
+    assert r.data["_extract_extraction"]["attempts"] == 2
 
 
 def test_too_old_and_out_of_attempts(docia):
@@ -191,7 +192,7 @@ def test_too_old_and_out_of_attempts(docia):
     assert r.data["waiting_for"] == "user_input" and r.data["form_config"]["fields"][0]["name"] != "documento"
     assert "tiene más de 90 días" in r.data["form_config"]["description"]
     r = inst.submit(r.data["form_config"]["initial_values"])
-    assert r.data["extract_extraction"]["unresolved"] and r.status == TaskStatus.CONTINUE
+    assert r.data["_extract_extraction"]["unresolved"] and r.status == TaskStatus.CONTINUE
 
 
 def test_refused_file_asks_for_another(docia):
@@ -207,7 +208,7 @@ def test_unavailable_then_sent(docia):
     assert inst.run().data["waiting_for"] == "document_reading" and not docia.sent
     docia.submit_error = None
     assert inst.run().data["waiting_for"] == "document_reading" and len(docia.sent) == 1
-    assert inst.context["extract_doc"]["attempts"] == 1
+    assert inst.context["_extract_doc"]["attempts"] == 1
 
 
 def test_failed_reading_lets_the_person_type_it(docia):
@@ -218,8 +219,8 @@ def test_failed_reading_lets_the_person_type_it(docia):
     assert r.data["form_config"]["initial_values"] == {}
     assert "No pudimos leer" in r.data["form_config"]["description"]
     r = inst.submit({"titular": "ANA"})
-    assert r.data["extract_extraction"]["status"] == "manual"
-    assert r.data["extract_extraction"]["manual_reason"] == "read_failed"
+    assert r.data["_extract_extraction"]["status"] == "manual"
+    assert r.data["_extract_extraction"]["manual_reason"] == "read_failed"
 
 
 def test_timeout(docia, monkeypatch):
@@ -228,7 +229,7 @@ def test_timeout(docia, monkeypatch):
     inst.run()
     monkeypatch.setattr(settings, "DOCUMENTIA_MAX_WAIT_SECONDS", -1)
     r = inst.run()
-    assert r.data["waiting_for"] == "user_input" and inst.context["extract_doc"]["manual"] == "timeout"
+    assert r.data["waiting_for"] == "user_input" and inst.context["_extract_doc"]["manual"] == "timeout"
 
 
 def test_without_review(docia):
@@ -236,18 +237,19 @@ def test_without_review(docia):
     inst.run()
     docia.finish("job-1", {"titular": "ANA"})
     r = inst.run()
-    assert r.status == TaskStatus.CONTINUE and r.data["extract_extraction"]["confirmed"]["titular"] == "ANA"
+    assert r.status == TaskStatus.CONTINUE and r.data["_extract_extraction"]["confirmed"]["titular"] == "ANA"
 
 
 def test_skipped_without_documentia_or_file(docia):
     docia.ready = False
     r = Instance(_op()).run()
     assert r.status == TaskStatus.CONTINUE
-    assert r.data["extract_extraction"] == {"status": "skipped", "reason": "not_configured"}
+    assert r.data["_extract_extraction"] == {"status": "skipped", "reason": "not_configured"}
+    assert "extract_data" not in r.data
     docia.ready = True
     inst = Instance(_op())
     inst.context = {}
-    assert inst.run().data["extract_extraction"]["reason"] == "no_file"
+    assert inst.run().data["_extract_extraction"]["reason"] == "no_file"
 
 
 def test_file_from_the_uploaded_reference(docia, monkeypatch):
@@ -265,3 +267,19 @@ def test_parameters_are_recorded():
     op = _op(max_age_days=90)
     assert op.kwargs["document_type"] == "comprobante_domicilio" and op.kwargs["max_age_days"] == 90
     assert op.form_config == {}
+
+
+def test_entity_created_afterwards_carries_the_confirmed_data():
+    from app.workflows.operators.entity_operators import EntityCreationOperator
+    op = EntityCreationOperator(task_id="create_entity", entity_type="document", name_source="Comprobante",
+                                data_mapping={"_extract_extraction": "_extraction"})
+    context = {"user_id": "u1", "collect_document_data": {"files": FILE},
+               "extract_data": {"titular": "ANA", "domicilio": {"codigo_postal": "06700"}},
+               "_extract_doc": {"stage": "review"},
+               "_extract_extraction": {"status": "read", "corrections": ["titular"]}}
+    op.execute(context)
+    params = op._entity_params
+    assert params["data"]["titular"] == "ANA" and params["data"]["domicilio"] == {"codigo_postal": "06700"}
+    assert params["data"]["_extraction"]["corrections"] == ["titular"]
+    assert "stage" not in params["data"]
+    assert "_extraction" not in params["entity_display_config"]["oficio_fields"]

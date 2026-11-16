@@ -16,17 +16,20 @@ the answer into the steps the person sees:
    kept for staff.
 3. **Review.** A form built from the type's schema, filled in with what was
    read, where the person confirms or corrects each value (`review=True`).
-4. **Result.** `<task>_extraction` holds the type, what was read, what the
-   person confirmed, which fields they corrected and the problems found. When
-   the person replaced the file, the new one is published under the field name
-   of `file_source`, so the upload step that follows stores it instead of the
+4. **Result.** `<task>_data` holds the data the person confirmed, like any
+   form, so an entity created afterwards carries it. `_<task>_extraction`
+   keeps the whole record: the type, what was read, what was confirmed, which
+   fields were corrected and the problems found (map it into the entity with
+   `data_mapping={"_<task>_extraction": "_extraction"}`). When the person
+   replaced the file, the new one is published under the field name of
+   `file_source`, so the upload step that follows stores it instead of the
    first one.
 
 When DocumentIA cannot read the document (it failed or took longer than
 `DOCUMENTIA_MAX_WAIT_SECONDS`), the review form is shown empty and the person
 types the data. Without DocumentIA configured the step is skipped.
 
-All the state of an instance lives in its context under `<task>_doc`: one
+All the state of an instance lives in its context under `_<task>_doc`: one
 operator object serves every instance of a workflow.
 """
 import asyncio
@@ -117,7 +120,7 @@ class DocumentInterrogationOperator(BaseOperator):
 
     def polling_config_for(self, context: Dict[str, Any]) -> PollingConfig:
         """Poll only while DocumentIA is reading; a form waits for the person."""
-        stage = (context.get(f"{self.task_id}_doc") or {}).get("stage")
+        stage = (context.get(f"_{self.task_id}_doc") or {}).get("stage")
         return self.get_polling_config() if stage == "reading" else PollingConfig.event_driven()
 
     # --- execution ----------------------------------------------------------
@@ -125,7 +128,7 @@ class DocumentInterrogationOperator(BaseOperator):
         return asyncio.run(self.execute_async(context))
 
     async def execute_async(self, context: Dict[str, Any]) -> TaskResult:
-        doc = dict(context.get(f"{self.task_id}_doc") or {})
+        doc = dict(context.get(f"_{self.task_id}_doc") or {})
         submitted = context.get(f"{self.task_id}_submitted_at")
         answer = context.get(f"{self.task_id}_input") if submitted and submitted != doc.get("consumed") else None
 
@@ -265,7 +268,7 @@ class DocumentInterrogationOperator(BaseOperator):
     # --- what the step returns ------------------------------------------------
     def _reading(self, doc: Dict[str, Any]) -> TaskResult:
         return TaskResult(status=TaskStatus.WAITING, data={
-            f"{self.task_id}_doc": doc,
+            f"_{self.task_id}_doc": doc,
             "waiting_for": "document_reading",
             "message": "Estamos leyendo tu documento. Esto puede tardar unos minutos.",
         })
@@ -274,7 +277,7 @@ class DocumentInterrogationOperator(BaseOperator):
         doc["stage"] = "replace"
         left = self.max_attempts - doc.get("attempts", 1)
         return TaskResult(status=TaskStatus.WAITING, data={
-            f"{self.task_id}_doc": doc,
+            f"_{self.task_id}_doc": doc,
             "waiting_for": "user_input",
             "form_config": {
                 "title": "Necesitamos otro documento",
@@ -313,7 +316,7 @@ class DocumentInterrogationOperator(BaseOperator):
         }
         if errors:
             form["validation_errors"] = errors
-        data = {f"{self.task_id}_doc": doc, "waiting_for": "user_input", "form_config": form}
+        data = {f"_{self.task_id}_doc": doc, "waiting_for": "user_input", "form_config": form}
         if errors:
             data["validation_errors"] = errors
         return TaskResult(status=TaskStatus.WAITING, data=data)
@@ -350,7 +353,9 @@ class DocumentInterrogationOperator(BaseOperator):
         }
 
     def _done(self, extraction: Dict[str, Any], replacement: Optional[List[Dict[str, Any]]] = None) -> TaskResult:
-        data: Dict[str, Any] = {f"{self.task_id}_extraction": extraction, f"{self.task_id}_validated": True}
+        data: Dict[str, Any] = {f"_{self.task_id}_extraction": extraction, f"{self.task_id}_validated": True}
+        if extraction.get("confirmed"):
+            data[f"{self.task_id}_data"] = extraction["confirmed"]
         if replacement:
             # The upload step after this one reads the file by field name; the
             # replacement goes first in its lookup (a top-level context key).
