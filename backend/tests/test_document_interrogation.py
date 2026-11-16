@@ -283,3 +283,11 @@ def test_entity_created_afterwards_carries_the_confirmed_data():
     assert params["data"]["_extraction"]["corrections"] == ["titular"]
     assert "stage" not in params["data"]
     assert "_extraction" not in params["entity_display_config"]["oficio_fields"]
+
+
+def test_data_not_published_when_asked(docia):
+    inst = Instance(_op(review=False, publish_data=False))
+    inst.run()
+    docia.finish("job-1", {"titular": "ANA"})
+    r = inst.run()
+    assert "extract_data" not in r.data and r.data["_extract_extraction"]["confirmed"]["titular"] == "ANA"

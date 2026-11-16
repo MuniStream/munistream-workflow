@@ -82,6 +82,7 @@ class DocumentInterrogationOperator(BaseOperator):
         date_fields: Optional[List[str]] = None,
         required_fields: Optional[List[str]] = None,
         max_attempts: int = 3,
+        publish_data: bool = True,
         **kwargs,
     ):
         """
@@ -99,10 +100,15 @@ class DocumentInterrogationOperator(BaseOperator):
                 `domicilio.codigo_postal`) the person must fill in the review.
             max_attempts: files the person may upload before the data is taken
                 as it is.
+            publish_data: publish the confirmed data as `<task>_data`. Turn it
+                off when a step reads several documents whose fields would
+                collide in the entity, and map `_<task>_extraction.confirmed`
+                explicitly instead.
         """
         super().__init__(task_id=task_id, document_type=document_type, file_source=file_source,
                          review=review, max_age_days=max_age_days, date_fields=date_fields,
-                         required_fields=required_fields, max_attempts=max_attempts, **kwargs)
+                         required_fields=required_fields, max_attempts=max_attempts,
+                         publish_data=publish_data, **kwargs)
         self.document_type = document_type
         self.source_task, _, self.source_field = file_source.partition(".")
         self.review = review
@@ -110,6 +116,7 @@ class DocumentInterrogationOperator(BaseOperator):
         self.date_fields = list(date_fields or DEFAULT_DATE_FIELDS)
         self.required_fields = [f.replace(".", SEPARATOR) for f in (required_fields or [])]
         self.max_attempts = max(1, max_attempts)
+        self.publish_data = publish_data
         # The form is built at run time from the document type; the empty one
         # marks the step as one the person takes part in.
         self.form_config: Dict[str, Any] = {}
@@ -354,7 +361,7 @@ class DocumentInterrogationOperator(BaseOperator):
 
     def _done(self, extraction: Dict[str, Any], replacement: Optional[List[Dict[str, Any]]] = None) -> TaskResult:
         data: Dict[str, Any] = {f"_{self.task_id}_extraction": extraction, f"{self.task_id}_validated": True}
-        if extraction.get("confirmed"):
+        if self.publish_data and extraction.get("confirmed"):
             data[f"{self.task_id}_data"] = extraction["confirmed"]
         if replacement:
             # The upload step after this one reads the file by field name; the
