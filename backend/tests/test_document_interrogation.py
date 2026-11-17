@@ -317,3 +317,24 @@ def test_replacement_published_when_it_cannot_be_read_either(docia):
     r = inst.run()
     assert r.status == TaskStatus.CONTINUE and r.data["_extract_extraction"]["status"] == "skipped"
     assert r.data["files"] == NEW_FILE
+
+
+def test_answers_not_copied_into_the_entity(docia):
+    """What the person typed in the step's forms stays in `_<task>_extraction`;
+    with publish_data=False nothing of it reaches the entity's top level."""
+    from app.workflows.operators.entity_operators import EntityCreationOperator
+    inst = Instance(_op(publish_data=False))
+    inst.run()
+    docia.jobs["job-1"] = {"estado": "hecho", "resultado": {"datos": {}, "problemas": [
+        {"codigo": "no_es_el_tipo", "severidad": "error", "mensaje": "El documento no parece ser: Comprobante."}]}}
+    inst.run()
+    inst.submit({"documento": NEW_FILE})
+    docia.finish("job-2", {"titular": "ANA", "domicilio": {"calle": "ALAMOS"}})
+    form = inst.run().data["form_config"]
+    r = inst.submit(form["initial_values"])
+    assert r.status == TaskStatus.CONTINUE and r.data["_extract_extraction"]["confirmed"]["titular"] == "ANA"
+
+    op = EntityCreationOperator(task_id="create_entity", entity_type="document", name_source="Comprobante")
+    op.execute({"user_id": "u1", **inst.context})
+    data = op._entity_params["data"]
+    assert not {"titular", "domicilio__calle", "documento", "fields", "initial_values"} & set(data)
