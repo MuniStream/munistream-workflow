@@ -66,3 +66,16 @@ def test_constantes_para_el_hijo():
 def test_sin_constantes_no_agrega_nada():
     op = WorkflowStartOperator(task_id="v", workflow_id="w")
     assert "modo_validacion" not in op._prepare_child_context({"instance_id": "p-1"})
+
+
+def test_el_padre_hereda_las_salidas_del_hijo_sin_su_maquinaria():
+    from app.workflows.operators.workflow_start_operator import datos_del_hijo
+
+    hijo = {
+        "validation_decision": "approved", "firmas": [{"task_id": "firma_validacion"}],
+        "form_config": {"title": "Firma"}, "waiting_for": "signature", "signable_data": {"a": 1},
+        "required_fields": ["x"], "form_config_task_id": "explorar", "verify_citizen_data_input": {},
+        "parent_instance_id": "p1", "parent_customer_email": "ana@ejemplo.mx", "child_status": "completed",
+        "created_at": "2026-11-17", "completed_at": "2026-11-17", "instance_id": "h1", "_steps": {},
+    }
+    assert datos_del_hijo(hijo) == {"validation_decision": "approved", "firmas": [{"task_id": "firma_validacion"}]}

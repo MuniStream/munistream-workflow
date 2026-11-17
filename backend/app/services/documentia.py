@@ -23,6 +23,9 @@ import httpx
 from ..core.config import settings
 
 CATALOG_TTL_SECONDS = 600
+# DocumentIA keeps the GPU on for minutes after the last use: asking more often
+# than this does nothing but add calls.
+PREPARE_EVERY_SECONDS = 120
 
 
 class DocumentIAError(Exception):
@@ -37,6 +40,7 @@ class DocumentIAError(Exception):
 
 _token: Dict[str, Any] = {"value": None, "expires": 0.0}
 _catalog: Dict[str, Any] = {"types": None, "expires": 0.0}
+_prepared: Dict[str, float] = {"at": float("-inf")}
 _lock = asyncio.Lock()
 
 
@@ -125,7 +129,23 @@ async def job(job_id: str) -> Dict[str, Any]:
     return await _call("GET", f"/v1/jobs/{job_id}", "DocumentIA job")
 
 
+async def prepare_gpu() -> None:
+    """Ask DocumentIA to turn its GPU on before the document arrives.
+
+    The GPU starts on demand and takes minutes; asked while the person is still
+    filling in the form, it is ready when the file is sent. Best effort: a
+    failure only means the reading waits for the GPU as before."""
+    if not configured() or time.monotonic() - _prepared["at"] < PREPARE_EVERY_SECONDS:
+        return
+    _prepared["at"] = time.monotonic()
+    try:
+        await _call("POST", "/v1/gpu/preparar", "DocumentIA GPU")
+    except DocumentIAError:
+        _prepared["at"] = float("-inf")
+
+
 def reset_cache() -> None:
     """For tests and after a configuration change."""
     _token.update(value=None, expires=0.0)
     _catalog.update(types=None, expires=0.0)
+    _prepared.update(at=float("-inf"))

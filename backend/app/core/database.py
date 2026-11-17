@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from ..core.config import settings
 from ..models.workflow import (
@@ -37,6 +38,14 @@ class Database:
 
 
 database = Database()
+
+
+def _sin_credenciales(url: str) -> str:
+    """La URL de Mongo sin usuario ni contraseña, para el log."""
+    partes = urlsplit(url or "")
+    if "@" not in partes.netloc:
+        return url
+    return urlunsplit(partes._replace(netloc="***@" + partes.netloc.rsplit("@", 1)[1]))
 
 
 async def connect_to_mongo():
@@ -80,7 +89,7 @@ async def connect_to_mongo():
         ]
     )
     
-    print(f"Connected to MongoDB: {settings.MONGODB_URL}")
+    print(f"Connected to MongoDB: {_sin_credenciales(settings.MONGODB_URL)}")
 
 
 async def close_mongo_connection():

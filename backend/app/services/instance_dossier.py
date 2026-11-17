@@ -44,6 +44,22 @@ _LEGACY_TASK_SUFFIXES = ("_input", "_result", "_submitted_at", "_submitted_via",
 
 _MAX_DEPTH = 8
 
+# Lo que no es un dato del trámite sino la maquinaria con que corre: la pantalla
+# que se le está mostrando a alguien, el estado de espera, la asignación de una
+# validación y, en el trámite padre, las referencias que deja cada validación
+# hija. Ningún paso es su dueño (varios lo escriben), así que caía en «Datos
+# generales» y el revisor veía formularios y estados en vez del trámite.
+_MAQUINARIA = frozenset({
+    "form_config", "form_config_task_id", "waiting_for", "validation_errors", "previous_input",
+    "initial_values", "required_fields", "message", "signable_data", "assigned_to", "assignment_status",
+    "elapsed_minutes", "priority", "initiated_by", "created_at", "completed_at",
+})
+_MAQUINARIA_PREFIJOS = ("_", "parent_", "child_")
+
+
+def _es_maquinaria(key: str) -> bool:
+    return key in _MAQUINARIA or key.startswith(_MAQUINARIA_PREFIJOS)
+
 
 def _is_secret(key: str) -> bool:
     if key.lower() in _NO_SON_SECRETO:
@@ -187,7 +203,7 @@ def _curate_flat(context: Dict[str, Any]) -> Dict[str, Any]:
 
         if task:
             by_task.setdefault(task, {})[key] = curated
-        else:
+        elif not _es_maquinaria(key):
             general[key] = curated
 
     return {"by_task": by_task, "general": general, "operators": operators}
