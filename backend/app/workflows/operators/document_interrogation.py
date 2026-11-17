@@ -362,6 +362,12 @@ class DocumentInterrogationOperator(BaseOperator):
     def _done(self, extraction: Dict[str, Any], doc: Optional[Dict[str, Any]] = None) -> TaskResult:
         data: Dict[str, Any] = {f"_{self.task_id}_extraction": extraction, f"{self.task_id}_validated": True}
         replacement = (doc or {}).get("replacement")
+        # An entity created afterwards flattens every dict in the context: the
+        # answers to this step's forms (and the form itself) would reach it as
+        # loose fields. What the person confirmed is in `_<task>_extraction`.
+        data[f"{self.task_id}_input"] = None
+        if (doc or {}).get("consumed"):
+            data.update(form_config=None, validation_errors=None)
         if self.publish_data and extraction.get("confirmed"):
             data[f"{self.task_id}_data"] = extraction["confirmed"]
         if replacement:
