@@ -35,7 +35,7 @@ operator object serves every instance of a workflow.
 import asyncio
 import logging
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .base import BaseOperator, TaskResult, TaskStatus
 from ..polling_strategy import PollingConfig
@@ -242,7 +242,7 @@ class DocumentInterrogationOperator(BaseOperator):
             return self._replace_form(doc, errors)
         doc["unresolved"] = errors
         if not self.review:
-            return self._done(self._extraction(doc, result.get("datos") or {}))
+            return self._done(self._extraction(doc, result.get("datos") or {}), doc)
         doc["stage"] = "review"
         return await self._review_form(doc)
 
@@ -252,9 +252,9 @@ class DocumentInterrogationOperator(BaseOperator):
         try:
             await documentia.document_types()
         except DocumentIAError:
-            return self._done({"status": "skipped", "reason": reason})
+            return self._done({"status": "skipped", "reason": reason}, doc)
         if not self.review:
-            return self._done({"status": "skipped", "reason": reason})
+            return self._done({"status": "skipped", "reason": reason}, doc)
         return await self._review_form(doc)
 
     def _age_errors(self, data: Dict[str, Any]) -> List[str]:
@@ -302,7 +302,7 @@ class DocumentInterrogationOperator(BaseOperator):
             doc_type = (await documentia.document_types())[self.document_type]
         except (DocumentIAError, KeyError) as exc:
             logger.error("%s: no schema for %s: %s", self.task_id, self.document_type, exc)
-            return self._done(self._extraction(doc, (doc.get("result") or {}).get("datos") or {}))
+            return self._done(self._extraction(doc, (doc.get("result") or {}).get("datos") or {}), doc)
         fields = self._fields(doc_type["esquema"])
         read = (doc.get("result") or {}).get("datos") or {}
         notes = [p.get("mensaje") for p in (doc.get("result") or {}).get("problemas") or []
@@ -339,7 +339,7 @@ class DocumentInterrogationOperator(BaseOperator):
             labels = {f["name"]: f["label"] for f in self._fields(schema)}
             return await self._review_form(doc, [f"Falta: {labels.get(n, n)}." for n in missing])
         read = (doc.get("result") or {}).get("datos") or {}
-        return self._done(self._extraction(doc, confirmed, read), doc.get("replacement"))
+        return self._done(self._extraction(doc, confirmed, read), doc)
 
     def _extraction(self, doc: Dict[str, Any], confirmed: Dict[str, Any],
                     read: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -359,8 +359,9 @@ class DocumentInterrogationOperator(BaseOperator):
             "job_id": doc.get("job_id"),
         }
 
-    def _done(self, extraction: Dict[str, Any], replacement: Optional[List[Dict[str, Any]]] = None) -> TaskResult:
+    def _done(self, extraction: Dict[str, Any], doc: Optional[Dict[str, Any]] = None) -> TaskResult:
         data: Dict[str, Any] = {f"_{self.task_id}_extraction": extraction, f"{self.task_id}_validated": True}
+        replacement = (doc or {}).get("replacement")
         if self.publish_data and extraction.get("confirmed"):
             data[f"{self.task_id}_data"] = extraction["confirmed"]
         if replacement:

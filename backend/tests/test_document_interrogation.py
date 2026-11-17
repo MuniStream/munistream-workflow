@@ -291,3 +291,29 @@ def test_data_not_published_when_asked(docia):
     docia.finish("job-1", {"titular": "ANA"})
     r = inst.run()
     assert "extract_data" not in r.data and r.data["_extract_extraction"]["confirmed"]["titular"] == "ANA"
+
+
+def test_replacement_published_without_review(docia):
+    inst = Instance(_op(review=False))
+    inst.run()
+    docia.jobs["job-1"] = {"estado": "hecho", "resultado": {"datos": {}, "problemas": [
+        {"codigo": "no_es_el_tipo", "severidad": "error", "mensaje": "El documento no parece ser: Comprobante."}]}}
+    inst.run()
+    inst.submit({"documento": NEW_FILE})
+    docia.finish("job-2", {"titular": "ANA"})
+    r = inst.run()
+    assert r.status == TaskStatus.CONTINUE
+    assert r.data["files"] == NEW_FILE                               # the upload step stores the new file
+
+
+def test_replacement_published_when_it_cannot_be_read_either(docia):
+    inst = Instance(_op(review=False))
+    inst.run()
+    docia.jobs["job-1"] = {"estado": "hecho", "resultado": {"datos": {}, "problemas": [
+        {"codigo": "no_es_el_tipo", "severidad": "error", "mensaje": "El documento no parece ser: Comprobante."}]}}
+    inst.run()
+    inst.submit({"documento": NEW_FILE})
+    docia.jobs["job-2"] = {"estado": "error", "error": "GPU"}
+    r = inst.run()
+    assert r.status == TaskStatus.CONTINUE and r.data["_extract_extraction"]["status"] == "skipped"
+    assert r.data["files"] == NEW_FILE
