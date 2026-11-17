@@ -40,6 +40,46 @@ def entidades_del_hijo(child_context: Optional[Dict[str, Any]]) -> Dict[str, Any
     }
 
 
+# Lo que se copia del contexto del hijo al padre, SIN arrastrar la
+# maquinaria interna del sub-workflow (formularios, estado de
+# espera, validación, revisión, artefactos de firma…). Si se
+# copia todo, esos campos terminan en el contexto del padre y de
+# ahí en la entidad emitida, ensuciando el documento oficial.
+# Se conservan las salidas que el padre sí puede necesitar
+# (p. ej. `firmas`, decisión/estatus de aprobación).
+_NOISE_KEYS = {
+    'waiting_for', 'form_config', 'description', 'fields', 'message', 'title',
+    'received_data', 'citizen_data', 'documents', 'documents_reviewed',
+    'reviewer', 'validator', 'approver', 'comments', 'comentarios',
+    'decision', 'decisions', 'revision', 'assertions', 'declarations_accepted',
+    'assignment_status', 'assigned_to', 'priority', 'initiated_by', 'all_passed',
+    'elapsed_minutes', 'rewind_count', 'overrides_count', 'total_files',
+    'successful_count', 'failed_count', 'document_prepared', 'document_to_sign',
+    'review_status', 'review_date', 'data_hash', 'tos_hash', 'timestamp', 'status',
+    'signature_purpose', 'signature_type', 'certificado', 'digital_signature',
+    'certificate_field', 'private_key_field', 'password_field', 'signature_field',
+    'required_cert_type', 'numero_tramite', 'signable_data', 'required_fields',
+    'form_config_task_id', 'initial_values', 'validation_errors', 'previous_input',
+    'created_at', 'completed_at',
+}
+_NOISE_PREFIXES = ('_', 'instance', 'workflow', 'task_instance',
+                   'verify_', 'explore_', 'sign_document_', 'parent_', 'child_')
+_NOISE_SUFFIXES = ('_submitted_at', '_input', '_result', '_form_config')
+
+
+def datos_del_hijo(child_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Lo que el padre hereda del contexto de un hijo que terminó: sus salidas
+    (firmas, decisión de la validación), sin su maquinaria interna."""
+    datos: Dict[str, Any] = {}
+    for key, value in (child_context or {}).items():
+        if key.startswith(_NOISE_PREFIXES):
+            continue
+        if key in _NOISE_KEYS or key.endswith(_NOISE_SUFFIXES):
+            continue
+        datos[key] = value
+    return datos
+
+
 class WorkflowStartOperator(BaseOperator):
     """
     Operator for starting child workflows with dynamic assignment.
@@ -789,36 +829,7 @@ class WorkflowStartOperator(BaseOperator):
                         "message": f"Child workflow completed with status {terminal_status}"
                     }
 
-                    # Copy child context data to the parent, pero SIN arrastrar la
-                    # maquinaria interna del sub-workflow (formularios, estado de
-                    # espera, validación, revisión, artefactos de firma…). Si se
-                    # copia todo, esos campos terminan en el contexto del padre y de
-                    # ahí en la entidad emitida, ensuciando el documento oficial.
-                    # Se conservan las salidas que el padre sí puede necesitar
-                    # (p. ej. `firmas`, decisión/estatus de aprobación).
-                    _NOISE_KEYS = {
-                        'waiting_for', 'form_config', 'description', 'fields', 'message', 'title',
-                        'received_data', 'citizen_data', 'documents', 'documents_reviewed',
-                        'reviewer', 'validator', 'approver', 'comments', 'comentarios',
-                        'decision', 'decisions', 'revision', 'assertions', 'declarations_accepted',
-                        'assignment_status', 'assigned_to', 'priority', 'initiated_by', 'all_passed',
-                        'elapsed_minutes', 'rewind_count', 'overrides_count', 'total_files',
-                        'successful_count', 'failed_count', 'document_prepared', 'document_to_sign',
-                        'review_status', 'review_date', 'data_hash', 'tos_hash', 'timestamp', 'status',
-                        'signature_purpose', 'signature_type', 'certificado', 'digital_signature',
-                        'certificate_field', 'private_key_field', 'password_field', 'signature_field',
-                        'required_cert_type', 'numero_tramite',
-                    }
-                    _NOISE_PREFIXES = ('_', 'instance', 'workflow', 'task_instance',
-                                       'verify_', 'explore_', 'sign_document_')
-                    _NOISE_SUFFIXES = ('_submitted_at', '_input', '_result', '_form_config')
-                    if child.context:
-                        for key, value in child.context.items():
-                            if key.startswith(_NOISE_PREFIXES):
-                                continue
-                            if key in _NOISE_KEYS or key.endswith(_NOISE_SUFFIXES):
-                                continue
-                            child_data[key] = value
+                    child_data.update(datos_del_hijo(child.context))
 
                     task_result = TaskResult(
                         status=TaskStatus.CONTINUE,

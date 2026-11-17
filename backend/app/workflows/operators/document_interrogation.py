@@ -242,7 +242,7 @@ class DocumentInterrogationOperator(BaseOperator):
             return self._replace_form(doc, errors)
         doc["unresolved"] = errors
         if not self.review:
-            return self._done(self._extraction(doc, result.get("datos") or {}), doc)
+            return self._done(self._extraction(doc, result.get("datos") or {}, labels=await self._labels()), doc)
         doc["stage"] = "review"
         return await self._review_form(doc)
 
@@ -339,14 +339,22 @@ class DocumentInterrogationOperator(BaseOperator):
             labels = {f["name"]: f["label"] for f in self._fields(schema)}
             return await self._review_form(doc, [f"Falta: {labels.get(n, n)}." for n in missing])
         read = (doc.get("result") or {}).get("datos") or {}
-        return self._done(self._extraction(doc, confirmed, read), doc)
+        return self._done(self._extraction(doc, confirmed, read, reviewed=True,
+                                           labels=self._labels_of(schema)), doc)
 
     def _extraction(self, doc: Dict[str, Any], confirmed: Dict[str, Any],
-                    read: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    read: Optional[Dict[str, Any]] = None, reviewed: bool = False,
+                    labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """The record staff see. `reviewed` says whether the person saw and
+        confirmed the data (a step with `review=False` never shows it to them);
+        `labels` are the field titles of the type, so the dossier does not show
+        internal names."""
         result = doc.get("result") or {}
         read = read if read is not None else (result.get("datos") or {})
         return {
             "status": "manual" if doc.get("manual") else "read",
+            "reviewed": reviewed,
+            "labels": labels or {},
             "type": self.document_type,
             "version": result.get("version"),
             "extracted": read,
@@ -375,6 +383,25 @@ class DocumentInterrogationOperator(BaseOperator):
             # replacement goes first in its lookup (a top-level context key).
             data[self.source_field] = replacement if len(replacement) > 1 else replacement[0]
         return TaskResult(status=TaskStatus.CONTINUE, data=data)
+
+    async def _labels(self) -> Dict[str, str]:
+        try:
+            return self._labels_of((await documentia.document_types())[self.document_type]["esquema"])
+        except (DocumentIAError, KeyError):
+            return {}
+
+    @staticmethod
+    def _labels_of(schema: Dict[str, Any]) -> Dict[str, str]:
+        """`{field: title}` of the type, dotted for what is nested
+        (`domicilio.calle`, `apoderados.nombre`)."""
+        labels: Dict[str, str] = {}
+        for name, sub in (schema.get("properties") or {}).items():
+            sub = _nullable(sub)
+            labels[name] = sub.get("title") or _label(name)
+            children = sub.get("properties") or _nullable(sub.get("items") or {}).get("properties") or {}
+            for child, child_schema in children.items():
+                labels[f"{name}.{child}"] = _nullable(child_schema).get("title") or _label(child)
+        return labels
 
     # --- schema ↔ form ------------------------------------------------------
     @staticmethod

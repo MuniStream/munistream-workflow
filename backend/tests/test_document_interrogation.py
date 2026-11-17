@@ -338,3 +338,21 @@ def test_answers_not_copied_into_the_entity(docia):
     op.execute({"user_id": "u1", **inst.context})
     data = op._entity_params["data"]
     assert not {"titular", "domicilio__calle", "documento", "fields", "initial_values"} & set(data)
+
+
+def test_the_record_says_whether_the_person_reviewed_it_and_carries_titles(docia):
+    inst = Instance(_op())
+    inst.run()
+    docia.finish("job-1", {"titular": "ANA", "domicilio": {"calle": "REFORMA 1"}})
+    form = inst.run().data["form_config"]
+    record = inst.submit(form["initial_values"]).data["_extract_extraction"]
+    assert record["reviewed"] is True
+    assert record["labels"]["titular"] == "Titular"
+    assert record["labels"]["domicilio.calle"] == "Calle" and record["labels"]["regimenes.clave"] == "Clave"
+
+    # Without review the person never saw the data: the dossier must not say they confirmed it.
+    inst = Instance(_op(review=False))
+    inst.run()
+    docia.finish("job-2", {"titular": "ANA"})
+    record = inst.run().data["_extract_extraction"]
+    assert record["reviewed"] is False and record["labels"]["titular"] == "Titular"

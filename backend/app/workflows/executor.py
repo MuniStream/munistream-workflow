@@ -83,6 +83,42 @@ class ExecutorStatus(str, Enum):
     STOPPED = "stopped"
 
 
+_preparando_gpu: set = set()
+
+
+def _lectura_por_venir(dag_instance, task_id: str, task, output: Optional[dict]) -> bool:
+    """El paso espera a la persona y lo que sigue lee un documento con DocumentIA:
+    el formulario donde lo sube, o la propia lectura pidiéndole otro."""
+    from .operators.document_interrogation import DocumentInterrogationOperator
+
+    if (output or {}).get("waiting_for") != "user_input":
+        return False
+    if isinstance(task, DocumentInterrogationOperator):
+        return True
+    grafo = getattr(getattr(dag_instance, "dag", None), "graph", None)
+    tareas = getattr(getattr(dag_instance, "dag", None), "tasks", {}) or {}
+    if grafo is None or task_id not in grafo:
+        return False
+    return any(isinstance(tareas.get(siguiente), DocumentInterrogationOperator)
+               for siguiente in grafo.successors(task_id))
+
+
+def _preparar_gpu_si_hace_falta(dag_instance, task_id: str, task, output: Optional[dict]) -> None:
+    """Pide a DocumentIA que encienda la GPU mientras la persona llena el
+    formulario: arrancarla tarda minutos y, si se espera a que llegue el
+    documento, la persona espera ese arranque."""
+    try:
+        if not _lectura_por_venir(dag_instance, task_id, task, output):
+            return
+        from ..services import documentia
+
+        tarea = asyncio.get_running_loop().create_task(documentia.prepare_gpu())
+        _preparando_gpu.add(tarea)
+        tarea.add_done_callback(_preparando_gpu.discard)
+    except Exception as exc:  # nunca debe frenar el trámite
+        logger.warning("No se pudo pedir la GPU de DocumentIA: %s", exc)
+
+
 def _registrar_paso(dag_instance, task_id: str, task, output: dict) -> None:
     """Anota que operador produjo esta salida y con que claves.
 
@@ -555,6 +591,7 @@ class DAGExecutor:
                     _registrar_paso(dag_instance, task_id, task, output)
                 from ..services.step_form import record_form_owner
                 record_form_owner(dag_instance.context, task_id, output)
+                _preparar_gpu_si_hace_falta(dag_instance, task_id, task, output)
 
                 # Ensure output_data is available in task_states for tracking endpoint
                 if hasattr(task, 'state') and task.state.output_data:
