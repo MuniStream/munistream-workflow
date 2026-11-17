@@ -13,6 +13,20 @@ from ...services.visualizers.visualizer_factory import VisualizerFactory
 from ...services.entity_naming import resolver_nombre
 
 
+# Keys a waiting step leaves in the context to drive its form. They describe the
+# screen, not the trámite: flattening `form_config` copied the form's `fields`,
+# `title` and `description` into every entity created afterwards.
+FORM_RUNTIME_KEYS = frozenset({
+    "form_config",
+    "form_config_task_id",
+    "waiting_for",
+    "validation_errors",
+    "previous_input",
+    "initial_values",
+    "required_fields",
+})
+
+
 def _resolve_context_path(context: Any, path: str) -> Any:
     """Resolve a dot-path against context.
 
@@ -298,6 +312,9 @@ class EntityCreationOperator(BaseOperator):
 
         # Skip blacklisted fields
         if field_name in self.field_blacklist:
+            return False
+
+        if field_name in FORM_RUNTIME_KEYS:
             return False
 
         return True
