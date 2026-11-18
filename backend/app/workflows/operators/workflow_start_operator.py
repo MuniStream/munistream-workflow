@@ -67,6 +67,16 @@ _NOISE_PREFIXES = ('_', 'instance', 'workflow', 'task_instance',
 _NOISE_SUFFIXES = ('_submitted_at', '_input', '_result', '_form_config')
 
 
+def mensaje_de_vencimiento(paso: str, minutos: int) -> str:
+    """Lo que lee el ciudadano cuando el paso que espera a otro flujo se vence.
+    Antes era «Timeout waiting for child workflow after 1440 minutes», y como
+    además no llegaba al seguimiento, el trámite se veía fallido sin explicación."""
+    horas = minutos / 60
+    plazo = f"{horas:g} horas" if horas < 48 or horas % 24 else f"{horas / 24:g} días"
+    return (f"«{paso}» no se completó en el plazo de {plazo}. El trámite se cerró sin resolverse; "
+            "puedes iniciarlo de nuevo.")
+
+
 def datos_del_hijo(child_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Lo que el padre hereda del contexto de un hijo que terminó: sus salidas
     (firmas, decisión de la validación), sin su maquinaria interna."""
@@ -380,6 +390,13 @@ class WorkflowStartOperator(BaseOperator):
                     "workflow_id": self.workflow_id
                 }
             )
+
+    def _cancelar_hijo_vencido(self) -> None:
+        try:
+            from ...services.workflow_service import workflow_service
+            workflow_service.executor.cancel_instance(self.child_instance_id)
+        except Exception as exc:  # no debe ocultar el vencimiento del padre
+            logger.warning(f"No se pudo cancelar el flujo hijo vencido {self.child_instance_id}: {exc}")
 
     def _prepare_child_context(self, parent_context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -779,11 +796,16 @@ class WorkflowStartOperator(BaseOperator):
             elapsed_minutes = (datetime.utcnow() - self.start_time).total_seconds() / 60
             if elapsed_minutes > self.timeout_minutes:
                 logger.warning(f"Child workflow timed out")
+                # El hijo (p. ej. la validación que espera a un revisor) ya no le
+                # sirve a nadie: sin cancelarlo se quedaba en la bandeja del
+                # revisor apuntando a un trámite muerto.
+                self._cancelar_hijo_vencido()
+                motivo = mensaje_de_vencimiento(self.name or self.task_id, self.timeout_minutes)
                 return TaskResult(
                     status=TaskStatus.FAILED,
-                    error=f"Timeout waiting for child workflow after {self.timeout_minutes} minutes",
+                    error=motivo,
                     data={
-                        "error": f"Timeout waiting for child workflow after {self.timeout_minutes} minutes",
+                        "error": motivo,
                         "child_workflow_id": self.child_instance_id,
                         "child_status": child.status,
                         "elapsed_minutes": elapsed_minutes

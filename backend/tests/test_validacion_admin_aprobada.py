@@ -56,3 +56,30 @@ def test_todo_fallo_declara_su_causa():
     assert con_causa >= fallos, (
         f"{fallos} retornos FAILED pero solo {con_causa} declaran `error=`"
     )
+
+
+def test_el_vencimiento_se_explica_al_ciudadano():
+    from app.workflows.operators.workflow_start_operator import mensaje_de_vencimiento
+
+    assert mensaje_de_vencimiento("Validación Administrativa", 1440) == (
+        "«Validación Administrativa» no se completó en el plazo de 24 horas. El trámite se cerró sin "
+        "resolverse; puedes iniciarlo de nuevo.")
+    assert "2 días" in mensaje_de_vencimiento("Validación", 2880)
+    assert "4 días" in mensaje_de_vencimiento("Validación", 5760)
+    assert "1.5 horas" in mensaje_de_vencimiento("Validación", 90)
+
+
+def test_el_vencimiento_cancela_al_hijo(monkeypatch):
+    from app.services import workflow_service as servicio
+
+    cancelados = []
+
+    class Ejecutor:
+        def cancel_instance(self, instance_id):
+            cancelados.append(instance_id)
+
+    monkeypatch.setattr(servicio.workflow_service, "executor", Ejecutor(), raising=False)
+    op = _operador()
+    op.child_instance_id = "hijo-1"
+    op._cancelar_hijo_vencido()
+    assert cancelados == ["hijo-1"]

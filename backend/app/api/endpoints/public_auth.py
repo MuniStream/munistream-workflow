@@ -636,6 +636,16 @@ async def track_instance(
             if estado.get("status") == "failed" and estado.get("error"):
                 error_message = str(estado["error"])
                 break
+    if db_instance.status == "failed" and not error_message:
+        # El estado del paso no siempre conserva la causa (un paso que espera y
+        # falla al reevaluarse por sondeo, como el vencimiento de una
+        # validación); el registro de ejecuciones sí la guarda.
+        from ...models.workflow import StepExecution
+        fallida = await StepExecution.find(
+            StepExecution.instance_id == instance_id, StepExecution.status == "failed",
+        ).sort(-StepExecution.completed_at).first_or_none()
+        if fallida and fallida.error_message:
+            error_message = fallida.error_message
 
     return {
         "instance_id": instance_id,
