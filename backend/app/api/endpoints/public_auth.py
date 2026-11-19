@@ -667,6 +667,9 @@ async def track_instance(
         "emitted_entities": emitted_entities,
         "estimated_completion": None,
         "error_message": error_message,
+        # Folio oficial de seguimiento (lo emite el FolioGeneratorOperator y se
+        # persiste en el context). None mientras el trámite no lo haya generado.
+        "folio": ((dag_instance.context if dag_instance else None) or db_instance.context or {}).get("folio_seguimiento"),
         **desenlace_publico(db_instance),
         "message": f"Workflow {db_instance.status}"
     }

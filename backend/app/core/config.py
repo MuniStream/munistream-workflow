@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     TESSERACT_CMD: Optional[str] = None  # Path to tesseract executable
     OCR_LANGUAGES: str = "eng+spa"  # English and Spanish
 
+    # Folio oficial de seguimiento (FolioGeneratorOperator): secreto para el
+    # verificador HMAC del folio. Sin él, el operador falla a propósito en vez
+    # de emitir un folio no verificable/adivinable.
+    FOLIO_HMAC_SECRET: Optional[str] = None
+
     # Notifications
     REDIS_URL: str = "redis://redis:6379"
     NOTIFICATION_SECRET_KEY: Optional[str] = None
