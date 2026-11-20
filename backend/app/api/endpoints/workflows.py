@@ -201,6 +201,7 @@ async def get_workflow(workflow_id: str):
             if task is not None:
                 step.operator_config = workflow_service.describe_operator(task)
 
+    response.step_count = len(dag.tasks) if dag else len(response.steps)
     return response
 
 

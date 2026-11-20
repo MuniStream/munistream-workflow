@@ -21,9 +21,6 @@ from .api_client import RealApiClient, AuthTokens
 
     # Performance endpoints
     "/performance/health",
-    "/performance/stats",
-    "/performance/workflows",
-    "/performance/steps",
 
     # Workflow endpoints
     "/workflows",
@@ -53,7 +50,10 @@ class TestAllPublicEndpoints:
     "/instances",
     "/teams",
     "/admin/stats",
-    "/admin/pending-approvals",
+    "/admin/dashboard",
+    "/performance/stats",
+    "/performance/workflows",
+    "/performance/steps",
     "/entities/validate",
     "/entities/auto-complete",
     "/entities/types",
@@ -78,6 +78,7 @@ class TestAllAuthenticatedEndpoints:
     "/workflows",
     "/instances",
     "/admin/stats",
+    "/admin/dashboard",
     "/performance/stats",
     "/entities/types",
     "/categories",
