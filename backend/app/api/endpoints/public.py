@@ -110,14 +110,19 @@ async def rewind_instance(
 
 @router.post("/instances/{instance_id}/submit-data")
 async def submit_data(
-    instance_id: str, 
+    instance_id: str,
     request: Request,
+    client_submission_id: Optional[str] = Query(None, max_length=64),
     current_customer: Customer = Depends(get_current_customer)
 ):
     """
     Submit data for a workflow waiting for input.
     Simple: Get data, save to context, resume execution.
     Requires authentication.
+
+    `client_submission_id` (offline outbox of the portal) makes the call
+    idempotent: a replay of a submission already received is answered as
+    such and not processed again.
     """
     # Get database instance
     db_instance = await WorkflowInstance.find_one(
@@ -125,9 +130,39 @@ async def submit_data(
     )
     if not db_instance:
         raise HTTPException(status_code=404, detail="Instance not found")
-    
+
     require_instance_owner(db_instance, current_customer)
-    
+
+    registro = None
+    if client_submission_id:
+        from pymongo.errors import DuplicateKeyError
+        from ...models.envio_cliente import EnvioCliente
+
+        registro = EnvioCliente(
+            client_submission_id=client_submission_id,
+            instance_id=instance_id,
+            task_id=db_instance.current_step or "",
+        )
+        try:
+            await registro.insert()
+        except DuplicateKeyError:
+            return {
+                "success": True,
+                "message": "Submission already received",
+                "instance_id": instance_id,
+                "duplicate": True,
+            }
+
+    try:
+        return await _procesar_envio(instance_id, request, db_instance)
+    except BaseException:
+        # Not processed: the client may retry with the same id.
+        if registro is not None:
+            await registro.delete()
+        raise
+
+
+async def _procesar_envio(instance_id: str, request: Request, db_instance) -> Dict[str, Any]:
     # Get DAG instance
     dag_instance = await workflow_service.get_instance(instance_id)
     if not dag_instance:
