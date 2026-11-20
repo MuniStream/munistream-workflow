@@ -639,5 +639,7 @@ async def get_semaforo(
         -((i["plazo"] or {}).get("avance") or 0),
         -(i["permanencia_horas"] or 0),
     ))
-    return {"resumen": conteo, "items": items, "generado": datetime.utcnow()}
+    from ...core.fechas import utc_aware
+
+    return utc_aware({"resumen": conteo, "items": items, "generado": datetime.utcnow()})
 

@@ -66,6 +66,7 @@ class Settings(BaseSettings):
 
     # Tenant Configuration
     TENANT_ID: Optional[str] = None  # Multi-tenant identifier
+    ADMIN_BASE_URL: Optional[str] = None  # Admin portal URL for links in staff emails
     TENANT_NAME: Optional[str] = None  # Display name, e.g. signs citizen notifications
     # Directorio de las bitácoras de inicio de sesión (<user_id>.log); sin valor no se escriben
     LOGIN_LOG_DIR: Optional[str] = None

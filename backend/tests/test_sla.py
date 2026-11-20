@@ -129,3 +129,13 @@ def test_p95_exige_muestra_minima():
     assert _p95([1, 2, 3, 4]) is None
     assert _p95([1, 2, 3, 4, 100]) == 100
     assert _p95(list(range(1, 101))) == 95
+
+
+def test_dias_se_cuentan_en_calendario_de_mexico():
+    # Submitted Mon 21:00 in Mexico City (Tue 03:00 UTC); by Tue 14:00 local
+    # one business day has passed, though both instants are Tuesday in UTC.
+    presentado = datetime(2026, 11, 17, 3, 0)
+    r = evaluar_plazo(presentado, (21, True), ahora=datetime(2026, 11, 17, 20, 0))
+    assert r["dias_transcurridos"] == 1
+    # And the due date is 21 business days after Monday 16 Nov (local).
+    assert (r["fecha_compromiso"] - timedelta(hours=6)).date() == datetime(2026, 12, 15).date()

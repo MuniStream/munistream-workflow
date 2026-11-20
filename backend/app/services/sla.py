@@ -29,6 +29,11 @@ from .estado_instancia import estado_efectivo
 COLORES = ("verde", "amarillo", "rojo")
 _RANK = {None: -1, "verde": 0, "amarillo": 1, "rojo": 2}
 
+# Business days are counted on the local calendar (Mexico City, UTC-6 all year
+# since 2022): a request submitted on Friday night local time must not count
+# from Saturday because it is already Saturday in UTC.
+TZ_OFFSET = timedelta(hours=float(os.getenv("SLA_TZ_OFFSET_HOURS", "-6")))
+
 # Fraction of the legal term after which a procedure turns amber.
 UMBRAL_AMARILLO = float(os.getenv("SLA_UMBRAL_AMARILLO", "0.7"))
 
@@ -110,10 +115,11 @@ def evaluar_plazo(
     dias_plazo, habiles = plazo
     ahora = ahora or datetime.utcnow()
     corte = resuelto_en or pausado_desde or ahora
-    transcurridos = contar_dias_habiles(presentado, corte, habiles)
+    transcurridos = contar_dias_habiles(presentado + TZ_OFFSET, corte + TZ_OFFSET, habiles)
+    local = presentado + TZ_OFFSET
     compromiso = (
-        sumar_dias_habiles(presentado, dias_plazo) if habiles else presentado + timedelta(days=dias_plazo)
-    )
+        sumar_dias_habiles(local, dias_plazo) if habiles else local + timedelta(days=dias_plazo)
+    ) - TZ_OFFSET
     avance = transcurridos / dias_plazo
     return {
         "fecha_presentacion": presentado,
@@ -388,5 +394,7 @@ def vista_ciudadano(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 async def plazos_de_ciudadano(instance_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    from ..core.fechas import utc_aware
+
     items = await semaforo(instance_ids=instance_ids, incluir_en_captura=True)
-    return {i["instance_id"]: vista_ciudadano(i) for i in items}
+    return {i["instance_id"]: utc_aware(vista_ciudadano(i)) for i in items}
