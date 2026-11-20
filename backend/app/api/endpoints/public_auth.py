@@ -670,6 +670,7 @@ async def track_instance(
         # Folio oficial de seguimiento (lo emite el FolioGeneratorOperator y se
         # persiste en el context). None mientras el trámite no lo haya generado.
         "folio": ((dag_instance.context if dag_instance else None) or db_instance.context or {}).get("folio_seguimiento"),
+        "plazo": (await _plazo_de(db_instance.instance_id)),
         **desenlace_publico(db_instance),
         "message": f"Workflow {db_instance.status}"
     }
@@ -690,6 +691,9 @@ async def get_customer_instances(
 
     # Get workflow definitions for names
     from ...services.workflow_service import workflow_service
+    from ...services.sla import plazos_de_ciudadano
+
+    plazos = await plazos_de_ciudadano([i.instance_id for i in instances])
 
     return {
         "instances": [
@@ -704,6 +708,10 @@ async def get_customer_instances(
                 "updated_at": inst.updated_at,
                 "completed_at": inst.completed_at,
                 **desenlace_publico(inst),
+                # Official tracking folio and legal term, so the citizen can
+                # search their requests and see when a resolution is due.
+                "folio": (inst.context or {}).get("folio_seguimiento"),
+                "plazo": plazos.get(inst.instance_id),
                 # Only include essential context data, not the full context object
                 "progress_percentage": _calculate_progress_percentage(inst)
             }
@@ -711,6 +719,12 @@ async def get_customer_instances(
         ],
         "total": len(instances)
     }
+
+
+async def _plazo_de(instance_id: str) -> Optional[Dict[str, Any]]:
+    from ...services.sla import plazos_de_ciudadano
+
+    return (await plazos_de_ciudadano([instance_id])).get(instance_id)
 
 
 def desenlace_publico(instance) -> Dict[str, Optional[str]]:

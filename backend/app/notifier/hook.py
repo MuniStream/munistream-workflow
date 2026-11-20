@@ -317,7 +317,11 @@ class NotificationDispatcher:
                 "id": step_id or "",
                 "nombre": (step.name if step else None) or step_id or "",
             },
-            "url_tramite": f"{base_url}/instances/{event.instance_id}" if base_url and event.instance_id else "",
+            "url_tramite": (
+                f"{base_url}/ayuda/{event.instance_id}"
+                if _event_type_value(event) == EventType.SUPPORT_REPLIED.value
+                else f"{base_url}/instances/{event.instance_id}"
+            ) if base_url and event.instance_id else "",
             "resultado": {
                 "codigo": outcome,
                 "rechazado": outcome == RECHAZADO,

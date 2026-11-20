@@ -24,6 +24,7 @@ from ..models.legal_entity import EntityType, LegalEntity
 from ..models.catalog import Catalog, CatalogData, CatalogRow
 from ..models.profile_field_definition import ProfileFieldDefinition
 from ..models.user_profile import UserProfile
+from ..models.atencion import Feedback, SolicitudAtencion
 from ..notifier.models import (
     NotificationChannelConfig,
     NotificationTemplate,
@@ -82,6 +83,8 @@ async def connect_to_mongo():
             CatalogRow,
             ProfileFieldDefinition,
             UserProfile,
+            Feedback,
+            SolicitudAtencion,
             NotificationChannelConfig,
             NotificationTemplate,
             NotificationTrigger,

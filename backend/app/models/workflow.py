@@ -57,6 +57,8 @@ class EventType(str, Enum):
     APPROVAL_COMPLETED = "approval_completed"
     STEP_ADVANCED = "step_advanced"
     MODIFICATION_REQUESTED = "modification_requested"
+    # Not a workflow lifecycle event: staff answered a citizen support request.
+    SUPPORT_REPLIED = "support_replied"
 
 
 class WorkflowHook(Document):
