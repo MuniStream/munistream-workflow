@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...auth.provider import require_permission
+from ...core.fechas import utc_aware
 from ...models.atencion import (
     CategoriaAtencion,
     EstadoAtencion,
@@ -175,7 +176,7 @@ async def indicadores_publicos(meses: int = Query(12, ge=1, le=24)):
     hit = _cache.get(clave)
     if hit and time.monotonic() - hit[0] < _CACHE_TTL:
         return hit[1]
-    datos = await _calcular_indicadores(meses)
+    datos = utc_aware(await _calcular_indicadores(meses))
     _cache[clave] = (time.monotonic(), datos)
     return datos
 
@@ -188,12 +189,12 @@ class FeedbackIn(BaseModel):
 
 
 def _feedback_out(f: Feedback) -> Dict[str, Any]:
-    return {
+    return utc_aware({
         "instance_id": f.instance_id,
         "calificacion": f.calificacion,
         "comentario": f.comentario,
         "created_at": f.created_at,
-    }
+    })
 
 
 async def _instancia_propia(instance_id: str, customer: Customer) -> WorkflowInstance:
@@ -279,7 +280,7 @@ def _folio_atencion() -> str:
 
 
 def _solicitud_out(s: SolicitudAtencion, nombres: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    return {
+    return utc_aware({
         "solicitud_id": s.solicitud_id,
         "folio": s.folio,
         "asunto": s.asunto,
@@ -293,7 +294,7 @@ def _solicitud_out(s: SolicitudAtencion, nombres: Optional[Dict[str, str]] = Non
         "updated_at": s.updated_at,
         "primera_respuesta_at": s.primera_respuesta_at,
         "solicitante": (nombres or {}).get(s.customer_id),
-    }
+    })
 
 
 async def _solicitud_propia(solicitud_id: str, customer: Customer) -> SolicitudAtencion:
@@ -454,7 +455,8 @@ async def responder_como_personal(
     return _solicitud_out(s, await _nombres_de([s.customer_id]))
 
 
-@admin_router.patch("/atencion/{solicitud_id}")
+# POST and not PATCH: the platform's nginx CORS policy allows GET/POST/PUT/DELETE.
+@admin_router.post("/atencion/{solicitud_id}/estado")
 async def actualizar_atencion(
     solicitud_id: str,
     body: CambioSolicitud,

@@ -25,6 +25,7 @@ from ..models.catalog import Catalog, CatalogData, CatalogRow
 from ..models.profile_field_definition import ProfileFieldDefinition
 from ..models.user_profile import UserProfile
 from ..models.atencion import Feedback, SolicitudAtencion
+from ..models.reportes import AlertaSemaforo, ConfiguracionReportes, ReporteDesempeno
 from ..notifier.models import (
     NotificationChannelConfig,
     NotificationTemplate,
@@ -85,6 +86,9 @@ async def connect_to_mongo():
             UserProfile,
             Feedback,
             SolicitudAtencion,
+            ReporteDesempeno,
+            ConfiguracionReportes,
+            AlertaSemaforo,
             NotificationChannelConfig,
             NotificationTemplate,
             NotificationTrigger,

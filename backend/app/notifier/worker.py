@@ -231,8 +231,25 @@ _RESTART_DELAY_SECONDS = 5
 def _build_worker():
     from arq.worker import Worker
 
+    from arq import cron
+
+    from ..services.reportes import (
+        cron_alertas_semaforo,
+        cron_reporte_mensual,
+        cron_reporte_semanal,
+    )
+
+    # Times in UTC; Mexico City is UTC-6 all year. Mondays 07:00 weekly report,
+    # day 1 07:15 monthly report, weekdays 08:00 traffic-light alerts.
+    cron_jobs = [
+        cron(cron_reporte_semanal, weekday="mon", hour=13, minute=0, unique=True, timeout=600),
+        cron(cron_reporte_mensual, day=1, hour=13, minute=15, unique=True, timeout=900),
+        cron(cron_alertas_semaforo, weekday={0, 1, 2, 3, 4}, hour=14, minute=0, unique=True, timeout=300),
+    ]
+
     return Worker(
         functions=[send_notification],
+        cron_jobs=cron_jobs,
         redis_settings=_redis_settings(),
         queue_name=queue_name(),
         max_tries=settings.NOTIFICATION_MAX_ATTEMPTS + 1,
