@@ -10,6 +10,7 @@ from .approval import ApprovalOperator, ConditionalApprovalOperator
 from .external_api import ExternalAPIOperator, HTTPOperator
 from .airflow_operator import AirflowOperator
 from .s3_upload import S3UploadOperator
+from .folio_generator import FolioGeneratorOperator
 from .entity_operators import (
     EntityCreationOperator,
     EntityUpdateOperator,
@@ -58,6 +59,9 @@ __all__ = [
 
     # Storage operators
     "S3UploadOperator",
+
+    # Folio operators
+    "FolioGeneratorOperator",
 
     # Entity operators
     "EntityCreationOperator",
