@@ -164,6 +164,39 @@ _MODIFICACIONES_EN_WA = _whatsapp(
 )
 
 
+# Support requests: event_data carries `folio` and `asunto`.
+_ATENCION_ES_EMAIL = _email(
+    subject="Respuesta a su solicitud de atención {{ evento.datos.folio }}",
+    body=(
+        "Estimado(a) {{ ciudadano.nombre }}:\n\n"
+        "Su solicitud de atención \"{{ evento.datos.asunto }}\" (folio "
+        "{{ evento.datos.folio }}) recibió una respuesta.\n\n"
+        "{% if url_tramite %}Consúltela en: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
+    ),
+)
+_ATENCION_ES_WA = _whatsapp(
+    "Estimado(a) {{ ciudadano.nombre }}: su solicitud de atención \"{{ evento.datos.asunto }}\" "
+    "(folio {{ evento.datos.folio }}) recibió una respuesta."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
+)
+_ATENCION_EN_EMAIL = _email(
+    subject="Reply to your support request {{ evento.datos.folio }}",
+    body=(
+        "Dear {{ ciudadano.nombre }}:\n\n"
+        "Your support request \"{{ evento.datos.asunto }}\" (reference "
+        "{{ evento.datos.folio }}) received a reply.\n\n"
+        "{% if url_tramite %}Read it at: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
+    ),
+)
+_ATENCION_EN_WA = _whatsapp(
+    "Dear {{ ciudadano.nombre }}: your support request \"{{ evento.datos.asunto }}\" "
+    "(reference {{ evento.datos.folio }}) received a reply."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
+)
+
+
 _DOCUMENTOS_ES = (
     "{% if documentos %}"
     "{% if adjuntos %}Se adjunta{% if documentos|length > 1 %}n los documentos emitidos{% else %} el documento emitido{% endif %}:"
@@ -369,6 +402,25 @@ SYSTEM_NOTIFICATIONS: List[SystemNotification] = [
             ("es", NotificationChannel.WHATSAPP): _ENTIDAD_ES_WA,
             ("en", NotificationChannel.EMAIL): _ENTIDAD_EN_EMAIL,
             ("en", NotificationChannel.WHATSAPP): _ENTIDAD_EN_WA,
+        },
+    ),
+    SystemNotification(
+        key="atencion_respondida",
+        event_type=EventType.SUPPORT_REPLIED,
+        title_i18n={
+            "es": "Respuesta a solicitud de atención",
+            "en": "Support request reply",
+        },
+        description_i18n={
+            "es": "Aviso cuando el personal responde una solicitud de atención que usted levantó.",
+            "en": "Notice when staff reply to a support request you opened.",
+        },
+        default_channels=_BOTH_CHANNELS,
+        templates={
+            ("es", NotificationChannel.EMAIL): _ATENCION_ES_EMAIL,
+            ("es", NotificationChannel.WHATSAPP): _ATENCION_ES_WA,
+            ("en", NotificationChannel.EMAIL): _ATENCION_EN_EMAIL,
+            ("en", NotificationChannel.WHATSAPP): _ATENCION_EN_WA,
         },
     ),
 ]

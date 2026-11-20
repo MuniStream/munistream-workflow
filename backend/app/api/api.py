@@ -2,15 +2,18 @@ from fastapi import APIRouter
 
 from .endpoints import workflows, instances, admin, auth_keycloak, public, plugins, categories, teams, assignments, admin_users, admin_teams, admin_sync, signatures, verify, wallet, catalogs, admin_catalogs, files, notifications, me, me_profile, admin_profile_fields
 from .v1 import performance, entities
+from .endpoints import atencion
 
 api_router = APIRouter()
 
 api_router.include_router(auth_keycloak.router, prefix="/auth", tags=["authentication"])
 api_router.include_router(public.router, prefix="/public", tags=["public"])
+api_router.include_router(atencion.public_router, prefix="/public", tags=["citizen-service"])
 api_router.include_router(verify.router, prefix="/verify", tags=["verification"])
 api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])
 api_router.include_router(instances.router, prefix="/instances", tags=["instances"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(atencion.admin_router, prefix="/admin", tags=["citizen-service"])
 api_router.include_router(plugins.router, prefix="/plugins", tags=["plugins"])
 api_router.include_router(categories.router, prefix="/categories", tags=["categories"])
 api_router.include_router(teams.router, prefix="/teams", tags=["teams"])

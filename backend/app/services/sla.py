@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .entity_validity import sumar_dias_habiles
+from .estado_instancia import estado_efectivo
 
 COLORES = ("verde", "amarillo", "rojo")
 _RANK = {None: -1, "verde": 0, "amarillo": 1, "rojo": 2}
@@ -212,11 +213,16 @@ async def semaforo(
     workflow_id: Optional[str] = None,
     incluir_resueltos_desde: Optional[datetime] = None,
     ahora: Optional[datetime] = None,
+    instance_ids: Optional[List[str]] = None,
+    incluir_en_captura: bool = False,
 ) -> List[Dict[str, Any]]:
     """Evaluate every citizen procedure that has entered review.
 
     Open procedures always; resolved ones only if `incluir_resueltos_desde`
-    is given (used by indicators and reports)."""
+    is given (used by indicators and reports). `instance_ids` restricts the
+    evaluation to those procedures, resolved or not (citizen view);
+    `incluir_en_captura` also returns procedures still being filled in by
+    the citizen, with no legal term running."""
     from ..models.workflow import (
         AssignmentStatus,
         WorkflowDefinition,
@@ -236,7 +242,9 @@ async def semaforo(
     }
     if workflow_id:
         filtro["workflow_id"] = workflow_id
-    if incluir_resueltos_desde:
+    if instance_ids is not None:
+        filtro["instance_id"] = {"$in": list(instance_ids)}
+    elif incluir_resueltos_desde:
         filtro["$or"] = [
             {"status": {"$nin": list(_TERMINAL)}},
             {"completed_at": {"$gte": incluir_resueltos_desde}},
@@ -265,6 +273,19 @@ async def semaforo(
         propias = revisiones.get(t.instance_id, [])
         if not propias:
             # Still being captured by the citizen: the legal term has not started.
+            if incluir_en_captura:
+                resultado.append({
+                    "instance_id": t.instance_id,
+                    "workflow_id": t.workflow_id,
+                    "workflow_name": nombres.get(t.workflow_id, t.workflow_id),
+                    "folio": (t.context or {}).get("folio_seguimiento"),
+                    "user_id": t.user_id,
+                    "status": t.status,
+                    "desenlace": estado_efectivo(t),
+                    "en_captura": True,
+                    "plazo": None,
+                    "color": None,
+                })
             continue
 
         abierta = next((h for h in propias if h.status not in _TERMINAL), None)
@@ -308,6 +329,8 @@ async def semaforo(
             "folio": (t.context or {}).get("folio_seguimiento"),
             "user_id": t.user_id,
             "status": t.status,
+            "desenlace": estado_efectivo(t),
+            "en_captura": False,
             "review_instance_id": (abierta or propias[-1]).instance_id,
             "assigned_user_id": foco.assigned_user_id,
             "assigned_team_id": foco.assigned_team_id,
@@ -334,3 +357,36 @@ def resumen(items: List[Dict[str, Any]]) -> Dict[str, int]:
         if it["color"] in conteo:
             conteo[it["color"]] += 1
     return conteo
+
+
+_ESTADO_CIUDADANO = {"verde": "en_tiempo", "amarillo": "por_vencer", "rojo": "vencido"}
+
+
+def vista_ciudadano(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What the applicant may see about the term of their own procedure: the
+    legal axis only (internal step metrics stay with the staff)."""
+    if not item:
+        return None
+    if item.get("en_captura"):
+        return {"en_captura": True}
+    p = item.get("plazo")
+    if not p:
+        return {"en_captura": False, "sin_plazo": True}
+    return {
+        "en_captura": False,
+        "sin_plazo": False,
+        "fecha_presentacion": p["fecha_presentacion"],
+        "fecha_compromiso": p["fecha_compromiso"],
+        "plazo_dias": p["plazo_dias"],
+        "plazo_habiles": p["plazo_habiles"],
+        "dias_transcurridos": p["dias_transcurridos"],
+        "pausado": p["pausado"],
+        "resuelto": p["resuelto"],
+        "en_plazo": p["en_plazo"],
+        "estado": None if p["resuelto"] else _ESTADO_CIUDADANO[p["color"]],
+    }
+
+
+async def plazos_de_ciudadano(instance_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    items = await semaforo(instance_ids=instance_ids, incluir_en_captura=True)
+    return {i["instance_id"]: vista_ciudadano(i) for i in items}
