@@ -597,3 +597,47 @@ async def sign_document(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to sign document: {str(e)}")
+
+
+@router.get("/semaforo")
+async def get_semaforo(
+    admin: dict = Depends(get_current_admin),
+    workflow_id: Optional[str] = Query(None),
+    color: Optional[str] = Query(None, description="verde | amarillo | rojo"),
+    asignado: Optional[str] = Query(None, description="assigned user or team id"),
+):
+    """Hybrid traffic light of open citizen procedures: legal resolution term
+    plus dwell time in the current step (see services/sla.py)."""
+    from types import SimpleNamespace
+    from ...services import sla
+    from ...services.instance_listing import _asignados
+
+    items = await sla.semaforo(workflow_id=workflow_id)
+    conteo = sla.resumen(items)
+
+    if color:
+        items = [i for i in items if i["color"] == color]
+    if asignado:
+        items = [i for i in items if asignado in (i["assigned_user_id"], i["assigned_team_id"])]
+
+    nombres_ciudadano = await _citizen_names(i["user_id"] for i in items)
+    nombres_asignado = await _asignados([
+        SimpleNamespace(assigned_user_id=i["assigned_user_id"], assigned_team_id=i["assigned_team_id"])
+        for i in items
+    ])
+    for i in items:
+        i["solicitante"] = nombres_ciudadano.get(str(i.pop("user_id")))
+        i["asignado_a"] = (
+            nombres_asignado.get(str(i["assigned_user_id"] or ""))
+            or nombres_asignado.get(str(i["assigned_team_id"] or ""))
+            or (str(i["assigned_team_id"]).replace("_", " ").capitalize() if i["assigned_team_id"] else None)
+        )
+
+    orden = {"rojo": 0, "amarillo": 1, "verde": 2, None: 3}
+    items.sort(key=lambda i: (
+        orden.get(i["color"], 3),
+        -((i["plazo"] or {}).get("avance") or 0),
+        -(i["permanencia_horas"] or 0),
+    ))
+    return {"resumen": conteo, "items": items, "generado": datetime.utcnow()}
+
