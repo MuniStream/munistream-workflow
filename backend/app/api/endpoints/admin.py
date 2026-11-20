@@ -13,7 +13,6 @@ from ...models.workflow import WorkflowInstance, StepExecution, WorkflowDefiniti
 from ...auth.provider import get_current_user, require_permission
 from ...services.estado_instancia import estado_efectivo
 from ...schemas.admin import (
-    PendingApprovalResponse,
     PendingDocumentResponse,
     PendingSignatureResponse,
     ManualReviewResponse,
@@ -33,48 +32,41 @@ router = APIRouter()
 async def get_current_admin(current_user: dict = Depends(require_permission("VIEW_DOCUMENTS"))):
     return current_user
 
-@router.get("/pending-approvals", response_model=List[PendingApprovalResponse])
-async def get_pending_approvals(
-    admin: dict = Depends(get_current_admin),
-    assigned_to: Optional[str] = Query(None),
-    priority: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0)
-):
-    """Get all pending workflow approvals requiring admin action."""
-    try:
-        # Mock data for now - in production, this would query WorkflowInstance collection
-        mock_approvals = [
-            PendingApprovalResponse(
-                instance_id="inst_001",
-                workflow_name="Citizen Registration",
-                citizen_name="Maria González",
-                citizen_id="citizen_001",
-                step_name="Age Verification",
-                submitted_at=datetime.utcnow() - timedelta(hours=2),
-                priority="high",
-                approval_type="age_verification",
-                context={"age": 17, "requires_guardian": True},
-                assigned_to=str(admin.id)
-            ),
-            PendingApprovalResponse(
-                instance_id="inst_002",
-                workflow_name="Building Permit",
-                citizen_name="John Smith",
-                citizen_id="citizen_002",
-                step_name="Manual Review",
-                submitted_at=datetime.utcnow() - timedelta(hours=4),
-                priority="medium",
-                approval_type="permit_approval",
-                context={"permit_type": "residential", "area": "250 sqm"},
-                assigned_to="admin_002"
-            )
-        ]
-        
-        return mock_approvals[offset:offset+limit]
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch pending approvals: {str(e)}")
+
+async def _citizen_names(citizen_ids) -> Dict[str, str]:
+    """Resolve document owners to their real names (Customer _id or keycloak_id)."""
+    from bson import ObjectId
+    from ...models.customer import Customer
+    ids = {str(c) for c in citizen_ids if c}
+    if not ids:
+        return {}
+    oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+    customers = await Customer.find(
+        {"$or": [{"_id": {"$in": oids}}, {"keycloak_id": {"$in": list(ids)}}]}
+    ).to_list()
+    names: Dict[str, str] = {}
+    for c in customers:
+        names[str(c.id)] = c.full_name
+        if c.keycloak_id:
+            names[c.keycloak_id] = c.full_name
+    return names
+
+
+# assignment_status is not cleared when an instance finishes, so a review is
+# only pending while the instance itself is still open.
+_REVIEW_OPEN = [AssignmentStatus.PENDING_REVIEW, AssignmentStatus.UNDER_REVIEW]
+_TERMINAL = ["completed", "failed", "cancelled", "abandoned"]
+# In progress, same criterion as the per-workflow analytics
+# ("paused" means waiting on the citizen or the reviewer).
+_ACTIVE = ["pending", "running", "paused"]
+
+
+def _pending_review_query() -> dict:
+    return {"assignment_status": {"$in": _REVIEW_OPEN}, "status": {"$nin": _TERMINAL}}
+
+
+def _is_pending_review(instance) -> bool:
+    return instance.assignment_status in _REVIEW_OPEN and instance.status not in _TERMINAL
 
 @router.get("/documents", response_model=List[PendingDocumentResponse])
 async def get_all_documents(
@@ -110,10 +102,10 @@ async def get_all_documents(
         
         documents = await DocumentModel.find(query).skip(offset).limit(limit).to_list()
         
+        names = await _citizen_names(d.citizen_id for d in documents)
         filtered_docs = []
         for doc in documents:
-            # Mock citizen name
-            citizen_name_value = f"Citizen {str(doc.citizen_id)[-3:]}"
+            citizen_name_value = names.get(str(doc.citizen_id), str(doc.citizen_id))
             
             # Filter by citizen name if provided
             if citizen_name and citizen_name.lower() not in citizen_name_value.lower():
@@ -156,10 +148,10 @@ async def get_pending_documents(
             
         documents = await DocumentModel.find(query).skip(offset).limit(limit).to_list()
         
+        names = await _citizen_names(d.citizen_id for d in documents)
         pending_documents = []
         for doc in documents:
-            # Mock citizen info for now
-            citizen_name = f"Citizen {str(doc.citizen_id)[-3:]}"
+            citizen_name = names.get(str(doc.citizen_id), str(doc.citizen_id))
             
             # Determine priority based on document type
             priority = "normal"
@@ -205,10 +197,10 @@ async def get_pending_signatures(
         
         documents = await DocumentModel.find(query).skip(offset).limit(limit).to_list()
         
+        names = await _citizen_names(d.citizen_id for d in documents)
         pending_signatures = []
         for doc in documents:
-            # Mock citizen info
-            citizen_name = f"Citizen {str(doc.citizen_id)[-3:]}"
+            citizen_name = names.get(str(doc.citizen_id), str(doc.citizen_id))
             
             # Determine signature type and deadline
             signature_type = doc.document_type
@@ -247,9 +239,10 @@ async def get_manual_reviews(
             "status": DocumentStatus.PENDING
         }).limit(limit).to_list()
         
+        names = await _citizen_names(d.citizen_id for d in low_confidence_docs)
         manual_reviews = []
         for doc in low_confidence_docs:
-            citizen_name = f"Citizen {str(doc.citizen_id)[-3:]}"
+            citizen_name = names.get(str(doc.citizen_id), str(doc.citizen_id))
             
             manual_reviews.append(ManualReviewResponse(
                 review_id=f"fraud_{doc.document_id}",
@@ -268,46 +261,10 @@ async def get_manual_reviews(
                 }
             ))
         
-        # Add some mock duplicate detection reviews
-        if len(manual_reviews) == 0:
-            manual_reviews.append(ManualReviewResponse(
-                review_id="dup_001",
-                type="duplicate_detection",
-                citizen_name="Luis Fernando",
-                citizen_id="citizen_009",
-                workflow_name="Citizen Registration",
-                issue_description="Potential duplicate registration detected. Same name and birth date found in system.",
-                severity="high",
-                created_at=datetime.utcnow() - timedelta(hours=1),
-                context={
-                    "duplicate_count": 2,
-                    "citizen_ids": ["citizen_009", "citizen_010"],
-                    "matching_fields": ["name", "date_of_birth"]
-                }
-            ))
-        
         return manual_reviews
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch manual reviews: {str(e)}")
-
-@router.post("/instances/{instance_id}/approve")
-async def process_approval(
-    instance_id: str,
-    decision: str = Body(...),
-    comments: str = Body(...),
-    admin: dict = Depends(get_current_admin)
-):
-    """Process a workflow approval decision."""
-    require_capability(admin, APPROVE)
-    try:
-        # Mock approval processing for now
-        print(f"Processing approval for instance {instance_id}: {decision} - {comments}")
-        
-        return {"message": "Approval processed successfully", "instance_id": instance_id}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process approval: {str(e)}")
 
 @router.post("/documents/{document_id}/admin-verify")
 async def process_document_verification(
@@ -349,25 +306,6 @@ async def process_document_verification(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process verification: {str(e)}")
 
-@router.post("/manual-reviews/{review_id}/resolve")
-async def resolve_manual_review(
-    review_id: str,
-    resolution: str = Body(...),
-    resolution_notes: str = Body(...),
-    priority: str = Body("normal"),
-    admin: dict = Depends(get_current_admin)
-):
-    """Resolve a manual review item."""
-    require_capability(admin, REVIEW)
-    try:
-        # Mock resolution for now
-        print(f"Resolving review {review_id}: {resolution} - {resolution_notes}")
-        
-        return {"message": "Manual review resolved", "review_id": review_id}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to resolve review: {str(e)}")
-
 @router.get("/stats", response_model=AdminStatsResponse)
 async def get_admin_stats(admin: dict = Depends(get_current_admin)):
     """Get administrative dashboard statistics."""
@@ -384,9 +322,11 @@ async def get_admin_stats(admin: dict = Depends(get_current_admin)):
             "signatures": {"$size": 0}
         }).count()
 
-        # Mock data for workflow approvals and manual reviews
-        pending_approvals = 2  # From mock data above
-        manual_reviews = 1    # From mock data above
+        pending_approvals = await WorkflowInstance.find(_pending_review_query()).count()
+        manual_reviews = await DocumentModel.find({
+            "metadata.confidence_score": {"$lt": 0.7},
+            "status": DocumentStatus.PENDING
+        }).count()
 
         return AdminStatsResponse(
             pending_approvals=pending_approvals,
@@ -445,8 +385,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
 
         # Count instances with pending approvals
         pending_approval_instances = [
-            i for i in all_instances
-            if i.assignment_status in [AssignmentStatus.PENDING_REVIEW, AssignmentStatus.UNDER_REVIEW]
+            i for i in all_instances if _is_pending_review(i)
         ]
 
         # Count manual reviews (documents with low confidence)
@@ -485,7 +424,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
             wf_id = instance.workflow_id
             workflow_metrics_dict[wf_id]["total"] += 1
 
-            if instance.status in ["running", "awaiting_input"]:
+            if instance.status in _ACTIVE:
                 workflow_metrics_dict[wf_id]["active"] += 1
             elif estado_efectivo(instance) == "rejected":
                 workflow_metrics_dict[wf_id]["rejected"] += 1
@@ -496,7 +435,7 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
             elif instance.status == "failed":
                 workflow_metrics_dict[wf_id]["failed"] += 1
 
-            if instance.assignment_status in [AssignmentStatus.PENDING_REVIEW, AssignmentStatus.UNDER_REVIEW]:
+            if _is_pending_review(instance):
                 workflow_metrics_dict[wf_id]["pending_approvals"] += 1
 
         # Get workflow definitions for names
@@ -588,13 +527,22 @@ async def get_dashboard(admin: dict = Depends(get_current_admin)):
             if instance.assigned_user_id:
                 staff_workload[instance.assigned_user_id] += 1
 
-        # System health check
+        # System health: measured database round-trip, not a constant
+        import time
+        db_latency_ms = None
+        try:
+            t0 = time.perf_counter()
+            await WorkflowInstance.get_motor_collection().database.command("ping")
+            db_latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+            database_status = "connected"
+        except Exception:
+            database_status = "unreachable"
         system_health = {
-            "status": "healthy",
-            "database": "connected",
+            "status": "healthy" if database_status == "connected" else "degraded",
+            "database": database_status,
             "pending_items_backlog": pending_items.total_pending > 100,
             "high_priority_items": priority_breakdown.get("high", 0),
-            "average_response_time_ms": 150,  # Would need actual monitoring
+            "db_latency_ms": db_latency_ms,
             "last_check": now.isoformat()
         }
 

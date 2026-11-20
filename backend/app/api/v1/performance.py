@@ -8,9 +8,15 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
 from ...services.workflow_service import workflow_service
+from ...auth.provider import require_permission
 from ...services.estado_instancia import EXPRESION_ESTADO_EFECTIVO, estado_efectivo
 
 router = APIRouter()
+
+# Analytics expose operational data of every instance: staff only.
+_VIEW = [Depends(require_permission("VIEW_INSTANCES"))]
+# Manual step execution/validation mutates state: managers only.
+_MANAGE = [Depends(require_permission("MANAGE_WORKFLOWS"))]
 
 
 def _median(values: List[float]) -> Optional[float]:
@@ -139,7 +145,7 @@ class WorkflowAnalyticsResponse(BaseModel):
     volume_over_time: List[VolumePoint]
 
 
-@router.get("/workflows/{workflow_id}/analytics", response_model=WorkflowAnalyticsResponse)
+@router.get("/workflows/{workflow_id}/analytics", response_model=WorkflowAnalyticsResponse, dependencies=_VIEW)
 async def get_workflow_analytics(
     workflow_id: str,
     days: int = Query(30, description="Time window in days for the volume series"),
@@ -346,13 +352,18 @@ async def get_workflow_analytics(
         raise HTTPException(status_code=500, detail=f"Failed to compute workflow analytics: {str(e)}")
 
 
-@router.get("/steps/{step_id}/metrics", response_model=PerformanceMetricsResponse)
-async def get_step_performance_metrics(step_id: str):
+@router.get("/steps/{step_id}/metrics", response_model=PerformanceMetricsResponse, dependencies=_VIEW)
+async def get_step_performance_metrics(
+    step_id: str,
+    workflow_id: Optional[str] = Query(None, description="Restrict to one workflow (step ids repeat across workflows)"),
+):
     """Get performance metrics for a specific step using new DAG system"""
     from ...models.workflow import StepExecution
-    
-    # Get all executions for this step
-    executions = await StepExecution.find(StepExecution.step_id == step_id).to_list()
+
+    query = {"step_id": step_id}
+    if workflow_id:
+        query["workflow_id"] = workflow_id
+    executions = await StepExecution.find(query).to_list()
     
     if not executions:
         raise HTTPException(status_code=404, detail=f"No executions found for step {step_id}")
@@ -399,7 +410,7 @@ async def get_step_performance_metrics(step_id: str):
     )
 
 
-@router.post("/steps/execute")
+@router.post("/steps/execute", dependencies=_MANAGE)
 async def execute_step_manually(
     request: StepExecutionRequest,
     user_id: str = Query(..., description="User ID executing the step")
@@ -505,7 +516,7 @@ async def execute_step_manually(
         raise HTTPException(status_code=500, detail=f"Step execution failed: {str(e)}")
 
 
-@router.post("/steps/validate")
+@router.post("/steps/validate", dependencies=_MANAGE)
 async def validate_step(request: StepValidationRequest):
     """Validate a step without executing it (new DAG system)"""
     # Basic validation using manual execution in dry_run mode
@@ -530,7 +541,7 @@ async def validate_step(request: StepValidationRequest):
         raise HTTPException(status_code=500, detail=f"Step validation failed: {str(e)}")
 
 
-@router.get("/workflows/{workflow_id}/performance", response_model=WorkflowPerformanceResponse)
+@router.get("/workflows/{workflow_id}/performance", response_model=WorkflowPerformanceResponse, dependencies=_VIEW)
 async def get_workflow_performance(
     workflow_id: str,
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
@@ -553,7 +564,7 @@ async def get_workflow_performance(
         
         for task_id in dag.tasks.keys():
             try:
-                metrics_response = await get_step_performance_metrics(task_id)
+                metrics_response = await get_step_performance_metrics(task_id, workflow_id=workflow_id)
                 step_metrics.append(metrics_response)
             except HTTPException:
                 # Skip steps with no data
@@ -608,7 +619,7 @@ async def get_workflow_performance(
         raise HTTPException(status_code=500, detail=f"Failed to get workflow performance: {str(e)}")
 
 
-@router.get("/workflows/{workflow_id}/bottlenecks", response_model=BottleneckAnalysisResponse)
+@router.get("/workflows/{workflow_id}/bottlenecks", response_model=BottleneckAnalysisResponse, dependencies=_VIEW)
 async def analyze_workflow_bottlenecks(
     workflow_id: str,
     threshold_ms: int = Query(5000, description="Threshold in milliseconds for slow steps"),
@@ -677,7 +688,7 @@ async def analyze_workflow_bottlenecks(
         raise HTTPException(status_code=500, detail=f"Failed to analyze bottlenecks: {str(e)}")
 
 
-@router.get("/workflows/{workflow_id}/timing-analysis")
+@router.get("/workflows/{workflow_id}/timing-analysis", dependencies=_VIEW)
 async def get_workflow_timing_analysis(
     workflow_id: str,
     instance_id: Optional[str] = Query(None, description="Specific instance to analyze")
@@ -730,7 +741,7 @@ async def get_workflow_timing_analysis(
         raise HTTPException(status_code=500, detail=f"Failed to get timing analysis: {str(e)}")
 
 
-@router.get("/workflows")
+@router.get("/workflows", dependencies=_VIEW)
 async def list_workflows():
     """List all available workflows (new DAG system)"""
     # Get workflows from DAG bag
@@ -749,7 +760,7 @@ async def list_workflows():
     return {"workflows": workflows}
 
 
-@router.get("/steps")
+@router.get("/steps", dependencies=_VIEW)
 async def list_steps(
     workflow_id: Optional[str] = Query(None, description="Filter steps by workflow")
 ):
@@ -795,69 +806,62 @@ async def list_steps(
         raise HTTPException(status_code=500, detail=f"Failed to list steps: {str(e)}")
 
 
-@router.get("/stats")
+@router.get("/stats", dependencies=_VIEW)
 async def get_workflow_stats():
-    """Get overall workflow statistics"""
+    """Overall workflow statistics, aggregated in MongoDB (no full collection load)."""
     try:
         from ...models.workflow import WorkflowInstance
-        from datetime import datetime, timedelta
-        
-        # Get real statistics from database
-        all_instances = await WorkflowInstance.find().to_list()
-        
-        # Calculate basic stats
-        total_instances = len(all_instances)
-        active_instances = len([i for i in all_instances if i.status in ["running", "awaiting_input"]])
-        
-        # Get completed today
+
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        completed_today = len([i for i in all_instances if i.completed_at and i.completed_at >= today])
-        
-        # Calculate average completion time from completed instances
-        completed_instances = [i for i in all_instances if i.duration_seconds is not None]
-        avg_completion_time_hours = (
-            sum(i.duration_seconds for i in completed_instances) / 3600 / len(completed_instances)
-            if completed_instances else 0
-        )
-        
-        # Success rate
-        # Terminados: completados, rechazados y fallidos; solo el completado es éxito.
-        finished_instances = [i for i in all_instances if i.status in ["completed", "failed"]]
-        success_rate = (
-            len([i for i in finished_instances if estado_efectivo(i) == "completed"]) / len(finished_instances)
-            if finished_instances else 0
-        )
-        
-        # Group by workflow
-        by_workflow = {}
-        active_by_workflow = {}
-        for instance in all_instances:
-            workflow_id = instance.workflow_id
-            by_workflow[workflow_id] = by_workflow.get(workflow_id, 0) + 1
-            # In progress, same criterion as the per-workflow analytics:
-            # "paused" means waiting on the citizen or the reviewer.
-            if instance.status in ["pending", "running", "paused"]:
-                active_by_workflow[workflow_id] = active_by_workflow.get(workflow_id, 0) + 1
-        
-        # Group by status
-        by_status = {}
-        for instance in all_instances:
-            status = estado_efectivo(instance)
-            by_status[status] = by_status.get(status, 0) + 1
-        
-        stats = {
-            "total_instances": total_instances,
-            "active_instances": active_instances,
-            "completed_today": completed_today,
-            "avg_completion_time_hours": round(avg_completion_time_hours, 2),
-            "success_rate": round(success_rate, 2),
-            "by_workflow": by_workflow,
-            "active_by_workflow": active_by_workflow,
-            "by_status": by_status
+
+        def count_where(cond):
+            return {"$sum": {"$cond": [cond, 1, 0]}}
+
+        pipeline = [
+            {"$addFields": {"_estado": EXPRESION_ESTADO_EFECTIVO}},
+            {"$facet": {
+                "totals": [{"$group": {
+                    "_id": None,
+                    "total": {"$sum": 1},
+                    "active": count_where({"$in": ["$status", ["running", "awaiting_input"]]}),
+                    "completed_today": count_where({"$gte": ["$completed_at", today]}),
+                    "duration_sum": {"$sum": {"$ifNull": ["$duration_seconds", 0]}},
+                    "duration_n": count_where({"$ne": [{"$ifNull": ["$duration_seconds", None]}, None]}),
+                    # Finished = completed (incl. rejected) or failed; only completed is success.
+                    "finished": count_where({"$in": ["$status", ["completed", "failed"]]}),
+                    "succeeded": count_where({"$and": [
+                        {"$in": ["$status", ["completed", "failed"]]},
+                        {"$eq": ["$_estado", "completed"]},
+                    ]}),
+                }}],
+                "by_workflow": [{"$group": {
+                    "_id": "$workflow_id",
+                    "n": {"$sum": 1},
+                    # In progress, same criterion as the per-workflow analytics:
+                    # "paused" means waiting on the citizen or the reviewer.
+                    "active": count_where({"$in": ["$status", ["pending", "running", "paused"]]}),
+                }}],
+                "by_status": [{"$group": {"_id": "$_estado", "n": {"$sum": 1}}}],
+            }},
+        ]
+        cursor = WorkflowInstance.get_motor_collection().aggregate(pipeline)
+        result = (await cursor.to_list(length=1))[0]
+
+        t = result["totals"][0] if result["totals"] else {}
+        duration_n = t.get("duration_n", 0)
+        finished = t.get("finished", 0)
+
+        return {
+            "total_instances": t.get("total", 0),
+            "active_instances": t.get("active", 0),
+            "completed_today": t.get("completed_today", 0),
+            "avg_completion_time_hours": round(t["duration_sum"] / 3600 / duration_n, 2) if duration_n else 0,
+            "success_rate": round(t["succeeded"] / finished, 2) if finished else 0,
+            "by_workflow": {w["_id"]: w["n"] for w in result["by_workflow"]},
+            "active_by_workflow": {w["_id"]: w["active"] for w in result["by_workflow"] if w["active"]},
+            "by_status": {st["_id"]: st["n"] for st in result["by_status"]},
         }
-        
-        return stats
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
 
