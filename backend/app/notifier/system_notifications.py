@@ -164,6 +164,47 @@ _MODIFICACIONES_EN_WA = _whatsapp(
 )
 
 
+# Overdue review (review_escalation): event_data usually carries `plazo`.
+_DEMORA_ES_EMAIL = _email(
+    subject="Su trámite está demorado: {{ workflow.nombre }}",
+    body=(
+        "Estimado(a) {{ ciudadano.nombre }}:\n\n"
+        "La etapa \"{{ paso.nombre }}\" de su trámite \"{{ workflow.nombre }}\" (folio "
+        "{{ instancia.folio }}) superó su plazo de atención"
+        "{% if evento.datos.plazo is defined %} de {{ evento.datos.plazo }}{% endif %}. "
+        "Su trámite sigue abierto: lo turnamos con prioridad al área responsable y le "
+        "avisaremos cuando avance. No necesita hacer nada.\n\n"
+        "{% if url_tramite %}Puede consultar su estado en: {{ url_tramite }}\n\n{% endif %}"
+        "Atentamente,\n{{ remitente }}"
+    ),
+)
+_DEMORA_ES_WA = _whatsapp(
+    "Estimado(a) {{ ciudadano.nombre }}: su trámite \"{{ workflow.nombre }}\" "
+    "(folio {{ instancia.folio }}) superó el plazo de atención de la etapa \"{{ paso.nombre }}\". "
+    "Sigue abierto y lo turnamos con prioridad al área responsable; le avisaremos cuando avance."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
+)
+_DEMORA_EN_EMAIL = _email(
+    subject="Your request is delayed: {{ workflow.nombre }}",
+    body=(
+        "Dear {{ ciudadano.nombre }}:\n\n"
+        "The stage \"{{ paso.nombre }}\" of your request \"{{ workflow.nombre }}\" (reference "
+        "{{ instancia.folio }}) exceeded its"
+        "{% if evento.datos.plazo is defined %} {{ evento.datos.plazo }}{% endif %} service deadline. "
+        "Your request is still open: we escalated it to the responsible area and will let "
+        "you know when it progresses. You do not need to do anything.\n\n"
+        "{% if url_tramite %}You can check its status at: {{ url_tramite }}\n\n{% endif %}"
+        "Sincerely,\n{{ remitente }}"
+    ),
+)
+_DEMORA_EN_WA = _whatsapp(
+    "Dear {{ ciudadano.nombre }}: your request \"{{ workflow.nombre }}\" "
+    "(reference {{ instancia.folio }}) exceeded the deadline of the stage \"{{ paso.nombre }}\". "
+    "It is still open and was escalated to the responsible area; we will let you know when it progresses."
+    "{% if url_tramite %} {{ url_tramite }}{% endif %}"
+)
+
+
 # Support requests: event_data carries `folio` and `asunto`.
 _ATENCION_ES_EMAIL = _email(
     subject="Respuesta a su solicitud de atención {{ evento.datos.folio }}",
@@ -402,6 +443,25 @@ SYSTEM_NOTIFICATIONS: List[SystemNotification] = [
             ("es", NotificationChannel.WHATSAPP): _ENTIDAD_ES_WA,
             ("en", NotificationChannel.EMAIL): _ENTIDAD_EN_EMAIL,
             ("en", NotificationChannel.WHATSAPP): _ENTIDAD_EN_WA,
+        },
+    ),
+    SystemNotification(
+        key="revision_demorada",
+        event_type=EventType.REVIEW_OVERDUE,
+        title_i18n={
+            "es": "Trámite demorado",
+            "en": "Request delayed",
+        },
+        description_i18n={
+            "es": "Aviso cuando la revisión de su trámite supera su plazo y se turna con prioridad.",
+            "en": "Notice when the review of your request exceeds its deadline and is escalated.",
+        },
+        default_channels=_BOTH_CHANNELS,
+        templates={
+            ("es", NotificationChannel.EMAIL): _DEMORA_ES_EMAIL,
+            ("es", NotificationChannel.WHATSAPP): _DEMORA_ES_WA,
+            ("en", NotificationChannel.EMAIL): _DEMORA_EN_EMAIL,
+            ("en", NotificationChannel.WHATSAPP): _DEMORA_EN_WA,
         },
     ),
     SystemNotification(

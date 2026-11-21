@@ -59,6 +59,8 @@ class EventType(str, Enum):
     MODIFICATION_REQUESTED = "modification_requested"
     # Not a workflow lifecycle event: staff answered a citizen support request.
     SUPPORT_REPLIED = "support_replied"
+    # A review the request waits on outlived its deadline and was escalated.
+    REVIEW_OVERDUE = "review_overdue"
 
 
 class WorkflowHook(Document):
@@ -341,6 +343,11 @@ class WorkflowInstance(Document):
     approval_comments: Optional[str] = Field(None, description="Approver's comments")
     rejection_reason: Optional[str] = Field(None, description="Reason for rejection if applicable")
     
+    # Escalation of a review that outlived its deadline (review_escalation).
+    # Kept apart from `assignment_status` so the reviewer can keep working it.
+    escalation_level: int = Field(default=0, description="Times the review was escalated for being overdue")
+    escalated_at: Optional[datetime] = Field(None, description="When the review was last escalated")
+
     # Terminal status
     terminal_status: Optional[str] = Field(None, description="Final status (SUCCESS, FAILURE, etc.)")
     terminal_message: Optional[str] = Field(None, description="Final status message")
@@ -498,6 +505,25 @@ class WorkflowInstance(Document):
         })
         self.updated_at = datetime.utcnow()
     
+    def mark_overdue(self, level: int, reason: str, priority: int = 10):
+        """Escalate an overdue review without changing its review state."""
+        now = datetime.utcnow()
+        self.escalation_level = level
+        self.escalated_at = now
+        self.priority = max(self.priority or 0, priority)
+        self.previous_assignments.append({
+            "user_id": self.assigned_user_id,
+            "team_id": self.assigned_team_id,
+            "status": self.assignment_status,
+            "assigned_at": self.assigned_at,
+            "assigned_by": self.assigned_by,
+            "escalated_at": now,
+            "escalated_by": "system",
+            "escalation_level": level,
+            "reason": reason,
+        })
+        self.updated_at = now
+
     def unassign(self, reason: str = "manual", unassigned_by: Optional[str] = None):
         """Remove assignment from instance"""
         # Save to history

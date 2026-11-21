@@ -54,6 +54,7 @@ class AssignmentResponse(BaseModel):
 
     # Metadata
     priority: int = Field(default=5, description="Priority level")
+    escalation_level: int = Field(default=0, description="Times the review was escalated for being overdue")
     created_at: datetime = Field(..., description="When instance was created")
     updated_at: datetime = Field(..., description="Last update time")
 

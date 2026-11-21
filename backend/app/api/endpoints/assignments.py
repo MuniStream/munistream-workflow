@@ -145,8 +145,10 @@ async def list_assignments(
         total = await WorkflowInstance.find(query).count()
         print(f"[ASSIGNMENTS DEBUG] Total count: {total}")
 
-        # Get paginated results ordered by most recent first
-        instances = await WorkflowInstance.find(query).sort([("created_at", -1)]).skip(skip).limit(limit).to_list()
+        # Overdue (escalated) reviews first, then the most recent.
+        instances = await WorkflowInstance.find(query).sort(
+            [("escalation_level", -1), ("created_at", -1)]
+        ).skip(skip).limit(limit).to_list()
         print(f"[ASSIGNMENTS DEBUG] Retrieved {len(instances)} instances")
 
         # Nombres de workflow en una sola consulta, para el propio tramite y para
@@ -229,6 +231,7 @@ async def list_assignments(
                     or inst.parent_workflow_id
                 ),
                 priority=inst.priority,
+                escalation_level=inst.escalation_level or 0,
                 created_at=inst.created_at,
                 updated_at=inst.updated_at,
                 citizen_email=inst.context.get("parent_customer_email"),
