@@ -65,15 +65,32 @@ def _dedupe(values: Iterable[Optional[str]]) -> List[str]:
 
 
 async def _team_members(team_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Reviewers in the team's Keycloak group, plus the active members of the
+    team stored in Mongo (the team administration screen edits those)."""
     if not team_id:
         return []
+    members: List[Dict[str, Any]] = []
     try:
-        from .keycloak_group_assignment import keycloak_group_assignment_service
+        from .user_teams import team_members
 
-        return await keycloak_group_assignment_service.get_group_members_with_role(team_id) or []
+        members += await team_members(team_id) or []
     except Exception as exc:  # noqa: BLE001 - recipients are best effort
-        logger.warning("could not list members of team %s: %s", team_id, exc)
-        return []
+        logger.warning("could not list Keycloak members of team %s: %s", team_id, exc)
+    try:
+        from bson import ObjectId
+
+        from ..models.team import TeamModel
+        from ..models.user import UserModel
+
+        team = await TeamModel.find_one(TeamModel.team_id == team_id)
+        ids = [m.user_id for m in (getattr(team, "members", None) or []) if m.is_active]
+        oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+        if oids:
+            for user in await UserModel.find({"_id": {"$in": oids}}).to_list():
+                members.append({"id": str(user.id), "email": user.email})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not list stored members of team %s: %s", team_id, exc)
+    return members
 
 
 async def _user_email(user_id: Optional[str], known_members: List[Dict[str, Any]]) -> Optional[str]:
