@@ -154,6 +154,7 @@ async def enrich_instances(instancias: Sequence[Any]) -> List[Dict[str, Any]]:
                 or ctx.get("parent_customer_email")
             ),
             "completed_steps_count": hechos,
+            "escalation_level": getattr(i, "escalation_level", 0) or 0,
             "assigned_to_name": (
                 asignados.get(str(getattr(i, "assigned_user_id", "") or ""))
                 or asignados.get(str(getattr(i, "assigned_team_id", "") or ""))

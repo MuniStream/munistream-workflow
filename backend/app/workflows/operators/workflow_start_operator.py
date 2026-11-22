@@ -12,6 +12,11 @@ from enum import Enum
 from .base import BaseOperator, TaskResult, TaskStatus
 from ...models.workflow import WorkflowInstance, WorkflowType, AssignmentType, AssignmentStatus
 from ...core.logging_config import get_workflow_logger, set_workflow_context
+from ...services.review_escalation import (
+    due_escalation_level,
+    escalate_overdue_review,
+    timeout_failure_message,
+)
 
 logger = get_workflow_logger(__name__)
 
@@ -65,16 +70,6 @@ _NOISE_KEYS = {
 _NOISE_PREFIXES = ('_', 'instance', 'workflow', 'task_instance',
                    'verify_', 'explore_', 'sign_document_', 'parent_', 'child_')
 _NOISE_SUFFIXES = ('_submitted_at', '_input', '_result', '_form_config')
-
-
-def mensaje_de_vencimiento(paso: str, minutos: int) -> str:
-    """Lo que lee el ciudadano cuando el paso que espera a otro flujo se vence.
-    Antes era «Timeout waiting for child workflow after 1440 minutes», y como
-    además no llegaba al seguimiento, el trámite se veía fallido sin explicación."""
-    horas = minutos / 60
-    plazo = f"{horas:g} horas" if horas < 48 or horas % 24 else f"{horas / 24:g} días"
-    return (f"«{paso}» no se completó en el plazo de {plazo}. El trámite se cerró sin resolverse; "
-            "puedes iniciarlo de nuevo.")
 
 
 def datos_del_hijo(child_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -156,6 +151,9 @@ class WorkflowStartOperator(BaseOperator):
         clear_completed_tasks: Optional[List[str]] = None,
         propagate_terminal: Tuple[str, ...] = ("rejected",),
         child_static: Optional[Dict[str, Any]] = None,
+        on_timeout: str = "escalate",
+        escalate_to: Optional[Dict[str, str]] = None,
+        max_escalations: int = 3,
         **kwargs
     ):
         """
@@ -167,7 +165,8 @@ class WorkflowStartOperator(BaseOperator):
             workflow_type: Type of workflow (ADMIN, PROCESS, etc.)
             assign_to: Assignment configuration - {"team": "name"} or {"admin": "email"}
             wait_for_completion: Whether to wait for child workflow to complete
-            timeout_minutes: Maximum time to wait for completion
+            timeout_minutes: Deadline for the child; what happens when it
+                passes is set by `on_timeout`
             pass_context: Whether to pass context from parent to child
             context_mapping: Map parent context keys to child keys
             required_status: Expected terminal status for success (if waiting)
@@ -185,6 +184,14 @@ class WorkflowStartOperator(BaseOperator):
             child_static: Valores fijos que se ponen en el contexto del hijo
                 (p. ej. el modo en que debe correr una validación compartida).
                 `context_mapping` solo copia claves que existen en el padre.
+            on_timeout: "escalate" (default) keeps the request waiting and
+                escalates the child once per elapsed `timeout_minutes`, up to
+                `max_escalations` (see services/review_escalation); "fail"
+                cancels the child and fails the request.
+            escalate_to: {"team": "<group>"} whose members are also emailed
+                when the child is escalated (e.g. the area's supervisors).
+            max_escalations: Escalation notices sent before going quiet; the
+                child stays marked as escalated.
             **kwargs: Additional arguments passed to BaseOperator
         """
         # Lanzar un sub-workflow (p.ej. validación administrativa) es orquestación
@@ -210,6 +217,11 @@ class WorkflowStartOperator(BaseOperator):
         self.clear_completed_tasks = clear_completed_tasks or []
         self.propagate_terminal = tuple(propagate_terminal)
         self.child_static = dict(child_static or {})
+        if on_timeout not in ("escalate", "fail"):
+            raise ValueError(f"on_timeout must be 'escalate' or 'fail', not {on_timeout!r}")
+        self.on_timeout = on_timeout
+        self.escalate_to = escalate_to
+        self.max_escalations = max(1, int(max_escalations))
 
         # State key will be set per instance to ensure uniqueness
         self._state_key = None
@@ -391,12 +403,35 @@ class WorkflowStartOperator(BaseOperator):
                 }
             )
 
-    def _cancelar_hijo_vencido(self) -> None:
+    def _cancel_overdue_child(self) -> None:
         try:
             from ...services.workflow_service import workflow_service
             workflow_service.executor.cancel_instance(self.child_instance_id)
-        except Exception as exc:  # no debe ocultar el vencimiento del padre
-            logger.warning(f"No se pudo cancelar el flujo hijo vencido {self.child_instance_id}: {exc}")
+        except Exception as exc:  # must not hide the parent's timeout
+            logger.warning(f"Could not cancel overdue child workflow {self.child_instance_id}: {exc}")
+
+    async def _escalate_if_due(self, context: Dict[str, Any], child: WorkflowInstance,
+                               elapsed_minutes: float) -> None:
+        level = due_escalation_level(elapsed_minutes, self.timeout_minutes,
+                                     child.escalation_level or 0, self.max_escalations)
+        if level is None:
+            return
+        try:
+            summary = await escalate_overdue_review(
+                child=child,
+                parent_context=context,
+                step_id=self.task_id,
+                step_name=self.name or self.task_id,
+                level=level,
+                max_escalations=self.max_escalations,
+                timeout_minutes=self.timeout_minutes,
+                elapsed_minutes=elapsed_minutes,
+                escalate_to_team=(self.escalate_to or {}).get("team"),
+            )
+            self._operator_state["escalation"] = summary
+            context[self._state_key] = self._operator_state
+        except Exception:  # escalation is a notice; the wait goes on regardless
+            logger.exception(f"Could not escalate overdue child workflow {self.child_instance_id}")
 
     def _prepare_child_context(self, parent_context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -791,26 +826,28 @@ class WorkflowStartOperator(BaseOperator):
                 }
             )
 
-        # Check for timeout
+        # Past the deadline: escalate (default) or, if the step asks for it,
+        # cancel the child and fail the request.
         if self.start_time:
             elapsed_minutes = (datetime.utcnow() - self.start_time).total_seconds() / 60
-            if elapsed_minutes > self.timeout_minutes:
-                logger.warning(f"Child workflow timed out")
-                # El hijo (p. ej. la validación que espera a un revisor) ya no le
-                # sirve a nadie: sin cancelarlo se quedaba en la bandeja del
-                # revisor apuntando a un trámite muerto.
-                self._cancelar_hijo_vencido()
-                motivo = mensaje_de_vencimiento(self.name or self.task_id, self.timeout_minutes)
-                return TaskResult(
-                    status=TaskStatus.FAILED,
-                    error=motivo,
-                    data={
-                        "error": motivo,
-                        "child_workflow_id": self.child_instance_id,
-                        "child_status": child.status,
-                        "elapsed_minutes": elapsed_minutes
-                    }
-                )
+            if elapsed_minutes > self.timeout_minutes and child.status not in ("completed", "failed", "cancelled"):
+                if self.on_timeout == "fail":
+                    logger.warning(f"Child workflow timed out")
+                    # Without cancelling it, the child stayed in the reviewer's
+                    # inbox pointing at a dead request.
+                    self._cancel_overdue_child()
+                    reason = timeout_failure_message(self.name or self.task_id, self.timeout_minutes)
+                    return TaskResult(
+                        status=TaskStatus.FAILED,
+                        error=reason,
+                        data={
+                            "error": reason,
+                            "child_workflow_id": self.child_instance_id,
+                            "child_status": child.status,
+                            "elapsed_minutes": elapsed_minutes
+                        }
+                    )
+                await self._escalate_if_due(context, child, elapsed_minutes)
 
         # Check if completed
         print(f"[DEBUG] child.status = '{child.status}'")
@@ -1008,6 +1045,9 @@ class WorkflowStartOperator(BaseOperator):
         elif child.assignment_status == AssignmentStatus.UNDER_REVIEW:
             status_message = f"Under review by {child.assigned_user_id or child.assigned_team_id}"
 
+        if child.escalation_level:
+            status_message = f"{status_message} (escalated, level {child.escalation_level})"
+
         logger.debug(f"Child workflow still in progress")
 
         # Update state with last check time
@@ -1023,6 +1063,7 @@ class WorkflowStartOperator(BaseOperator):
                 "child_status": child_status,
                 "assignment_status": child.assignment_status.value if child.assignment_status else None,
                 "assigned_to": child.assigned_user_id or child.assigned_team_id,
+                "escalation_level": child.escalation_level or 0,
                 "message": status_message,
                 "elapsed_minutes": (datetime.utcnow() - self.start_time).total_seconds() / 60 if self.start_time else 0,
                 self._state_key: self._operator_state  # Persist state

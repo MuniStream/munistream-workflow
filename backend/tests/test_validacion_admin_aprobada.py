@@ -59,7 +59,7 @@ def test_todo_fallo_declara_su_causa():
 
 
 def test_el_vencimiento_se_explica_al_ciudadano():
-    from app.workflows.operators.workflow_start_operator import mensaje_de_vencimiento
+    from app.services.review_escalation import timeout_failure_message as mensaje_de_vencimiento
 
     assert mensaje_de_vencimiento("Validación Administrativa", 1440) == (
         "«Validación Administrativa» no se completó en el plazo de 24 horas. El trámite se cerró sin "
@@ -79,7 +79,7 @@ def test_el_vencimiento_cancela_al_hijo(monkeypatch):
             cancelados.append(instance_id)
 
     monkeypatch.setattr(servicio.workflow_service, "executor", Ejecutor(), raising=False)
-    op = _operador()
+    op = _operador(on_timeout="fail")
     op.child_instance_id = "hijo-1"
-    op._cancelar_hijo_vencido()
+    op._cancel_overdue_child()
     assert cancelados == ["hijo-1"]
